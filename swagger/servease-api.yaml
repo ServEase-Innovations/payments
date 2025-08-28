@@ -1,0 +1,463 @@
+openapi: 3.0.3
+info:
+  title: Servease API
+  description: API for Servease platform - customers, service providers, engagements, payments, wallets
+  version: 1.0.3
+
+servers:
+  - url: http://localhost:5000/api
+
+tags:
+  - name: Customers
+  - name: Providers
+  - name: Engagements
+  - name: Payments
+  - name: Wallets
+
+paths:
+  /engagements:
+    get:
+      summary: Get all engagements
+      tags: [Engagements]
+      responses:
+        "200":
+          description: List of engagements
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Engagement"
+
+    post:
+      summary: Create a new engagement (with payment + provider payout)
+      tags: [Engagements]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EngagementCreate"
+      responses:
+        "201":
+          description: Engagement, payment, and payout created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngagementFull"
+
+  /engagements/{id}:
+    put:
+      summary: Update an existing engagement (date, time, etc.)
+      tags: [Engagements]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: ID of the engagement to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EngagementUpdate"
+      responses:
+        "200":
+          description: Engagement updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Engagement"
+        "404":
+          description: Engagement not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Engagement not found
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Server error
+
+  /payments/verify:
+    post:
+      tags: [Payments]
+      summary: Verify Razorpay payment and mark as completed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentVerify'
+      responses:
+        "200":
+          description: Payment verified and completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Payment verified and completed successfully
+        "400":
+          description: Invalid payment signature
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Invalid payment signature
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Server error
+  
+  /customers/{customerId}/leaves:
+    post:
+      summary: Apply vacation leave for a customer
+      description: >
+        Applies vacation leave for SHORT_TERM or MONTHLY engagements.  
+        Refund = 75% of vacation amount credited to customer wallet,  
+        25% retained by ServEaso.  
+        Also records audit logs in **engagement_modifications**.
+      tags:
+        - Customer Leaves
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          description: ID of the customer applying leave
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - engagement_id
+                - leave_start_date
+                - leave_end_date
+                - leave_type
+              properties:
+                engagement_id:
+                  type: integer
+                  example: 8
+                leave_start_date:
+                  type: string
+                  format: date
+                  example: "2025-09-01"
+                leave_end_date:
+                  type: string
+                  format: date
+                  example: "2025-09-10"
+                leave_type:
+                  type: string
+                  enum: [VACATION]
+                  example: VACATION
+      responses:
+        "200":
+          description: Vacation leave applied successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Vacation applied successfully
+                  leave:
+                    type: object
+                    properties:
+                      leave_id:
+                        type: integer
+                        example: 301
+                      customer_id:
+                        type: integer
+                        example: 1
+                      engagement_id:
+                        type: integer
+                        example: 8
+                      leave_start_date:
+                        type: string
+                        format: date
+                        example: "2025-09-01"
+                      leave_end_date:
+                        type: string
+                        format: date
+                        example: "2025-09-10"
+                      leave_type:
+                        type: string
+                        example: VACATION
+                      total_days:
+                        type: integer
+                        example: 10
+                      refund_amount:
+                        type: integer
+                        example: 1000
+                      status:
+                        type: string
+                        example: APPROVED
+                  refund:
+                    type: object
+                    properties:
+                      wallet_credit:
+                        type: integer
+                        example: 1000
+                      servease_cut:
+                        type: integer
+                        example: 330
+                      vacation_amount:
+                        type: integer
+                        example: 1330
+        "400":
+          description: Invalid request (wrong leave type or booking type)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Vacation only applies to SHORT_TERM or MONTHLY bookings"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Error applying vacation"
+
+  /wallets/{customerId}:
+    get:
+      summary: Get wallet balance & transactions of a customer
+      description: Returns the current wallet balance and recent transactions for a given customer.
+      tags:
+        - Wallets
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          description: ID of the customer whose wallet needs to be fetched
+          schema:
+            type: integer
+            example: 1
+      responses:
+        '200':
+          description: Successful response with wallet balance and transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customer_id:
+                    type: integer
+                    example: 1
+                  wallet_id:
+                    type: integer
+                    example: 5
+                  balance:
+                    type: number
+                    format: float
+                    example: 2700.00
+                  transactions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        transaction_id:
+                          type: integer
+                          example: 12
+                        wallet_id:
+                          type: integer
+                          example: 5
+                        engagement_id:
+                          type: integer
+                          nullable: true
+                          example: 10
+                        amount:
+                          type: number
+                          format: float
+                          example: 2700
+                        transaction_type:
+                          type: string
+                          enum: [CREDIT, DEBIT]
+                          example: CREDIT
+                        description:
+                          type: string
+                          example: Vacation refund for 9 days
+                        balance_after:
+                          type: number
+                          format: float
+                          example: 2700
+                        created_at:
+                          type: string
+                          format: date-time
+                          example: 2025-08-28T22:59:57.134Z
+        '404':
+          description: Wallet not found for this customer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Wallet not found for this customer
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Failed to fetch wallet
+
+
+components:
+  schemas:
+    Engagement:
+      type: object
+      properties:
+        engagement_id: { type: integer }
+        customer_id: { type: integer }
+        provider_id: { type: integer }
+        service_type: { type: string }
+        booking_type: { type: string }
+        responsibilities:
+          type: object
+          additionalProperties: true
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        start_time: { type: string, format: time, example: "10:00:00" }
+        end_time: { type: string, format: time, example: "11:00:00" }
+        base_amount: { type: number, format: float }
+        task_status: { type: string, enum: [NOT_STARTED, IN_PROGRESS, COMPLETED] }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    EngagementUpdate:
+      type: object
+      properties:
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        start_time: { type: string, format: time, example: "10:00:00" }
+        end_time: { type: string, format: time, example: "11:00:00" }
+        task_status: { type: string, enum: [NOT_STARTED, IN_PROGRESS, COMPLETED] }
+        active: { type: boolean }
+
+    Payment:
+      type: object
+      properties:
+        payment_id: { type: integer }
+        engagement_id: { type: integer }
+        base_amount: { type: number, format: float }
+        platform_fee: { type: number, format: float }
+        gst: { type: number, format: float }
+        total_amount: { type: number, format: float }
+        payment_mode: { type: string }
+        transaction_id: { type: string, nullable: true }
+        razorpay_order_id: { type: string, nullable: true }
+        status: { type: string, enum: [PENDING, SUCCESS, FAILED, REFUNDED] }
+        created_at: { type: string, format: date-time }
+
+    Payout:
+      type: object
+      properties:
+        payout_id: { type: integer }
+        provider_id: { type: integer }
+        engagement_id: { type: integer }
+        gross_amount: { type: number, format: float }
+        provider_fee: { type: number, format: float }
+        tds_amount: { type: number, format: float }
+        net_amount: { type: number, format: float }
+        payout_mode: { type: string, nullable: true }
+        transaction_id: { type: string, nullable: true }
+        status: { type: string, enum: [INITIATED, SUCCESS, FAILED] }
+        created_at: { type: string, format: date-time }
+
+    EngagementCreate:
+      type: object
+      required:
+        - customer_id
+        - provider_id
+        - service_type
+        - booking_type
+        - start_date
+        - end_date
+        - start_time
+        - base_amount
+        - payment_mode
+      properties:
+        customer_id: { type: integer }
+        provider_id: { type: integer }
+        service_type: { type: string }
+        booking_type: { type: string }
+        responsibilities:
+          type: object
+          additionalProperties: true
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        start_time: { type: string, format: time, example: "10:00:00" }
+        end_time: { type: string, format: time, example: "11:00:00" }
+        base_amount: { type: number, format: float }
+        payment_mode: { type: string }
+
+    EngagementFull:
+      type: object
+      properties:
+        message: { type: string }
+        engagement:
+          $ref: "#/components/schemas/Engagement"
+        payment:
+          $ref: "#/components/schemas/Payment"
+        payout:
+          $ref: "#/components/schemas/Payout"
+
+    PaymentVerify:
+      type: object
+      required:
+        - engagementId
+        - razorpayOrderId
+        - razorpayPaymentId
+        - razorpaySignature
+      properties:
+        engagementId:
+          type: integer
+          example: 6
+        razorpayOrderId:
+          type: string
+          example: order_R9vaJwN8q3rbUz
+        razorpayPaymentId:
+          type: string
+          example: pay_1234567890
+        razorpaySignature:
+          type: string
+          example: f3b2c1d4e5a6b7c8d9f0
