@@ -12,7 +12,7 @@ router.get("/wallets/:customerId", async (req, res) => {
   try {
     // 1️⃣ Fetch wallet
     const walletRes = await pool.query(
-      `SELECT * FROM wallets WHERE customer_id = $1`,
+      `SELECT * FROM wallets WHERE customerid = $1`,
       [customerId]
     );
 
@@ -32,7 +32,7 @@ router.get("/wallets/:customerId", async (req, res) => {
     );
 
     res.json({
-      customer_id: customerId,
+      customerid: customerId,
       wallet_id: wallet.wallet_id,
       balance: wallet.balance,
       transactions: txnRes.rows,

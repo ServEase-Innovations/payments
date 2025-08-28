@@ -6,8 +6,8 @@ try {
 await pool.query(`
 CREATE TABLE IF NOT EXISTS engagements (
 engagement_id BIGSERIAL PRIMARY KEY,
-customer_id BIGINT REFERENCES customers(customer_id),
-provider_id BIGINT REFERENCES service_providers(provider_id),
+customerid BIGINT REFERENCES customer(customerid),
+serviceproviderid BIGINT REFERENCES serviceprovider(serviceproviderid),
 responsibilities JSONB DEFAULT '[]',
 booking_type VARCHAR(50), -- ON_DEMAND, MONTHLY, SHORT_TERM
 service_type VARCHAR(50), -- MAID, COOK, NANNY
@@ -38,7 +38,7 @@ created_at TIMESTAMP DEFAULT NOW()
 await pool.query(`
 CREATE TABLE IF NOT EXISTS wallets (
 wallet_id BIGSERIAL PRIMARY KEY,
-customer_id BIGINT UNIQUE REFERENCES customers(customer_id),
+customerid BIGINT UNIQUE REFERENCES customer(customerid),
 balance DECIMAL(10,2) DEFAULT 0
 );
 `);
@@ -46,7 +46,7 @@ balance DECIMAL(10,2) DEFAULT 0
 await pool.query(`
 CREATE TABLE wallet_transactions (
 transaction_id BIGSERIAL PRIMARY KEY,
-customer_id BIGINT REFERENCES customers(customer_id),   -- who owns the wallet
+customerid BIGINT REFERENCES customer(customerid),   -- who owns the wallet
 engagement_id BIGINT REFERENCES engagements(engagement_id), -- optional link to engagement
 transaction_type VARCHAR(50) NOT NULL,  -- CREDIT | DEBIT | REFUND | ADJUSTMENT
 amount NUMERIC(12,2) NOT NULL,          -- actual transaction amount
@@ -59,7 +59,7 @@ created_at TIMESTAMP DEFAULT NOW()
 await pool.query(`
 CREATE TABLE IF NOT EXISTS provider_wallets (
 wallet_id BIGSERIAL PRIMARY KEY,
-provider_id BIGINT UNIQUE REFERENCES service_providers(provider_id),
+serviceproviderid BIGINT UNIQUE REFERENCES serviceprovider(serviceproviderid),
 balance DECIMAL(10,2) DEFAULT 0,
 security_deposit_collected DECIMAL(10,2) DEFAULT 0
 );
@@ -68,7 +68,7 @@ security_deposit_collected DECIMAL(10,2) DEFAULT 0
 await pool.query(`
 CREATE TABLE IF NOT EXISTS payouts (
 payout_id BIGSERIAL PRIMARY KEY,
-provider_id BIGINT REFERENCES service_providers(provider_id),
+serviceproviderid BIGINT REFERENCES serviceprovider(serviceproviderid),
 engagement_id BIGINT REFERENCES engagements(engagement_id),
 gross_amount DECIMAL(10,2),
 provider_fee DECIMAL(10,2),
@@ -84,7 +84,7 @@ created_at TIMESTAMP DEFAULT NOW()
 await pool.query(`
 CREATE TABLE IF NOT EXISTS provider_leaves (
 leave_id BIGSERIAL PRIMARY KEY,
-provider_id BIGINT REFERENCES service_providers(provider_id),
+serviceproviderid BIGINT REFERENCES serviceprovider(serviceproviderid),
 engagement_id BIGINT REFERENCES engagements(engagement_id),
 start_date DATE,
 end_date DATE,
@@ -97,7 +97,7 @@ created_at TIMESTAMP DEFAULT NOW()
 await pool.query(`
 CREATE TABLE customer_leaves (
 leave_id BIGSERIAL PRIMARY KEY,
-customer_id BIGINT REFERENCES customers(customer_id),
+customerid BIGINT REFERENCES customer(customerid),
 engagement_id BIGINT REFERENCES engagements(engagement_id),
 leave_type VARCHAR(50),          -- VACATION, SICK, etc.
 status VARCHAR(50) DEFAULT 'PENDING',

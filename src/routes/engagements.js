@@ -16,8 +16,8 @@ router.post("/", async (req, res) => {
   
     try {
       const {
-        customer_id,
-        provider_id,
+        customerid,
+        serviceproviderid,
         start_date,
         end_date,
         base_amount,
@@ -41,10 +41,10 @@ router.post("/", async (req, res) => {
       // 1️⃣ Insert engagement
       const engagementResult = await client.query(
         `INSERT INTO engagements 
-          (customer_id, provider_id, start_date, end_date, responsibilities, booking_type, service_type, task_status, active, base_amount, created_at)
+          (customerid, serviceproviderid, start_date, end_date, responsibilities, booking_type, service_type, task_status, active, base_amount, created_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW())
          RETURNING *`,
-        [customer_id, provider_id, start_date, end_date, responsibilities, booking_type, service_type, base_amount]
+        [customerid, serviceproviderid, start_date, end_date, responsibilities, booking_type, service_type, base_amount]
       );
       const engagement = engagementResult.rows[0];
   
@@ -72,8 +72,8 @@ router.post("/", async (req, res) => {
   
       // 4️⃣ Calculate provider payout based on security deposit
       const walletRes = await client.query(
-        "SELECT balance, security_deposit_collected FROM provider_wallets WHERE provider_id=$1",
-        [provider_id]
+        "SELECT balance, security_deposit_collected FROM provider_wallets WHERE serviceproviderid=$1",
+        [serviceproviderid]
       );
       const providerWallet = walletRes.rows[0] || { balance: 0, security_deposit_collected: 0 };
   
@@ -94,19 +94,19 @@ router.post("/", async (req, res) => {
         `UPDATE provider_wallets
          SET balance = balance + $1,
              security_deposit_collected = $2
-         WHERE provider_id = $3
+         WHERE serviceproviderid = $3
          RETURNING *`,
-        [provider_payout, new_security_deposit, provider_id]
+        [provider_payout, new_security_deposit, serviceproviderid]
       );
       const updated_wallet = updatedWalletRes.rows[0];
   
       // 6️⃣ Insert payout record
       const payoutResult = await client.query(
         `INSERT INTO payouts
-          (provider_id, engagement_id, gross_amount, provider_fee, tds_amount, net_amount, payout_mode, status, created_at)
+          (serviceproviderid, engagement_id, gross_amount, provider_fee, tds_amount, net_amount, payout_mode, status, created_at)
          VALUES ($1,$2,$3,$4,$5,$6,NULL,'INITIATED', NOW())
          RETURNING *`,
-        [provider_id, engagement.engagement_id, base_amount, new_security_deposit - providerWallet.security_deposit_collected, 0, provider_payout]
+        [serviceproviderid, engagement.engagement_id, base_amount, new_security_deposit - providerWallet.security_deposit_collected, 0, provider_payout]
       );
       const payout = payoutResult.rows[0];
   

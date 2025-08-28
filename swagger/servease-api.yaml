@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Servease API
-  description: API for Servease platform - customers, service providers, engagements, payments, wallets
+  description: API for Servease platform - customer, service providers, engagements, payments, wallets
   version: 1.0.3
 
 servers:
@@ -9,7 +9,7 @@ servers:
   - url : https://payments-j5id.onrender.com/api
 
 tags:
-  - name: Customers
+  - name: customer
   - name: Providers
   - name: Engagements
   - name: Payments
@@ -134,7 +134,7 @@ paths:
                     type: string
                     example: Server error
   
-  /customers/{customerId}/leaves:
+  /customer/{customerId}/leaves:
     post:
       summary: Apply vacation leave for a customer
       description: >
@@ -195,7 +195,7 @@ paths:
                       leave_id:
                         type: integer
                         example: 301
-                      customer_id:
+                      customerid:
                         type: integer
                         example: 1
                       engagement_id:
@@ -276,7 +276,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  customer_id:
+                  customerid:
                     type: integer
                     example: 1
                   wallet_id:
@@ -348,8 +348,8 @@ components:
       type: object
       properties:
         engagement_id: { type: integer }
-        customer_id: { type: integer }
-        provider_id: { type: integer }
+        customerid: { type: integer }
+        serviceproviderid: { type: integer }
         service_type: { type: string }
         booking_type: { type: string }
         responsibilities:
@@ -393,7 +393,7 @@ components:
       type: object
       properties:
         payout_id: { type: integer }
-        provider_id: { type: integer }
+        serviceproviderid: { type: integer }
         engagement_id: { type: integer }
         gross_amount: { type: number, format: float }
         provider_fee: { type: number, format: float }
@@ -407,8 +407,8 @@ components:
     EngagementCreate:
       type: object
       required:
-        - customer_id
-        - provider_id
+        - customerid
+        - serviceproviderid
         - service_type
         - booking_type
         - start_date
@@ -417,8 +417,8 @@ components:
         - base_amount
         - payment_mode
       properties:
-        customer_id: { type: integer }
-        provider_id: { type: integer }
+        customerid: { type: integer }
+        serviceproviderid: { type: integer }
         service_type: { type: string }
         booking_type: { type: string }
         responsibilities:

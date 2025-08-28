@@ -28,7 +28,7 @@ app.use("/api/payments", paymentRoutes);
 
 // ✅ Engagement routes
 app.use("/api/engagements", engagementsRouter);
-app.use("/api/customers", customerLeaveRoutes);
+app.use("/api/customer", customerLeaveRoutes);
 app.use("/api", walletRoutes);
 
 app.listen(5000, () =>

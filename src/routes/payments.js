@@ -31,7 +31,7 @@ router.post("/verify", async (req, res) => {
 
     // Fetch payment and engagement details
     const { rows } = await pool.query(
-      `SELECT e.provider_id, p.base_amount AS payment_base_amount, p.platform_fee
+      `SELECT e.serviceproviderid, p.base_amount AS payment_base_amount, p.platform_fee
        FROM payments p
        JOIN engagements e ON e.engagement_id = p.engagement_id
        WHERE p.engagement_id = $1`,
@@ -42,7 +42,7 @@ router.post("/verify", async (req, res) => {
       return res.status(404).json({ message: "Payment/Engagement not found" });
     }
 
-    const providerId = rows[0].provider_id;
+    const serviceproviderid = rows[0].serviceproviderid;
     const baseAmount = parseFloat(rows[0].payment_base_amount);
     const providerFee = parseFloat(rows[0].platform_fee);
 
@@ -51,8 +51,8 @@ router.post("/verify", async (req, res) => {
 
     // Update provider wallet
     await pool.query(
-      `UPDATE provider_wallets SET balance = balance + $1 WHERE provider_id=$2`,
-      [netAmountToProvider, providerId]
+      `UPDATE provider_wallets SET balance = balance + $1 WHERE serviceproviderid=$2`,
+      [netAmountToProvider, serviceproviderid]
     );
 
     // Update engagement status to COMPLETED and set active=false

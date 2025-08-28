@@ -13,7 +13,7 @@ router.post("/:customerId/leaves", async (req, res) => {
   try {
     // 1️⃣ Fetch engagement
     const engagementRes = await pool.query(
-      `SELECT * FROM engagements WHERE engagement_id = $1 AND customer_id = $2`,
+      `SELECT * FROM engagements WHERE engagement_id = $1 AND customerid = $2`,
       [engagement_id, customerId]
     );
     if (engagementRes.rows.length === 0) {
@@ -45,7 +45,7 @@ router.post("/:customerId/leaves", async (req, res) => {
     // 4️⃣ Insert into customer_leaves
     const leaveRes = await pool.query(
       `INSERT INTO customer_leaves
-        (customer_id, engagement_id, leave_start_date, leave_end_date, leave_type, total_days, refund_amount, status)
+        (customerid, engagement_id, leave_start_date, leave_end_date, leave_type, total_days, refund_amount, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'APPROVED')
        RETURNING *`,
       [customerId, engagement_id, leave_start_date, leave_end_date, leave_type, totalDays, vacationAmount]
@@ -53,14 +53,14 @@ router.post("/:customerId/leaves", async (req, res) => {
 
     // 5️⃣ Ensure wallet exists
     let walletRes = await pool.query(
-      `SELECT * FROM wallets WHERE customer_id = $1`,
+      `SELECT * FROM wallets WHERE customerid = $1`,
       [customerId]
     );
 
     let wallet;
     if (walletRes.rows.length === 0) {
       const newWallet = await pool.query(
-        `INSERT INTO wallets (customer_id, balance) VALUES ($1,0) RETURNING *`,
+        `INSERT INTO wallets (customerid, balance) VALUES ($1,0) RETURNING *`,
         [customerId]
       );
       wallet = newWallet.rows[0];
