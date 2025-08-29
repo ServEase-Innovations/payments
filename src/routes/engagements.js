@@ -303,35 +303,47 @@ router.get("/", async (req, res) => {
     const { customerId } = req.params;
   
     try {
-      const result = await pool.query(
-        `SELECT 
-           engagement_id,
-           serviceproviderid,
-           responsibilities,
-           booking_type,
-           service_type,
-           task_status,
-           active,
-           base_amount,
-           start_time,
-           end_time,
-           created_at
-         FROM engagements
-         WHERE customerid = $1
-         ORDER BY start_time DESC`,
-        [customerId]
-      );
+      // upcoming (future)
+      const upcomingQ = `
+        SELECT * FROM engagements
+        WHERE customerid = $1
+          AND start_time > NOW()
+          AND active = true
+        ORDER BY start_time ASC
+        LIMIT 1
+      `;
+      const upcomingRes = await pool.query(upcomingQ, [customerId]);
+  
+      // ongoing (happening right now)
+      const ongoingQ = `
+        SELECT * FROM engagements
+        WHERE customerid = $1
+          AND start_time <= NOW()
+          AND end_time > NOW()
+          AND active = true
+        ORDER BY start_time ASC
+        LIMIT 1
+      `;
+      const ongoingRes = await pool.query(ongoingQ, [customerId]);
+  
+      // past (finished)
+      const pastQ = `
+        SELECT * FROM engagements
+        WHERE customerid = $1
+          AND end_time < NOW()
+        ORDER BY start_time DESC
+      `;
+      const pastRes = await pool.query(pastQ, [customerId]);
   
       res.json({
         success: true,
-        bookings: result.rows,
+        upcoming: upcomingRes.rows[0] || null,
+        ongoing: ongoingRes.rows[0] || null,
+        past: pastRes.rows,
       });
-    } catch (error) {
-      console.error("Error fetching engagements:", error);
-      res.status(500).json({
-        success: false,
-        message: "Error fetching bookings",
-      });
+    } catch (err) {
+      console.error("Error fetching engagements:", err);
+      res.status(500).json({ success: false, message: "Error fetching bookings" });
     }
   });
   
