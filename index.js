@@ -7,10 +7,13 @@ import engagementsRouter from "./src/routes/engagements.js";
 import paymentRoutes from "./src/routes/payments.js";
 import customerLeaveRoutes from "./src/routes/customerLeaves.js";
 import walletRoutes from "./src/routes/walletRoutes.js";
+import cors from "cors";
 
 
 
 const app = express();
+
+app.use(cors());
 
 dotenv.config();
 
@@ -30,6 +33,8 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/engagements", engagementsRouter);
 app.use("/api/customer", customerLeaveRoutes);
 app.use("/api", walletRoutes);
+
+
 
 app.listen(5000, () =>
   console.log("Server running on http://localhost:5000/api-docs")
