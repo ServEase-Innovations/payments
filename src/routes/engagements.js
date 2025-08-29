@@ -22,14 +22,14 @@ router.post("/", async (req, res) => {
         end_date,
         base_amount,
         responsibilities,
-        bookingType,
-        serviceType,
+        booking_type,
+        service_type,
         payment_mode = "razorpay",
       } = req.body;
   
-      // Convert camelCase to snake_case for DB
-      const booking_type = bookingType;
-      const service_type = serviceType;
+      // // Convert camelCase to snake_case for DB
+      // const booking_type = bookingType;
+      // const service_type = serviceType;
   
       // Calculate Servease amounts
       const platform_fee = base_amount * 0.1;       // 10% of base_amount

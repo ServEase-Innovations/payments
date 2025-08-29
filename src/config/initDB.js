@@ -29,6 +29,7 @@ platform_fee DECIMAL(10,2) NOT NULL,
 gst DECIMAL(10,2) NOT NULL,
 total_amount DECIMAL(10,2) NOT NULL,
 payment_mode VARCHAR(50), -- razorpay, wallet, cash
+razorpay_order_id VARCHAR(255)
 transaction_id VARCHAR(255),
 status VARCHAR(50) DEFAULT 'PENDING',
 created_at TIMESTAMP DEFAULT NOW()
