@@ -91,6 +91,39 @@ paths:
                   message:
                     type: string
                     example: Server error
+            
+  /customers/{customerId}/engagements:
+    get:
+      summary: Get engagements (bookings) by customer ID
+      description: Returns all bookings (engagements) created by a specific customer.
+      tags:
+        - Engagements
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          description: ID of the customer whose bookings need to be fetched
+          schema:
+            type: integer
+            example: 11
+      responses:
+        "200":
+          description: Successfully retrieved customer bookings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  bookings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Engagement"
+        "500":
+          description: Server error
+
 
   /payments/verify:
     post:

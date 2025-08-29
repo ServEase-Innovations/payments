@@ -33,6 +33,8 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/engagements", engagementsRouter);
 app.use("/api/customer", customerLeaveRoutes);
 app.use("/api", walletRoutes);
+app.use("/api/customers", engagementsRouter);
+
 
 
 

@@ -29,7 +29,7 @@ platform_fee DECIMAL(10,2) NOT NULL,
 gst DECIMAL(10,2) NOT NULL,
 total_amount DECIMAL(10,2) NOT NULL,
 payment_mode VARCHAR(50), -- razorpay, wallet, cash
-razorpay_order_id VARCHAR(255)
+razorpay_order_id VARCHAR(255),
 transaction_id VARCHAR(255),
 status VARCHAR(50) DEFAULT 'PENDING',
 created_at TIMESTAMP DEFAULT NOW()
@@ -45,7 +45,7 @@ balance DECIMAL(10,2) DEFAULT 0
 `);
 // Wallet Transactions
 await pool.query(`
-CREATE TABLE wallet_transactions (
+CREATE TABLE IF NOT EXISTS wallet_transactions (
 transaction_id BIGSERIAL PRIMARY KEY,
 customerid BIGINT REFERENCES customer(customerid),   -- who owns the wallet
 engagement_id BIGINT REFERENCES engagements(engagement_id), -- optional link to engagement
@@ -96,7 +96,7 @@ created_at TIMESTAMP DEFAULT NOW()
 `);
 // Customer Leaves
 await pool.query(`
-CREATE TABLE customer_leaves (
+CREATE TABLE IF NOT EXISTS customer_leaves (
 leave_id BIGSERIAL PRIMARY KEY,
 customerid BIGINT REFERENCES customer(customerid),
 engagement_id BIGINT REFERENCES engagements(engagement_id),

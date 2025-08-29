@@ -20,12 +20,15 @@ router.post("/", async (req, res) => {
         serviceproviderid,
         start_date,
         end_date,
+        start_time,
         base_amount,
         responsibilities,
         booking_type,
         service_type,
         payment_mode = "razorpay",
       } = req.body;
+
+      const startTimestamp = `${start_date} ${start_time}:00`;
   
       // // Convert camelCase to snake_case for DB
       // const booking_type = bookingType;
@@ -41,10 +44,22 @@ router.post("/", async (req, res) => {
       // 1️⃣ Insert engagement
       const engagementResult = await client.query(
         `INSERT INTO engagements 
-          (customerid, serviceproviderid, start_date, end_date, responsibilities, booking_type, service_type, task_status, active, base_amount, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW())
+          (customerid, serviceproviderid, start_date, end_date, responsibilities,
+           booking_type, service_type, task_status, active, base_amount, created_at, start_time)
+         VALUES 
+          ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::timestamp)
          RETURNING *`,
-        [customerid, serviceproviderid, start_date, end_date, responsibilities, booking_type, service_type, base_amount]
+        [
+          customerid,
+          serviceproviderid,
+          start_date,
+          end_date,
+          responsibilities,
+          booking_type,
+          service_type,
+          base_amount,
+          startTimestamp
+        ]
       );
       const engagement = engagementResult.rows[0];
   
@@ -282,6 +297,43 @@ router.get("/", async (req, res) => {
     }
   });
   
+
+  // 📌 Get all engagements (bookings) for a customer
+  router.get("/:customerId/engagements", async (req, res) => {
+    const { customerId } = req.params;
+  
+    try {
+      const result = await pool.query(
+        `SELECT 
+           engagement_id,
+           serviceproviderid,
+           responsibilities,
+           booking_type,
+           service_type,
+           task_status,
+           active,
+           base_amount,
+           start_time,
+           end_time,
+           created_at
+         FROM engagements
+         WHERE customerid = $1
+         ORDER BY start_time DESC`,
+        [customerId]
+      );
+  
+      res.json({
+        success: true,
+        bookings: result.rows,
+      });
+    } catch (error) {
+      console.error("Error fetching engagements:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error fetching bookings",
+      });
+    }
+  });
   
   
   
