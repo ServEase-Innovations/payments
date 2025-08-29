@@ -57,7 +57,7 @@ router.post("/verify", async (req, res) => {
 
     // Update engagement status to COMPLETED and set active=false
     await pool.query(
-      `UPDATE engagements SET task_status='COMPLETED', active=false WHERE engagement_id=$1`,
+      `UPDATE engagements SET active=false WHERE engagement_id=$1`,
       [engagementId]
     );
 
