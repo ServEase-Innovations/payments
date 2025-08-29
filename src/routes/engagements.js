@@ -2,8 +2,18 @@
 import express from "express";
 import pool from "../config/db.js";
 import Razorpay from "razorpay";
+import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
 
 const router = express.Router();
+
+
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault("Asia/Kolkata");
+
 
 const razorpay = new Razorpay({
     key_id: "rzp_test_lTdgjtSRlEwreA",
@@ -300,52 +310,50 @@ router.get("/", async (req, res) => {
 
   // 📌 Get all engagements (bookings) for a customer
   router.get("/:customerId/engagements", async (req, res) => {
-    const { customerId } = req.params;
   
     try {
-      // upcoming (future)
-      const upcomingQ = `
-        SELECT * FROM engagements
-        WHERE customerid = $1
-          AND start_time > NOW()
-          AND active = true
-        ORDER BY start_time ASC
-        LIMIT 1
-      `;
-      const upcomingRes = await pool.query(upcomingQ, [customerId]);
+      const { customerId } = req.params;
   
-      // ongoing (happening right now)
-      const ongoingQ = `
-        SELECT * FROM engagements
-        WHERE customerid = $1
-          AND start_time <= NOW()
-          AND end_time > NOW()
-          AND active = true
-        ORDER BY start_time ASC
-        LIMIT 1
-      `;
-      const ongoingRes = await pool.query(ongoingQ, [customerId]);
+      const result = await pool.query(
+        `SELECT * FROM engagements WHERE customerid = $1 ORDER BY start_date ASC`,
+        [customerId]
+      );
   
-      // past (finished)
-      const pastQ = `
-        SELECT * FROM engagements
-        WHERE customerid = $1
-          AND end_time < NOW()
-        ORDER BY start_time DESC
-      `;
-      const pastRes = await pool.query(pastQ, [customerId]);
+      const now = dayjs().tz("Asia/Kolkata");
+      const past = [];
+      const ongoing = [];
+      const upcoming = [];
   
-      res.json({
-        success: true,
-        upcoming: upcomingRes.rows[0] || null,
-        ongoing: ongoingRes.rows[0] || null,
-        past: pastRes.rows,
+      result.rows.forEach((e) => {
+        const start = dayjs(e.start_date).tz("Asia/Kolkata").startOf("day");
+        const end = dayjs(e.end_date).tz("Asia/Kolkata").endOf("day");
+  
+        if (now.isBefore(start)) {
+          e.status = "upcoming";
+          upcoming.push(e);
+        } else if (now.isAfter(end)) {
+          e.status = "past";
+          past.push(e);
+        } else {
+          e.status = "ongoing";
+          ongoing.push(e);
+        }
       });
-    } catch (err) {
-      console.error("Error fetching engagements:", err);
-      res.status(500).json({ success: false, message: "Error fetching bookings" });
+  
+      return res.json({
+        success: true,
+        upcoming,
+        ongoing,
+        past,
+      });
+    } catch (error) {
+      console.error("Error fetching engagements:", error);
+      res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
+  
+  
   
   
   
