@@ -314,19 +314,38 @@ router.get("/", async (req, res) => {
     try {
       const { customerId } = req.params;
   
-      const result = await pool.query(
+      // Fetch engagements
+      const engagementsResult = await pool.query(
         `SELECT * FROM engagements WHERE customerid = $1 ORDER BY start_date ASC`,
         [customerId]
       );
   
-      const now = dayjs().tz("Asia/Kolkata");
-      const past = [];
-      const ongoing = [];
-      const upcoming = [];
+      // Fetch modifications for those engagements
+      const modificationsResult = await pool.query(
+        `SELECT * FROM engagement_modifications 
+         WHERE engagement_id = ANY(SELECT engagement_id FROM engagements WHERE customerid = $1)
+         ORDER BY modified_at DESC`,
+        [customerId]
+      );
   
-      result.rows.forEach((e) => {
-        const start = dayjs(e.start_date).tz("Asia/Kolkata").startOf("day");
-        const end = dayjs(e.end_date).tz("Asia/Kolkata").endOf("day");
+      const now = dayjs().tz("Asia/Kolkata");
+      const past = [], ongoing = [], upcoming = [];
+  
+      // Group modifications by engagement_id
+      const modificationsByEngagement = {};
+      modificationsResult.rows.forEach(mod => {
+        if (!modificationsByEngagement[mod.engagement_id]) {
+          modificationsByEngagement[mod.engagement_id] = [];
+        }
+        modificationsByEngagement[mod.engagement_id].push(mod);
+      });
+  
+      // Categorize engagements + attach modifications
+      engagementsResult.rows.forEach((e) => {
+        const start = dayjs(e.start_date).tz("Asia/Kolkata");
+        const end = dayjs(e.end_date).tz("Asia/Kolkata");
+  
+        e.modifications = modificationsByEngagement[e.engagement_id] || [];
   
         if (now.isBefore(start)) {
           e.status = "upcoming";
@@ -344,10 +363,11 @@ router.get("/", async (req, res) => {
         success: true,
         upcoming,
         ongoing,
-        past,
+        past
       });
+  
     } catch (error) {
-      console.error("Error fetching engagements:", error);
+      console.error("Error fetching bookings:", error);
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
