@@ -25,18 +25,20 @@ router.post("/", async (req, res) => {
     const client = await pool.connect();
   
     try {
-      const {
+      const { 
         customerid,
         serviceproviderid,
         start_date,
         end_date,
-        start_time,
+        start_time,   // e.g. "10:00"
+        end_time,     // e.g. "11:00"
         base_amount,
         responsibilities,
         booking_type,
         service_type,
         payment_mode = "razorpay",
       } = req.body;
+      
 
       const startTimestamp = `${start_date} ${start_time}:00`;
   
@@ -57,7 +59,7 @@ router.post("/", async (req, res) => {
           (customerid, serviceproviderid, start_date, end_date, responsibilities,
            booking_type, service_type, task_status, active, base_amount, created_at, start_time)
          VALUES 
-          ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::timestamp)
+          ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time)
          RETURNING *`,
         [
           customerid,
@@ -68,9 +70,12 @@ router.post("/", async (req, res) => {
           booking_type,
           service_type,
           base_amount,
-          startTimestamp
+          start_time // "10:00"
         ]
       );
+      
+      
+      
       const engagement = engagementResult.rows[0];
   
       // 2️⃣ Create Razorpay order if using Razorpay
