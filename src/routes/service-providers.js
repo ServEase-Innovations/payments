@@ -113,28 +113,27 @@ router.get("/:providerId/engagements", async (req, res) => {
     try {
       let query = `
         SELECT 
-    e.engagement_id,
-    e.customerid,
-    e.serviceproviderid,
-    e.start_date,
-    e.end_date,
-    e.start_time,
-    e.end_time,
-    e.responsibilities,
-    e.booking_type,
-    e.service_type,
-    e.task_status,
-    e.assignment_status,
-    e.base_amount,
-    e.created_at,
-    c.firstname,
-    c.middlename,
-    c.lastname,
-    c.mobileno
-FROM engagements e
-LEFT JOIN customer c ON e.customerid = c.customerid
-WHERE e.serviceproviderid = $1
-
+          e.engagement_id AS id,
+          e.customerid AS "customerId",
+          e.serviceproviderid AS "serviceProviderId",
+          e.start_date AS "startDate",
+          e.end_date AS "endDate",
+          e.start_time AS "startTime",
+          e.end_time AS "endTime",
+          e.responsibilities,
+          e.booking_type AS "bookingType",
+          e.service_type AS "serviceType",
+          e.task_status AS "taskStatus",
+          e.assignment_status AS "assignmentStatus",
+          e.base_amount AS "monthlyAmount",
+          e.created_at AS "bookingDate",
+          c.firstname,
+          c.middlename,
+          c.lastname,
+          c.mobileno
+        FROM engagements e
+        LEFT JOIN customer c ON e.customerid = c.customerid
+        WHERE e.serviceproviderid = $1
       `;
       let params = [providerId];
       let paramIndex = 2;
@@ -151,7 +150,6 @@ WHERE e.serviceproviderid = $1
         if (!/^\d{4}-\d{2}$/.test(month)) {
           return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
         }
-  
         query += ` AND TO_CHAR(e.start_date, 'YYYY-MM') = $${paramIndex}`;
         params.push(month);
         paramIndex++;
@@ -161,10 +159,27 @@ WHERE e.serviceproviderid = $1
   
       const result = await pool.query(query, params);
   
+      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  
+      const current = [];
+      const past = [];
+  
+      result.rows.forEach((row) => {
+        const endDate = row.endDate ? row.endDate.toISOString().split("T")[0] : null;
+        const startDate = row.startDate ? row.startDate.toISOString().split("T")[0] : null;
+  
+        if (startDate && endDate && today >= startDate && today <= endDate) {
+          current.push(row);
+        } else if (endDate && today > endDate) {
+          past.push(row);
+        }
+      });
+  
       return res.json({
         success: true,
         serviceproviderid: providerId,
-        engagements: result.rows,
+        current,
+        past,
       });
     } catch (err) {
       console.error("Error fetching engagements:", err);
