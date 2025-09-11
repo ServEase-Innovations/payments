@@ -99,4 +99,77 @@ router.get("/:providerId/payouts", async (req, res) => {
   }
 });
 
+
+/**
+ * GET all engagements for a service provider
+ * Optional query params:
+ *   - status (e.g., NOT_STARTED, IN_PROGRESS, COMPLETED, CANCELLED)
+ *   - month=YYYY-MM (filter engagements by month)
+ */
+router.get("/:providerId/engagements", async (req, res) => {
+    const { providerId } = req.params;
+    const { status, month } = req.query;
+  
+    try {
+      let query = `
+        SELECT 
+    e.engagement_id,
+    e.customerid,
+    e.serviceproviderid,
+    e.start_date,
+    e.end_date,
+    e.start_time,
+    e.end_time,
+    e.responsibilities,
+    e.booking_type,
+    e.service_type,
+    e.task_status,
+    e.assignment_status,
+    e.base_amount,
+    e.created_at,
+    c.firstname,
+    c.middlename,
+    c.lastname,
+    c.mobileno
+FROM engagements e
+LEFT JOIN customer c ON e.customerid = c.customerid
+WHERE e.serviceproviderid = $1
+
+      `;
+      let params = [providerId];
+      let paramIndex = 2;
+  
+      // Filter by status if provided
+      if (status) {
+        query += ` AND e.task_status = $${paramIndex}`;
+        params.push(status);
+        paramIndex++;
+      }
+  
+      // Filter by month if provided
+      if (month) {
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+          return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
+        }
+  
+        query += ` AND TO_CHAR(e.start_date, 'YYYY-MM') = $${paramIndex}`;
+        params.push(month);
+        paramIndex++;
+      }
+  
+      query += " ORDER BY e.start_date DESC, e.start_time ASC";
+  
+      const result = await pool.query(query, params);
+  
+      return res.json({
+        success: true,
+        serviceproviderid: providerId,
+        engagements: result.rows,
+      });
+    } catch (err) {
+      console.error("Error fetching engagements:", err);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  });
+
 export default router;

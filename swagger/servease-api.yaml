@@ -505,6 +505,145 @@ paths:
                     type: string
                     example: "Internal server error"
 
+  /service-providers/{providerId}/engagements:
+    get:
+      summary: Get engagements for a service provider
+      description: >
+        Fetches all engagements for a given service provider.  
+        Supports optional filters by engagement status and month.
+      tags:
+        - Service Providers
+      parameters:
+        - name: providerId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The unique ID of the service provider
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [NOT_STARTED, IN_PROGRESS, COMPLETED, CANCELLED]
+          description: Filter engagements by task status
+        - name: month
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]{4}-[0-9]{2}$"
+            example: "2025-09"
+          description: Filter engagements by start date month (format YYYY-MM)
+      responses:
+        "200":
+          description: List of engagements for the provider
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  serviceproviderid:
+                    type: string
+                    example: "123"
+                  engagements:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        engagementid:
+                          type: string
+                          example: "456"
+                        customerid:
+                          type: string
+                          example: "789"
+                        serviceproviderid:
+                          type: string
+                          example: "123"
+                        start_date:
+                          type: string
+                          format: date
+                          example: "2025-09-10"
+                        end_date:
+                          type: string
+                          format: date
+                          example: "2025-09-15"
+                        start_time:
+                          type: string
+                          format: time
+                          example: "10:00:00"
+                        end_time:
+                          type: string
+                          format: time
+                          example: "18:00:00"
+                        responsibilities:
+                          type: object
+                          example: { cooking: true, cleaning: false }
+                        booking_type:
+                          type: string
+                          example: "ON_DEMAND"
+                        service_type:
+                          type: string
+                          example: "COOK"
+                        task_status:
+                          type: string
+                          example: "IN_PROGRESS"
+                        base_amount:
+                          type: number
+                          format: float
+                          example: 5000.00
+                        created_at:
+                          type: string
+                          format: date-time
+                          example: "2025-09-01T12:30:00Z"
+                        customer_name:
+                          type: string
+                          example: "John Doe"
+                        customer_phone:
+                          type: string
+                          example: "+91-9876543210"
+        "400":
+          description: Invalid request (bad month format or params)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Invalid month format. Use YYYY-MM"
+        "404":
+          description: Provider not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Provider not found"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Internal server error"
 
 components:
   schemas:
