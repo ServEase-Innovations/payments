@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../config/db.js";
 import dayjs from "dayjs";
+import { DateTime } from "luxon";
 
 const router = express.Router();
 
@@ -159,26 +160,29 @@ router.get("/:providerId/engagements", async (req, res) => {
   
       const result = await pool.query(query, params);
   
-      // Get today in provider's local timezone (assuming IST UTC+5:30)
-      const today = new Date();
-      const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate()); // local midnight
+      // Normalize today in UTC
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      console.debug("DEBUG: Today =", today);
+      console.debug("DEBUG: Retrieved rows =", result.rows.length);
   
       const current = [];
       const past = [];
   
       result.rows.forEach((row) => {
-        // Convert start/end dates to local midnight
-        const startDate = new Date(row.startDate);
-        startDate.setHours(0, 0, 0, 0);
-        const endDate = new Date(row.endDate);
-        endDate.setHours(0, 0, 0, 0);
+        // Convert startDate and endDate to YYYY-MM-DD string
+        const startDate = row.startDate ? row.startDate.toISOString().slice(0, 10) : null;
+        const endDate = row.endDate ? row.endDate.toISOString().slice(0, 10) : null;
   
-        if (startDate <= todayDate && todayDate <= endDate) {
+        console.debug(`DEBUG row: ${row.id} startDate: ${startDate} endDate: ${endDate}`);
+  
+        if (startDate && endDate && today >= startDate && today <= endDate) {
           current.push(row);
-        } else if (endDate < todayDate) {
+        } else if (endDate && today > endDate) {
           past.push(row);
         }
       });
+  
+      console.debug("DEBUG: Current count =", current.length, "Past count =", past.length);
   
       return res.json({
         success: true,
@@ -191,6 +195,7 @@ router.get("/:providerId/engagements", async (req, res) => {
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
   
   
 
