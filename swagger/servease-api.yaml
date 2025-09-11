@@ -374,6 +374,137 @@ paths:
                     type: string
                     example: Failed to fetch wallet
 
+  /service-providers/{providerId}/payouts:
+    get:
+      summary: Get provider payout summary and details
+      description: Returns total earned, withdrawn, available to withdraw, and security deposit info for a provider. Optional monthly filter and detailed payout info.
+      tags:
+        - Provider
+      parameters:
+        - in: path
+          name: providerId
+          required: true
+          schema:
+            type: integer
+          description: ID of the service provider
+        - in: query
+          name: month
+          required: false
+          schema:
+            type: string
+            example: "2025-09"
+          description: Filter payouts for a specific month (format: YYYY-MM)
+        - in: query
+          name: detailed
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: If true, returns individual payout details
+      responses:
+        '200':
+          description: Successful response with provider payout summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  serviceproviderid:
+                    type: integer
+                    example: 202
+                  month:
+                    type: string
+                    nullable: true
+                    example: "2025-09"
+                  summary:
+                    type: object
+                    properties:
+                      total_earned:
+                        type: number
+                        format: float
+                        example: 20000
+                      total_withdrawn:
+                        type: number
+                        format: float
+                        example: 15000
+                      available_to_withdraw:
+                        type: number
+                        format: float
+                        example: 5000
+                      security_deposit_paid:
+                        type: boolean
+                        example: true
+                      security_deposit_amount:
+                        type: number
+                        format: float
+                        example: 5000
+                  payouts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        payout_id:
+                          type: integer
+                          example: 301
+                        engagement_id:
+                          type: integer
+                          example: 173
+                        gross_amount:
+                          type: number
+                          format: float
+                          example: 2000
+                        provider_fee:
+                          type: number
+                          format: float
+                          example: 200
+                        tds_amount:
+                          type: number
+                          format: float
+                          example: 0
+                        net_amount:
+                          type: number
+                          format: float
+                          example: 1800
+                        payout_mode:
+                          type: string
+                          example: bank_transfer
+                        status:
+                          type: string
+                          example: SUCCESS
+                        created_at:
+                          type: string
+                          format: date-time
+                          example: "2025-09-01T10:00:00Z"
+        '404':
+          description: Provider not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Provider not found"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Internal server error"
+
 
 components:
   schemas:

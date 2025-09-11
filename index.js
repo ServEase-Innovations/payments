@@ -7,6 +7,8 @@ import engagementsRouter from "./src/routes/engagements.js";
 import paymentRoutes from "./src/routes/payments.js";
 import customerLeaveRoutes from "./src/routes/customerLeaves.js";
 import walletRoutes from "./src/routes/walletRoutes.js";
+import serviceProviderRoutes from "./src/routes/service-providers.js";
+
 import cors from "cors";
 
 
@@ -33,6 +35,7 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/engagements", engagementsRouter);
 app.use("/api/customer", customerLeaveRoutes);
 app.use("/api", walletRoutes);
+app.use("/api/service-providers", serviceProviderRoutes);
 app.use("/api/customers", engagementsRouter);
 
 
