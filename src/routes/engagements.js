@@ -22,94 +22,108 @@ const razorpay = new Razorpay({
 
 // CREATE engagement
 router.post("/", async (req, res) => {
-    const client = await pool.connect();
-  
-    try {
-      const { 
+  const client = await pool.connect();
+
+  try {
+    const { 
+      customerid,
+      serviceproviderid,
+      start_date,
+      end_date,
+      start_time,   // "10:00" or "05:00 AM"
+      base_amount,
+      responsibilities,
+      booking_type,
+      service_type,
+      payment_mode = "razorpay",
+    } = req.body;
+
+    const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
+
+    // 🕒 Parse times
+    const startDateTime = new Date(`${start_date}T${start_time}`);
+    if (isNaN(startDateTime.getTime())) {
+      return res.status(400).json({ error: "Invalid start_date or start_time" });
+    }
+
+    // Calculate end_time based on booking_type
+    const endDateTime = new Date(startDateTime);
+    if (booking_type === "ON_DEMAND") {
+      endDateTime.setHours(endDateTime.getHours() + 2);
+    } else {
+      endDateTime.setHours(endDateTime.getHours() + 1);
+    }
+
+    const startTimeFormatted = startDateTime.toISOString().split("T")[1].split(".")[0]; // HH:mm:ss
+    const endTimeFormatted = endDateTime.toISOString().split("T")[1].split(".")[0];     // HH:mm:ss
+
+    // 💰 Calculate amounts
+    const platform_fee = base_amount * 0.1;       // 10% of base_amount
+    const gst = platform_fee * 0.18;              // 18% GST on platform fee
+    const total_amount = base_amount + platform_fee + gst;
+
+    await client.query("BEGIN");
+
+    // 1️⃣ Insert engagement
+    const engagementResult = await client.query(
+      `INSERT INTO engagements 
+        (customerid, serviceproviderid, start_date, end_date, responsibilities,
+         booking_type, service_type, task_status, active, base_amount, created_at, start_time, end_time, assignment_status)
+       VALUES 
+        ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time, $10::time, $11)
+       RETURNING *`,
+      [
         customerid,
         serviceproviderid,
         start_date,
         end_date,
-        start_time,   // e.g. "10:00"
-        end_time,     // e.g. "11:00"
-        base_amount,
         responsibilities,
         booking_type,
         service_type,
-        payment_mode = "razorpay",
-      } = req.body;
-      
+        base_amount,
+        startTimeFormatted,
+        endTimeFormatted,
+        assignment_status  // ✅ include this
+      ]
+    );
+    const engagement = engagementResult.rows[0];
 
-      const startTimestamp = `${start_date} ${start_time}:00`;
-  
-      // // Convert camelCase to snake_case for DB
-      // const booking_type = bookingType;
-      // const service_type = serviceType;
-  
-      // Calculate Servease amounts
-      const platform_fee = base_amount * 0.1;       // 10% of base_amount
-      const gst = platform_fee * 0.18;              // 18% GST on platform fee
-      const total_amount = base_amount + platform_fee + gst;
-  
-      await client.query("BEGIN");
-  
-      // 1️⃣ Insert engagement
-      const engagementResult = await client.query(
-        `INSERT INTO engagements 
-          (customerid, serviceproviderid, start_date, end_date, responsibilities,
-           booking_type, service_type, task_status, active, base_amount, created_at, start_time)
-         VALUES 
-          ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time)
-         RETURNING *`,
-        [
-          customerid,
-          serviceproviderid,
-          start_date,
-          end_date,
-          responsibilities,
-          booking_type,
-          service_type,
-          base_amount,
-          start_time // "10:00"
-        ]
-      );
-      
-      
-      
-      const engagement = engagementResult.rows[0];
-  
-      // 2️⃣ Create Razorpay order if using Razorpay
-      let razorpay_order_id = null;
-      if (payment_mode === "razorpay") {
-        const order = await razorpay.orders.create({
-          amount: Math.round(total_amount * 100), // in paise
-          currency: "INR",
-          receipt: `eng_${engagement.engagement_id}`,
-          payment_capture: 1,
-        });
-        razorpay_order_id = order.id;
-      }
-  
-      // 3️⃣ Insert payment with PENDING status
-      const paymentResult = await client.query(
-        `INSERT INTO payments
-          (engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, status, razorpay_order_id, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,NOW())
-         RETURNING *`,
-        [engagement.engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, razorpay_order_id]
-      );
-      const payment = paymentResult.rows[0];
-  
-      // 4️⃣ Calculate provider payout based on security deposit
+    // 2️⃣ Create Razorpay order if using Razorpay
+    let razorpay_order_id = null;
+    if (payment_mode === "razorpay") {
+      const order = await razorpay.orders.create({
+        amount: Math.round(total_amount * 100), // in paise
+        currency: "INR",
+        receipt: `eng_${engagement.engagement_id}`,
+        payment_capture: 1,
+      });
+      razorpay_order_id = order.id;
+    }
+
+    // 3️⃣ Insert payment with PENDING status
+    const paymentResult = await client.query(
+      `INSERT INTO payments
+        (engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, status, razorpay_order_id, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,NOW())
+       RETURNING *`,
+      [engagement.engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, razorpay_order_id]
+    );
+    const payment = paymentResult.rows[0];
+
+    // 4️⃣ Provider wallet handling (skip if ON_DEMAND & no provider assigned yet)
+    let updated_wallet = null;
+    let payout = null;
+
+    if (serviceproviderid) {
       const walletRes = await client.query(
         "SELECT balance, security_deposit_collected FROM provider_wallets WHERE serviceproviderid=$1",
         [serviceproviderid]
       );
       const providerWallet = walletRes.rows[0] || { balance: 0, security_deposit_collected: 0 };
-  
+
       let provider_payout;
       let new_security_deposit = providerWallet.security_deposit_collected;
-  
+
       if (providerWallet.security_deposit_collected < 5000) {
         const remaining_deposit = 5000 - providerWallet.security_deposit_collected;
         const deduction = Math.min(base_amount * 0.1, remaining_deposit);
@@ -118,8 +132,7 @@ router.post("/", async (req, res) => {
       } else {
         provider_payout = base_amount;
       }
-  
-      // 5️⃣ Update provider wallet
+
       const updatedWalletRes = await client.query(
         `UPDATE provider_wallets
          SET balance = balance + $1,
@@ -128,35 +141,42 @@ router.post("/", async (req, res) => {
          RETURNING *`,
         [provider_payout, new_security_deposit, serviceproviderid]
       );
-      const updated_wallet = updatedWalletRes.rows[0];
-  
-      // 6️⃣ Insert payout record
+      updated_wallet = updatedWalletRes.rows[0];
+
       const payoutResult = await client.query(
         `INSERT INTO payouts
           (serviceproviderid, engagement_id, gross_amount, provider_fee, tds_amount, net_amount, payout_mode, status, created_at)
          VALUES ($1,$2,$3,$4,$5,$6,NULL,'INITIATED', NOW())
          RETURNING *`,
-        [serviceproviderid, engagement.engagement_id, base_amount, new_security_deposit - providerWallet.security_deposit_collected, 0, provider_payout]
+        [
+          serviceproviderid,
+          engagement.engagement_id,
+          base_amount,
+          new_security_deposit - providerWallet.security_deposit_collected,
+          0,
+          provider_payout
+        ]
       );
-      const payout = payoutResult.rows[0];
-  
-      await client.query("COMMIT");
-  
-      res.status(201).json({
-        message: "Engagement, payment, provider wallet, and payout created successfully",
-        engagement,
-        payment,
-        updated_wallet,
-        payout,
-      });
-    } catch (error) {
-      await client.query("ROLLBACK");
-      console.error(error);
-      res.status(500).json({ error: "Failed to create engagement and related records" });
-    } finally {
-      client.release();
+      payout = payoutResult.rows[0];
     }
-  });
+
+    await client.query("COMMIT");
+
+    res.status(201).json({
+      message: "Engagement created successfully",
+      engagement,
+      payment,
+      updated_wallet,
+      payout,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error creating engagement:", error);
+    res.status(500).json({ error: "Failed to create engagement" });
+  } finally {
+    client.release();
+  }
+});
   
 
 // GET /api/engagements - list all engagements
