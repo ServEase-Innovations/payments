@@ -68,4 +68,42 @@ router.post("/verify", async (req, res) => {
   }
 });
 
+
+router.get("/:providerId/payment-history", async (req, res) => {
+  const { providerId } = req.params;
+
+  try {
+    const query = `
+      SELECT 
+        p.payout_id AS id,
+        p.engagement_id,
+        'CREDIT' AS type,
+        p.net_amount AS amount,
+        'Payout for engagement #' || p.engagement_id AS description,
+        p.created_at AS date,
+        p.status
+      FROM payouts p
+      WHERE p.serviceproviderid = $1
+      ORDER BY date DESC;
+    `;
+
+    const result = await pool.query(query, [providerId]);
+
+    return res.json({
+      success: true,
+      providerId,
+      history: result.rows,
+    });
+  } catch (err) {
+    console.error("Error fetching payment history:", err);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
+
+
+
+
 export default router;

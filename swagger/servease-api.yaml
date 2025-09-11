@@ -166,7 +166,92 @@ paths:
                   message:
                     type: string
                     example: Server error
-  
+
+  /payments/{providerId}/payment-history:
+    get:
+      tags: [Payments]
+      summary: Get service provider payment history
+      description: >
+        Returns the payment history for a service provider, including credits (payouts) and debits (provider fees, security deposits, TDS deductions).  
+        Supports ordering by date descending.
+      parameters:
+        - in: path
+          name: providerId
+          required: true
+          schema:
+            type: integer
+          description: The ID of the service provider
+      responses:
+        "200":
+          description: Successful response with payment history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  providerId:
+                    type: string
+                    example: "202"
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          example: 1001
+                        engagement_id:
+                          type: integer
+                          example: 3502
+                        type:
+                          type: string
+                          enum: [CREDIT, DEBIT]
+                          example: CREDIT
+                        amount:
+                          type: number
+                          format: float
+                          example: 4800
+                        description:
+                          type: string
+                          example: "Payout for engagement #3502"
+                        date:
+                          type: string
+                          format: date-time
+                          example: "2025-09-10T12:30:00Z"
+                        status:
+                          type: string
+                          example: SUCCESS
+        "404":
+          description: Provider not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Provider not found"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Internal server error"
+
+
   /customer/{customerId}/leaves:
     post:
       summary: Apply vacation leave for a customer
