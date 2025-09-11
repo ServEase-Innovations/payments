@@ -135,15 +135,17 @@ router.get("/:providerId/engagements", async (req, res) => {
         LEFT JOIN customer c ON e.customerid = c.customerid
         WHERE e.serviceproviderid = $1
       `;
-      const params = [providerId];
+      let params = [providerId];
       let paramIndex = 2;
   
+      // Filter by status if provided
       if (status) {
         query += ` AND e.task_status = $${paramIndex}`;
         params.push(status);
         paramIndex++;
       }
   
+      // Filter by month if provided
       if (month) {
         if (!/^\d{4}-\d{2}$/.test(month)) {
           return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
@@ -157,32 +159,26 @@ router.get("/:providerId/engagements", async (req, res) => {
   
       const result = await pool.query(query, params);
   
-      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
-      console.log("DEBUG: Today =", today);
-      console.log("DEBUG: Retrieved rows =", result.rows.length);
-      result.rows.forEach((row, idx) => {
-        console.log(`Row ${idx + 1}: startDate=${row.startDate}, endDate=${row.endDate}`);
-      });
+      // Get today in provider's local timezone (assuming IST UTC+5:30)
+      const today = new Date();
+      const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate()); // local midnight
   
       const current = [];
       const past = [];
   
       result.rows.forEach((row) => {
-        const startDate = row.startDate ? row.startDate.toISOString().split("T")[0] : null;
-        const endDate = row.endDate ? row.endDate.toISOString().split("T")[0] : null;
+        // Convert start/end dates to local midnight
+        const startDate = new Date(row.startDate);
+        startDate.setHours(0, 0, 0, 0);
+        const endDate = new Date(row.endDate);
+        endDate.setHours(0, 0, 0, 0);
   
-        console.log("DEBUG row:", row.id, "startDate:", startDate, "endDate:", endDate);
-  
-        if (startDate && endDate) {
-          if (today >= startDate && today <= endDate) {
-            current.push(row);
-          } else if (today > endDate) {
-            past.push(row);
-          }
+        if (startDate <= todayDate && todayDate <= endDate) {
+          current.push(row);
+        } else if (endDate < todayDate) {
+          past.push(row);
         }
       });
-  
-      console.log("DEBUG: Current count =", current.length, "Past count =", past.length);
   
       return res.json({
         success: true,
