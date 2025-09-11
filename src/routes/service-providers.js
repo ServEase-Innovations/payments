@@ -135,7 +135,6 @@ router.get("/:providerId/engagements", async (req, res) => {
         LEFT JOIN customer c ON e.customerid = c.customerid
         WHERE e.serviceproviderid = $1
       `;
-  
       const params = [providerId];
       let paramIndex = 2;
   
@@ -160,21 +159,24 @@ router.get("/:providerId/engagements", async (req, res) => {
   
       const result = await pool.query(query, params);
   
-      // Convert current date to YYYY-MM-DD string (server local)
-      const today = new Date().toISOString().slice(0, 10);
+      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
   
       const current = [];
       const past = [];
   
       result.rows.forEach((row) => {
-        // Convert start/end dates to YYYY-MM-DD strings
-        const startDate = row.startDate ? row.startDate.toISOString().slice(0, 10) : null;
-        const endDate = row.endDate ? row.endDate.toISOString().slice(0, 10) : null;
+        const startDate = row.startDate ? row.startDate.toISOString().split("T")[0] : null;
+        const endDate = row.endDate ? row.endDate.toISOString().split("T")[0] : null;
   
-        if (startDate && endDate && today >= startDate && today <= endDate) {
-          current.push(row);
-        } else if (endDate && today > endDate) {
-          past.push(row);
+        if (startDate && endDate) {
+          // Current: today is between start and end date inclusive
+          if (today >= startDate && today <= endDate) {
+            current.push(row);
+          }
+          // Past: end date is before today
+          else if (today > endDate) {
+            past.push(row);
+          }
         }
       });
   
@@ -190,6 +192,8 @@ router.get("/:providerId/engagements", async (req, res) => {
     }
   });
   
+  
+
   
 
 export default router;
