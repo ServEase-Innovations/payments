@@ -138,14 +138,12 @@ router.get("/:providerId/engagements", async (req, res) => {
       const params = [providerId];
       let paramIndex = 2;
   
-      // Filter by status if provided
       if (status) {
         query += ` AND e.task_status = $${paramIndex}`;
         params.push(status);
         paramIndex++;
       }
   
-      // Filter by month if provided
       if (month) {
         if (!/^\d{4}-\d{2}$/.test(month)) {
           return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
@@ -160,6 +158,11 @@ router.get("/:providerId/engagements", async (req, res) => {
       const result = await pool.query(query, params);
   
       const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+      console.log("DEBUG: Today =", today);
+      console.log("DEBUG: Retrieved rows =", result.rows.length);
+      result.rows.forEach((row, idx) => {
+        console.log(`Row ${idx + 1}: startDate=${row.startDate}, endDate=${row.endDate}`);
+      });
   
       const current = [];
       const past = [];
@@ -168,17 +171,18 @@ router.get("/:providerId/engagements", async (req, res) => {
         const startDate = row.startDate ? row.startDate.toISOString().split("T")[0] : null;
         const endDate = row.endDate ? row.endDate.toISOString().split("T")[0] : null;
   
+        console.log("DEBUG row:", row.id, "startDate:", startDate, "endDate:", endDate);
+  
         if (startDate && endDate) {
-          // Current: today is between start and end date inclusive
           if (today >= startDate && today <= endDate) {
             current.push(row);
-          }
-          // Past: end date is before today
-          else if (today > endDate) {
+          } else if (today > endDate) {
             past.push(row);
           }
         }
       });
+  
+      console.log("DEBUG: Current count =", current.length, "Past count =", past.length);
   
       return res.json({
         success: true,
