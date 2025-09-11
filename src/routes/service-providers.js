@@ -113,7 +113,7 @@ router.get("/:providerId/engagements", async (req, res) => {
     try {
       let query = `
         SELECT 
-          e.engagement_id AS "id",
+          e.engagement_id AS id,
           e.customerid AS "customerId",
           e.serviceproviderid AS "serviceProviderId",
           e.start_date AS "startDate",
@@ -124,6 +124,7 @@ router.get("/:providerId/engagements", async (req, res) => {
           e.booking_type AS "bookingType",
           e.service_type AS "serviceType",
           e.task_status AS "taskStatus",
+          e.assignment_status AS "assignmentStatus",
           e.base_amount AS "monthlyAmount",
           e.created_at AS "bookingDate",
           c.firstname,
@@ -138,19 +139,19 @@ router.get("/:providerId/engagements", async (req, res) => {
       const params = [providerId];
       let paramIndex = 2;
   
-      // Filter by status
+      // Filter by status if provided
       if (status) {
         query += ` AND e.task_status = $${paramIndex}`;
         params.push(status);
         paramIndex++;
       }
   
-      // Filter by month (UTC-safe)
+      // Filter by month if provided
       if (month) {
         if (!/^\d{4}-\d{2}$/.test(month)) {
           return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
         }
-        query += ` AND TO_CHAR(e.start_date AT TIME ZONE 'UTC', 'YYYY-MM') = $${paramIndex}`;
+        query += ` AND TO_CHAR(e.start_date, 'YYYY-MM') = $${paramIndex}`;
         params.push(month);
         paramIndex++;
       }
@@ -159,13 +160,14 @@ router.get("/:providerId/engagements", async (req, res) => {
   
       const result = await pool.query(query, params);
   
-      // Compute current/past safely (UTC)
-      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+      // Convert current date to YYYY-MM-DD string (server local)
+      const today = new Date().toISOString().slice(0, 10);
   
       const current = [];
       const past = [];
   
-      result.rows.forEach(row => {
+      result.rows.forEach((row) => {
+        // Convert start/end dates to YYYY-MM-DD strings
         const startDate = row.startDate ? row.startDate.toISOString().slice(0, 10) : null;
         const endDate = row.endDate ? row.endDate.toISOString().slice(0, 10) : null;
   
@@ -184,9 +186,10 @@ router.get("/:providerId/engagements", async (req, res) => {
       });
     } catch (err) {
       console.error("Error fetching engagements:", err);
-      return res.status(500).json({ success: false, error: "Internal server error" });
+      res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
   
 
 export default router;
