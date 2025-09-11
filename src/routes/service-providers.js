@@ -113,7 +113,7 @@ router.get("/:providerId/engagements", async (req, res) => {
     try {
       let query = `
         SELECT 
-          e.engagement_id AS id,
+          e.engagement_id AS "id",
           e.customerid AS "customerId",
           e.serviceproviderid AS "serviceProviderId",
           e.start_date AS "startDate",
@@ -124,7 +124,6 @@ router.get("/:providerId/engagements", async (req, res) => {
           e.booking_type AS "bookingType",
           e.service_type AS "serviceType",
           e.task_status AS "taskStatus",
-          e.assignment_status AS "assignmentStatus",
           e.base_amount AS "monthlyAmount",
           e.created_at AS "bookingDate",
           c.firstname,
@@ -135,22 +134,23 @@ router.get("/:providerId/engagements", async (req, res) => {
         LEFT JOIN customer c ON e.customerid = c.customerid
         WHERE e.serviceproviderid = $1
       `;
-      let params = [providerId];
+  
+      const params = [providerId];
       let paramIndex = 2;
   
-      // Filter by status if provided
+      // Filter by status
       if (status) {
         query += ` AND e.task_status = $${paramIndex}`;
         params.push(status);
         paramIndex++;
       }
   
-      // Filter by month if provided
+      // Filter by month (UTC-safe)
       if (month) {
         if (!/^\d{4}-\d{2}$/.test(month)) {
           return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
         }
-        query += ` AND TO_CHAR(e.start_date, 'YYYY-MM') = $${paramIndex}`;
+        query += ` AND TO_CHAR(e.start_date AT TIME ZONE 'UTC', 'YYYY-MM') = $${paramIndex}`;
         params.push(month);
         paramIndex++;
       }
@@ -159,14 +159,15 @@ router.get("/:providerId/engagements", async (req, res) => {
   
       const result = await pool.query(query, params);
   
-      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+      // Compute current/past safely (UTC)
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
   
       const current = [];
       const past = [];
   
-      result.rows.forEach((row) => {
-        const endDate = row.endDate ? row.endDate.toISOString().split("T")[0] : null;
-        const startDate = row.startDate ? row.startDate.toISOString().split("T")[0] : null;
+      result.rows.forEach(row => {
+        const startDate = row.startDate ? row.startDate.toISOString().slice(0, 10) : null;
+        const endDate = row.endDate ? row.endDate.toISOString().slice(0, 10) : null;
   
         if (startDate && endDate && today >= startDate && today <= endDate) {
           current.push(row);
@@ -183,8 +184,9 @@ router.get("/:providerId/engagements", async (req, res) => {
       });
     } catch (err) {
       console.error("Error fetching engagements:", err);
-      res.status(500).json({ success: false, error: "Internal server error" });
+      return res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
 
 export default router;
