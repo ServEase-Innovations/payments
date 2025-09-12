@@ -730,6 +730,117 @@ paths:
                     type: string
                     example: "Internal server error"
 
+  /service-providers/{providerId}/calendar:
+    get:
+      summary: Get service provider calendar
+      description: >
+        Fetches a service provider’s calendar from the **provider_availability** table.  
+        Supports optional filtering by **month (YYYY-MM)** and **status (AVAILABLE, BOOKED, UNAVAILABLE)**.
+      tags:
+        - Service Providers
+      parameters:
+        - in: path
+          name: providerId
+          required: true
+          schema:
+            type: integer
+          description: ID of the service provider
+          example: 202
+        - in: query
+          name: month
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9]{4}-[0-9]{2}$"
+            example: "2025-09"
+          description: Filter calendar entries for a given month (format YYYY-MM)
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [AVAILABLE, BOOKED, UNAVAILABLE]
+            example: BOOKED
+          description: Filter by slot status
+      responses:
+        "200":
+          description: Successful response with provider calendar
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  providerId:
+                    type: integer
+                    example: 202
+                  calendar:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          example: 15
+                        provider_id:
+                          type: integer
+                          example: 202
+                        engagement_id:
+                          type: integer
+                          nullable: true
+                          example: 280
+                        date:
+                          type: string
+                          format: date
+                          example: "2025-09-19"
+                        start_time:
+                          type: string
+                          format: time
+                          example: "06:30:00"
+                        end_time:
+                          type: string
+                          format: time
+                          example: "07:30:00"
+                        status:
+                          type: string
+                          enum: [AVAILABLE, BOOKED, UNAVAILABLE]
+                          example: BOOKED
+                        created_at:
+                          type: string
+                          format: date-time
+                          example: "2025-09-12T10:20:00Z"
+                        updated_at:
+                          type: string
+                          format: date-time
+                          example: "2025-09-12T10:20:00Z"
+        "400":
+          description: Invalid month format (not YYYY-MM)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Invalid month format. Use YYYY-MM"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Internal server error"               
 components:
   schemas:
     Engagement:

@@ -199,6 +199,64 @@ router.get("/:providerId/engagements", async (req, res) => {
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+
+  /**
+ * Get a service provider’s calendar
+ * Supports optional filters by month and status
+ */
+router.get("/:providerId/calendar", async (req, res) => {
+    const { providerId } = req.params;
+    const { month, status } = req.query;
+  
+    try {
+      let query = `
+        SELECT 
+          id,
+          provider_id,
+          engagement_id,
+          date,
+          start_time,
+          end_time,
+          status,
+          created_at,
+          updated_at
+        FROM provider_availability
+        WHERE provider_id = $1
+      `;
+      const params = [providerId];
+      let paramIndex = 2;
+  
+      // Month filter
+      if (month) {
+        if (!/^\d{4}-\d{2}$/.test(month)) {
+          return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
+        }
+        query += ` AND TO_CHAR(date, 'YYYY-MM') = $${paramIndex}`;
+        params.push(month);
+        paramIndex++;
+      }
+  
+      // Status filter
+      if (status) {
+        query += ` AND status = $${paramIndex}`;
+        params.push(status.toUpperCase());
+        paramIndex++;
+      }
+  
+      query += " ORDER BY date ASC, start_time ASC";
+  
+      const result = await pool.query(query, params);
+  
+      return res.json({
+        success: true,
+        providerId,
+        calendar: result.rows,
+      });
+    } catch (err) {
+      console.error("Error fetching provider calendar:", err);
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  });
   
   
   
