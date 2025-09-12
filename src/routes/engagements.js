@@ -28,9 +28,9 @@ router.post("/", async (req, res) => {
     const { 
       customerid,
       serviceproviderid,
-      start_date,   // e.g. "2025-09-09"
-      end_date,     // e.g. "2025-10-09"
-      start_time,   // "10:00" or "05:00 AM"
+      start_date,   // "YYYY-MM-DD"
+      end_date,     // "YYYY-MM-DD"
+      start_time,   // "HH:mm" or "HH:mm AM/PM"
       base_amount,
       responsibilities,
       booking_type,
@@ -38,15 +38,18 @@ router.post("/", async (req, res) => {
       payment_mode = "razorpay",
     } = req.body;
 
+    // ✅ Normalize serviceproviderid (0 => null)
+    const providerId = serviceproviderid === 0 ? null : serviceproviderid;
+
     const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
 
-    // 🕒 Parse times (keep only time, not messing with date)
+    // 🕒 Parse times
     const startDateTime = new Date(`1970-01-01T${start_time}`);
     if (isNaN(startDateTime.getTime())) {
       return res.status(400).json({ error: "Invalid start_time" });
     }
 
-    // Calculate end_time based on booking_type
+    // Calculate end_time
     const endDateTime = new Date(startDateTime);
     if (booking_type === "ON_DEMAND") {
       endDateTime.setHours(endDateTime.getHours() + 2);
@@ -54,44 +57,57 @@ router.post("/", async (req, res) => {
       endDateTime.setHours(endDateTime.getHours() + 1);
     }
 
+    // ✅ Validate times
+    if (startDateTime >= endDateTime) {
+      return res.status(400).json({ error: "End time must be later than start time" });
+    }
+
     const startTimeFormatted = startDateTime.toISOString().split("T")[1].split(".")[0]; // HH:mm:ss
     const endTimeFormatted = endDateTime.toISOString().split("T")[1].split(".")[0];     // HH:mm:ss
 
-    // 💰 Calculate amounts
-    const platform_fee = base_amount * 0.1;       // 10% of base_amount
-    const gst = platform_fee * 0.18;              // 18% GST on platform fee
+    // 💰 Calculate fees
+    const platform_fee = base_amount * 0.1;
+    const gst = platform_fee * 0.18;
     const total_amount = base_amount + platform_fee + gst;
 
     await client.query("BEGIN");
 
-    // 1️⃣ Insert engagement (store start_date & end_date as DATE — no timezone)
+        // ⛔ Conflict check only if provider is assigned (skip for ON_DEMAND UNASSIGNED)
+        if (providerId) {
+          const conflictCheck = await client.query(
+            `SELECT date, start_time, end_time
+             FROM provider_availability
+             WHERE provider_id = $1
+               AND date = $2::date
+               AND (tstzrange((date + start_time)::timestamptz, (date + end_time)::timestamptz, '[)') &&
+                    tstzrange(($2::date + $3::time)::timestamptz, ($2::date + $4::time)::timestamptz, '[)'))
+             LIMIT 1`,
+            [providerId, start_date, startTimeFormatted, endTimeFormatted]
+          );
+    
+          if (conflictCheck.rows.length > 0) {
+            await client.query("ROLLBACK");
+            const conflict = conflictCheck.rows[0];
+            return res.status(400).json({
+              error: `Provider already has a booking on the selected date and time.`,
+            });
+          }
+        }
+    
+
+    // 1️⃣ Insert engagement
     const engagementResult = await client.query(
       `INSERT INTO engagements 
         (customerid, serviceproviderid, start_date, end_date, responsibilities,
          booking_type, service_type, task_status, active, base_amount, created_at, start_time, end_time, assignment_status)
        VALUES 
         ($1,$2,$3::date,$4::date,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time, $10::time, $11)
-       RETURNING 
-        engagement_id,
-        customerid,
-        serviceproviderid,
-        responsibilities,
-        booking_type,
-        service_type,
-        base_amount,
-        start_date::text AS start_date,
-        end_date::text   AS end_date,
-        task_status,
-        active,
-        created_at,
-        start_time,
-        end_time,
-        assignment_status`,
+       RETURNING *`,
       [
         customerid,
-        serviceproviderid,
-        start_date,   // stays "YYYY-MM-DD"
-        end_date,     // stays "YYYY-MM-DD"
+        providerId,
+        start_date,
+        end_date,
         responsibilities,
         booking_type,
         service_type,
@@ -101,14 +117,13 @@ router.post("/", async (req, res) => {
         assignment_status
       ]
     );
-    
     const engagement = engagementResult.rows[0];
 
-    // 2️⃣ Create Razorpay order if using Razorpay
+    // 2️⃣ Razorpay order
     let razorpay_order_id = null;
     if (payment_mode === "razorpay") {
       const order = await razorpay.orders.create({
-        amount: Math.round(total_amount * 100), // in paise
+        amount: Math.round(total_amount * 100),
         currency: "INR",
         receipt: `eng_${engagement.engagement_id}`,
         payment_capture: 1,
@@ -116,7 +131,7 @@ router.post("/", async (req, res) => {
       razorpay_order_id = order.id;
     }
 
-    // 3️⃣ Insert payment with PENDING status
+    // 3️⃣ Insert payment
     const paymentResult = await client.query(
       `INSERT INTO payments
         (engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, status, razorpay_order_id, created_at)
@@ -126,14 +141,14 @@ router.post("/", async (req, res) => {
     );
     const payment = paymentResult.rows[0];
 
-    // 4️⃣ Provider wallet handling (skip if ON_DEMAND & no provider assigned yet)
+    // 4️⃣ Provider wallet & payout
     let updated_wallet = null;
     let payout = null;
 
-    if (serviceproviderid) {
+    if (providerId) {
       const walletRes = await client.query(
         "SELECT balance, security_deposit_collected FROM provider_wallets WHERE serviceproviderid=$1",
-        [serviceproviderid]
+        [providerId]
       );
       const providerWallet = walletRes.rows[0] || { balance: 0, security_deposit_collected: 0 };
 
@@ -155,7 +170,7 @@ router.post("/", async (req, res) => {
              security_deposit_collected = $2
          WHERE serviceproviderid = $3
          RETURNING *`,
-        [provider_payout, new_security_deposit, serviceproviderid]
+        [provider_payout, new_security_deposit, providerId]
       );
       updated_wallet = updatedWalletRes.rows[0];
 
@@ -165,7 +180,7 @@ router.post("/", async (req, res) => {
          VALUES ($1,$2,$3,$4,$5,$6,NULL,'INITIATED', NOW())
          RETURNING *`,
         [
-          serviceproviderid,
+          providerId,
           engagement.engagement_id,
           base_amount,
           new_security_deposit - providerWallet.security_deposit_collected,
@@ -174,6 +189,14 @@ router.post("/", async (req, res) => {
         ]
       );
       payout = payoutResult.rows[0];
+
+      // 5️⃣ Insert into provider_availability
+      await client.query(
+        `INSERT INTO provider_availability
+          (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
+         VALUES ($1,$2,$3::date,$4::time,$5::time,'BOOKED',NOW(),NOW())`,
+        [providerId, engagement.engagement_id, start_date, startTimeFormatted, endTimeFormatted]
+      );
     }
 
     await client.query("COMMIT");
@@ -193,6 +216,10 @@ router.post("/", async (req, res) => {
     client.release();
   }
 });
+
+
+
+
 
   
 
