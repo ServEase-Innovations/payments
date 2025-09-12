@@ -160,18 +160,19 @@ router.get("/:providerId/engagements", async (req, res) => {
   
       const result = await pool.query(query, params);
   
-      // Normalize today in UTC
-      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      // Normalize today in UTC (YYYY-MM-DD)
+      const today = new Date().toISOString().slice(0, 10);
       console.debug("DEBUG: Today =", today);
       console.debug("DEBUG: Retrieved rows =", result.rows.length);
   
       const current = [];
       const past = [];
+      const upcoming = [];
   
       result.rows.forEach((row) => {
-        // Convert startDate and endDate to YYYY-MM-DD string
-        const startDate = row.startDate ? row.startDate.toISOString().slice(0, 10) : null;
-        const endDate = row.endDate ? row.endDate.toISOString().slice(0, 10) : null;
+        // Convert startDate and endDate safely to YYYY-MM-DD
+        const startDate = row.startDate ? new Date(row.startDate).toISOString().slice(0, 10) : null;
+        const endDate = row.endDate ? new Date(row.endDate).toISOString().slice(0, 10) : null;
   
         console.debug(`DEBUG row: ${row.id} startDate: ${startDate} endDate: ${endDate}`);
   
@@ -179,15 +180,18 @@ router.get("/:providerId/engagements", async (req, res) => {
           current.push(row);
         } else if (endDate && today > endDate) {
           past.push(row);
+        } else if (startDate && today < startDate) {
+          upcoming.push(row);
         }
       });
   
-      console.debug("DEBUG: Current count =", current.length, "Past count =", past.length);
+      console.debug("DEBUG: Current =", current.length, "Upcoming =", upcoming.length, "Past =", past.length);
   
       return res.json({
         success: true,
         serviceproviderid: providerId,
         current,
+        upcoming,
         past,
       });
     } catch (err) {
@@ -195,6 +199,9 @@ router.get("/:providerId/engagements", async (req, res) => {
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
+  
+  
   
   
   

@@ -28,8 +28,8 @@ router.post("/", async (req, res) => {
     const { 
       customerid,
       serviceproviderid,
-      start_date,
-      end_date,
+      start_date,   // e.g. "2025-09-09"
+      end_date,     // e.g. "2025-10-09"
       start_time,   // "10:00" or "05:00 AM"
       base_amount,
       responsibilities,
@@ -40,10 +40,10 @@ router.post("/", async (req, res) => {
 
     const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
 
-    // 🕒 Parse times
-    const startDateTime = new Date(`${start_date}T${start_time}`);
+    // 🕒 Parse times (keep only time, not messing with date)
+    const startDateTime = new Date(`1970-01-01T${start_time}`);
     if (isNaN(startDateTime.getTime())) {
-      return res.status(400).json({ error: "Invalid start_date or start_time" });
+      return res.status(400).json({ error: "Invalid start_time" });
     }
 
     // Calculate end_time based on booking_type
@@ -64,28 +64,44 @@ router.post("/", async (req, res) => {
 
     await client.query("BEGIN");
 
-    // 1️⃣ Insert engagement
+    // 1️⃣ Insert engagement (store start_date & end_date as DATE — no timezone)
     const engagementResult = await client.query(
       `INSERT INTO engagements 
         (customerid, serviceproviderid, start_date, end_date, responsibilities,
          booking_type, service_type, task_status, active, base_amount, created_at, start_time, end_time, assignment_status)
        VALUES 
-        ($1,$2,$3,$4,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time, $10::time, $11)
-       RETURNING *`,
+        ($1,$2,$3::date,$4::date,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time, $10::time, $11)
+       RETURNING 
+        engagement_id,
+        customerid,
+        serviceproviderid,
+        responsibilities,
+        booking_type,
+        service_type,
+        base_amount,
+        start_date::text AS start_date,
+        end_date::text   AS end_date,
+        task_status,
+        active,
+        created_at,
+        start_time,
+        end_time,
+        assignment_status`,
       [
         customerid,
         serviceproviderid,
-        start_date,
-        end_date,
+        start_date,   // stays "YYYY-MM-DD"
+        end_date,     // stays "YYYY-MM-DD"
         responsibilities,
         booking_type,
         service_type,
         base_amount,
         startTimeFormatted,
         endTimeFormatted,
-        assignment_status  // ✅ include this
+        assignment_status
       ]
     );
+    
     const engagement = engagementResult.rows[0];
 
     // 2️⃣ Create Razorpay order if using Razorpay
@@ -177,6 +193,7 @@ router.post("/", async (req, res) => {
     client.release();
   }
 });
+
   
 
 // GET /api/engagements - list all engagements
