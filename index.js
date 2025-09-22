@@ -26,8 +26,12 @@ const server = http.createServer(app);
 // Attach Socket.IO
 const io = new Server(server, {
   cors: {
-    origin: "*", // ⚠️ allow all for now, lock down in production
-    methods: ["GET", "POST"]
+    origin: [
+      "http://localhost:3000",               // local dev
+      "https://servease-innovation.netlify.app" // your deployed frontend
+    ],
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
