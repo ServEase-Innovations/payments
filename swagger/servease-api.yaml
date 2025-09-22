@@ -91,7 +91,102 @@ paths:
                   message:
                     type: string
                     example: Server error
-            
+
+  /engagements/{id}/accept:
+    post:
+      summary: Accept an engagement by a provider
+      description: >
+        Allows a service provider to accept an unassigned engagement.  
+        Only the **first provider** to accept will be assigned.  
+        If the engagement is already assigned, this request will fail.
+      tags:
+        - Engagements
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: ID of the engagement to accept
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - provider_id
+              properties:
+                provider_id:
+                  type: integer
+                  example: 202
+      responses:
+        "200":
+          description: Engagement successfully assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Engagement assigned successfully
+                  engagement:
+                    type: object
+                    properties:
+                      engagement_id:
+                        type: integer
+                        example: 312
+                      serviceproviderid:
+                        type: integer
+                        example: 202
+                      assignment_status:
+                        type: string
+                        example: ASSIGNED
+        "404":
+          description: Engagement not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: Engagement not found
+        "409":
+          description: Engagement already assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: Engagement already assigned
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: Internal server error
+
+
   /customers/{customerId}/engagements:
     get:
       summary: Get engagements (bookings) by customer ID
@@ -124,7 +219,7 @@ paths:
         "500":
           description: Server error
 
-
+  
   /payments/verify:
     post:
       tags: [Payments]

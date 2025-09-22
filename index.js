@@ -8,7 +8,8 @@ import paymentRoutes from "./src/routes/payments.js";
 import customerLeaveRoutes from "./src/routes/customerLeaves.js";
 import walletRoutes from "./src/routes/walletRoutes.js";
 import serviceProviderRoutes from "./src/routes/service-providers.js";
-
+import http from "http";
+import { Server } from "socket.io";
 import cors from "cors";
 
 
@@ -18,6 +19,23 @@ const app = express();
 app.use(cors());
 
 dotenv.config();
+
+// Create HTTP server
+const server = http.createServer(app);
+
+// Attach Socket.IO
+const io = new Server(server, {
+  cors: {
+    origin: "*", // ⚠️ allow all for now, lock down in production
+    methods: ["GET", "POST"]
+  }
+});
+
+// Middleware: Make io available in routes
+app.use((req, res, next) => {
+  req.io = io; // 👈 attach io to request
+  next();
+});
 
 // ✅ Middleware to parse JSON requests
 app.use(express.json());
@@ -40,7 +58,27 @@ app.use("/api/customers", engagementsRouter);
 
 
 
+io.on("connection", (socket) => {
+  console.log("🔌 Client connected");
 
-app.listen(5000, () =>
+  socket.on("join", ({ providerId }) => {
+    if (providerId) {
+      socket.join(`provider_${providerId}`);
+      console.log(`✅ Provider ${providerId} joined provider_${providerId}`);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("❌ Client disconnected");
+  });
+});
+
+
+
+
+
+server.listen(5000, () =>
   console.log("Server running on http://localhost:5000/api-docs")
 );
+
+export { io };

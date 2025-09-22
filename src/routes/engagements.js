@@ -5,6 +5,8 @@ import Razorpay from "razorpay";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
+import { io } from "../../index.js"; // assuming you set up socket.io in server.js
+import geolib from "geolib"; // for distance calculation
 
 const router = express.Router();
 
@@ -13,6 +15,26 @@ const router = express.Router();
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.tz.setDefault("Asia/Kolkata");
+
+// Helper: find providers within 5km
+async function findNearbyProviders(lat, lng, radiusKm = 5) {
+  const query = `
+    SELECT serviceproviderid, firstname, lastname, mobileno, latitude, longitude
+    FROM serviceprovider
+    WHERE isactive = true
+      AND latitude IS NOT NULL
+      AND longitude IS NOT NULL
+  `;
+  const result = await pool.query(query);
+
+  // Filter in JS using haversine
+  const customerLoc = { lat, lng };
+  return result.rows.filter((p) => {
+    const providerLoc = { lat: p.latitude, lng: p.longitude };
+    const distMeters = haversine(customerLoc, providerLoc);
+    return distMeters <= radiusKm * 1000; // within radius
+  });
+}
 
 
 const razorpay = new Razorpay({
@@ -35,6 +57,8 @@ router.post("/", async (req, res) => {
       responsibilities,
       booking_type,
       service_type,
+      latitude,
+      longitude,
       payment_mode = "razorpay",
     } = req.body;
 
@@ -191,15 +215,76 @@ router.post("/", async (req, res) => {
       payout = payoutResult.rows[0];
 
       // 5️⃣ Insert into provider_availability
+if (serviceproviderid) {
+  if (booking_type === "ON_DEMAND") {
+    // Just 1 day slot
+    await client.query(
+      `INSERT INTO provider_availability
+         (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
+       VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
+      [serviceproviderid, engagement.engagement_id, start_date, startTimeFormatted, endTimeFormatted]
+    );
+  } else {
+    // Monthly or Short-term: fill for every day between start_date and end_date
+    const start = new Date(start_date);
+    const end = new Date(end_date);
+
+    for (
+      let d = new Date(start);
+      d <= end;
+      d.setDate(d.getDate() + 1)
+    ) {
+      const day = d.toISOString().slice(0, 10); // YYYY-MM-DD
       await client.query(
         `INSERT INTO provider_availability
-          (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
-         VALUES ($1,$2,$3::date,$4::time,$5::time,'BOOKED',NOW(),NOW())`,
-        [providerId, engagement.engagement_id, start_date, startTimeFormatted, endTimeFormatted]
+           (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
+         VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
+        [serviceproviderid, engagement.engagement_id, day, startTimeFormatted, endTimeFormatted]
       );
+    }
+  }
+}
     }
 
     await client.query("COMMIT");
+
+    // ✅ Step 6: If no provider assigned → notify nearby providers
+    if (!providerId && latitude && longitude) {
+      const providerRes = await pool.query(
+        `SELECT serviceproviderid, firstname, lastname, latitude, longitude
+         FROM serviceprovider
+         WHERE isactive = true
+           AND latitude IS NOT NULL
+           AND longitude IS NOT NULL`
+      );
+
+      const nearbyProviders = providerRes.rows.filter((p) => {
+        const distance = geolib.getDistance(
+          { latitude, longitude },
+          { latitude: p.latitude, longitude: p.longitude }
+        );
+        return distance <= 5000; // within 5 km
+      });
+
+      console.log("Nearby providers found:", nearbyProviders.length);
+
+      // Send notifications
+      nearbyProviders.forEach((p) => {
+        io.to(`provider_${p.serviceproviderid}`).emit("new-engagement", {
+          engagement: {
+            engagement_id: engagement.engagement_id,
+            service_type,
+            booking_type,
+            start_date,
+            end_date,
+            start_time: startTimeFormatted,
+            end_time: endTimeFormatted,
+            base_amount,
+          },
+          payment, // optional: include payment if you want
+        });
+      });
+    }
 
     res.status(201).json({
       message: "Engagement created successfully",
@@ -438,6 +523,85 @@ router.get("/", async (req, res) => {
     } catch (error) {
       console.error("Error fetching bookings:", error);
       res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  });
+
+
+  router.post("/:id/accept", async (req, res) => {
+    const client = await pool.connect();
+    try {
+      const { id } = req.params;
+      const { provider_id } = req.body;
+  
+      await client.query("BEGIN");
+  
+      // Lock engagement row to prevent race conditions
+      const engagementRes = await client.query(
+        `SELECT * FROM engagements 
+         WHERE engagement_id = $1
+         FOR UPDATE`,
+        [id]
+      );
+  
+      if (engagementRes.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ success: false, error: "Engagement not found" });
+      }
+  
+      const engagement = engagementRes.rows[0];
+  
+      if (engagement.assignment_status !== "UNASSIGNED") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, error: "Engagement already assigned" });
+      }
+  
+      // ✅ Assign to provider
+      const updateRes = await client.query(
+        `UPDATE engagements
+         SET serviceproviderid = $1, assignment_status = 'ASSIGNED'
+         WHERE engagement_id = $2
+         RETURNING *`,
+        [provider_id, id]
+      );
+  
+      const updatedEngagement = updateRes.rows[0];
+  
+      // Insert into provider_availability (mark booked)
+      await client.query(
+        `INSERT INTO provider_availability 
+          (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
+         VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
+        [
+          provider_id,
+          updatedEngagement.engagement_id,
+          updatedEngagement.start_date,
+          updatedEngagement.start_time,
+          updatedEngagement.end_time,
+        ]
+      );
+  
+      await client.query("COMMIT");
+  
+      // 🔔 Notify winner
+      sendToProvider(provider_id, {
+        type: "ENGAGEMENT_ASSIGNED",
+        engagement: updatedEngagement,
+      });
+  
+      // 🔔 Optionally notify others (losers)
+      // broadcastToOthers(provider_id, { type: "ALREADY_ASSIGNED", engagement_id: id });
+  
+      return res.json({
+        success: true,
+        message: "Engagement assigned successfully",
+        engagement: updatedEngagement,
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.error("Error accepting engagement:", err);
+      return res.status(500).json({ success: false, error: "Internal server error" });
+    } finally {
+      client.release();
     }
   });
   

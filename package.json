@@ -15,9 +15,11 @@
     "dayjs": "^1.11.16",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "geolib": "^3.3.4",
     "luxon": "^3.7.2",
     "pg": "^8.16.3",
     "razorpay": "^2.9.6",
+    "socket.io": "^4.8.1",
     "swagger-ui-express": "^5.0.1",
     "yamljs": "^0.3.0"
   },
