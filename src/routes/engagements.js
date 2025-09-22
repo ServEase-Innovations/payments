@@ -604,6 +604,77 @@ router.get("/", async (req, res) => {
       client.release();
     }
   });
+
+
+  router.patch("/:id/accept", async (req, res) => {
+    const client = await pool.connect();
+    try {
+      const engagementId = req.params.id;
+      const { providerId } = req.body;
+  
+      if (!providerId) {
+        return res.status(400).json({ error: "providerId is required" });
+      }
+  
+      await client.query("BEGIN");
+  
+      // 🔍 Fetch engagement
+      const engRes = await client.query(
+        `SELECT * FROM engagements WHERE engagement_id = $1 FOR UPDATE`,
+        [engagementId]
+      );
+      const engagement = engRes.rows[0];
+  
+      if (!engagement) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Engagement not found" });
+      }
+  
+      if (engagement.assignment_status !== "UNASSIGNED") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "Engagement already assigned" });
+      }
+  
+      // ✅ Update engagement with provider
+      const updateRes = await client.query(
+        `UPDATE engagements
+         SET serviceproviderid = $1,
+             assignment_status = 'ASSIGNED'
+         WHERE engagement_id = $2
+         RETURNING *`,
+        [providerId, engagementId]
+      );
+      const updatedEngagement = updateRes.rows[0];
+  
+      // ✅ Insert into provider_availability
+      await client.query(
+        `INSERT INTO provider_availability
+           (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
+         VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
+        [
+          providerId,
+          engagementId,
+          engagement.start_date,
+          engagement.start_time,
+          engagement.end_time,
+        ]
+      );
+  
+      await client.query("COMMIT");
+  
+      return res.json({
+        success: true,
+        message: "Engagement accepted successfully",
+        engagement: updatedEngagement,
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.error("Error accepting engagement:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    } finally {
+      client.release();
+    }
+  });
   
   
   
