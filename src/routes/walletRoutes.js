@@ -12,7 +12,7 @@ router.get("/wallets/:customerId", async (req, res) => {
   try {
     // 1️⃣ Fetch wallet
     const walletRes = await pool.query(
-      `SELECT * FROM wallets WHERE customerid = $1`,
+      `SELECT * FROM customer_wallets WHERE customerid = $1`,
       [customerId]
     );
 
@@ -22,9 +22,9 @@ router.get("/wallets/:customerId", async (req, res) => {
 
     const wallet = walletRes.rows[0];
 
-    // 2️⃣ Fetch recent transactions (optional, latest 10)
+    // 2️⃣ Fetch recent transactions (latest 10)
     const txnRes = await pool.query(
-      `SELECT * FROM wallet_transactions 
+      `SELECT * FROM wallet_transaction 
        WHERE wallet_id = $1 
        ORDER BY created_at DESC 
        LIMIT 10`,
@@ -42,5 +42,6 @@ router.get("/wallets/:customerId", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch wallet" });
   }
 });
+
 
 export default router;

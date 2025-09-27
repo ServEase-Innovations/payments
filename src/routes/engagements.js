@@ -362,10 +362,73 @@ router.get("/", async (req, res) => {
   });
 
 
-  router.put("/:id", async (req, res) => {
-    console.log("Modifying engagement with ID:", req.params.id);
-    const { id } = req.params;
-  
+// Utility: fetch or create customer's wallet_id
+async function getCustomerWalletId(client, customerId) {
+  const walletRes = await client.query(
+    `SELECT wallet_id FROM customer_wallets WHERE customerid=$1`,
+    [customerId]
+  );
+
+  if (walletRes.rows.length === 0) {
+    const insertRes = await client.query(
+      `INSERT INTO customer_wallets (customerid, balance)
+       VALUES ($1, 0)
+       RETURNING wallet_id`,
+      [customerId]
+    );
+    console.log(`✅ Created wallet for customer ${customerId}`);
+    return insertRes.rows[0].wallet_id;
+  }
+
+  return walletRes.rows[0].wallet_id;
+}
+
+// Utility: ensure provider wallet exists
+async function ensureProviderWallet(client, providerId) {
+  const walletRes = await client.query(
+    `SELECT * FROM provider_wallets WHERE serviceproviderid=$1`,
+    [providerId]
+  );
+
+  if (walletRes.rows.length === 0) {
+    const insertRes = await client.query(
+      `INSERT INTO provider_wallets (serviceproviderid, balance, security_deposit_collected)
+       VALUES ($1, 0, 0)
+       RETURNING *`,
+      [providerId]
+    );
+    console.log(`✅ Created wallet for provider ${providerId}`);
+    return insertRes.rows[0];
+  }
+
+  return walletRes.rows[0];
+}
+
+router.put("/:id", async (req, res) => {
+  const client = await pool.connect();
+  const { id } = req.params;
+
+  try {
+    await client.query("BEGIN");
+
+    // 1️⃣ Fetch engagement
+    const engRes = await client.query(
+      "SELECT * FROM engagements WHERE engagement_id=$1",
+      [id]
+    );
+    if (engRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+    const oldEng = engRes.rows[0];
+    const providerId = oldEng.serviceproviderid;
+    const customerId = oldEng.customerid;
+
+    // Ensure wallets exist
+    const customerWalletId = await getCustomerWalletId(client, customerId);
+    await ensureProviderWallet(client, providerId);
+
+    // 2️⃣ Extract request fields
     const {
       start_date,
       end_date,
@@ -376,15 +439,156 @@ router.get("/", async (req, res) => {
       service_type,
       task_status,
       active,
-      modified_by_id,   // who is making the change
-      modified_by_role, // their role: 'customer', 'provider', 'admin'
+      base_amount,
+      vacation_start_date,
+      vacation_end_date,
+      cancel_vacation,
+      modified_by_id,
+      modified_by_role
     } = req.body;
-  
-    try {
+
+    // --- Utility: daily rate ---
+    const totalDays =
+      (new Date(oldEng.end_date) - new Date(oldEng.start_date)) /
+        (1000 * 60 * 60 * 24) +
+      1;
+    const dailyRate = Number(oldEng.base_amount) / totalDays;
+
+    // --- Vacation Handling ---
+    if (vacation_start_date || vacation_end_date || cancel_vacation) {
+      const prevLeaveDays = oldEng.leave_days || 0;
+
+      if (cancel_vacation) {
+        // ➡️ Cancel leave
+        const refundToRevert = prevLeaveDays * dailyRate;
+
+        // Customer wallet (DEBIT)
+        await client.query(
+          `UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`,
+          [refundToRevert, customerWalletId]
+        );
+        await client.query(
+          `INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type)
+           VALUES ($1,$2,$3,'DEBIT')`,
+          [customerWalletId, id, refundToRevert]
+        );
+
+        // Provider wallet (CREDIT)
+        await client.query(
+          `UPDATE provider_wallets SET balance = balance + $1 WHERE serviceproviderid=$2`,
+          [refundToRevert, providerId]
+        );
+
+        // Update payouts
+        await client.query(
+          `UPDATE payouts SET net_amount = net_amount + $1 WHERE engagement_id=$2`,
+          [refundToRevert, id]
+        );
+
+        // Restore provider availability
+        await client.query(
+          `UPDATE provider_availability SET status='BOOKED' WHERE engagement_id=$1`,
+          [id]
+        );
+
+        // Log modification
+        await client.query(
+          `INSERT INTO engagement_modifications
+           (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
+           VALUES ($1,$2::jsonb,$3,$4,NOW())`,
+          [id, JSON.stringify({ cancel_vacation: true }), modified_by_id, modified_by_role]
+        );
+
+      } else {
+        // ➡️ Apply or modify leave
+        const vacStart = new Date(vacation_start_date || oldEng.vacation_start_date);
+        const vacEnd = new Date(vacation_end_date || oldEng.vacation_end_date);
+
+        const leaveDays = (vacEnd - vacStart) / (1000 * 60 * 60 * 24) + 1;
+        const refundAmount = leaveDays * dailyRate;
+
+        let penalty = 0;
+        if (prevLeaveDays > 0) {
+          // Modification case → apply ₹400 penalty
+          penalty = 400;
+
+          await client.query(
+            `UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`,
+            [penalty, customerWalletId]
+          );
+          await client.query(
+            `INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type)
+             VALUES ($1,$2,$3,'DEBIT')`,
+            [customerWalletId, id, penalty]
+          );
+        }
+
+        // Refund to customer (CREDIT)
+        await client.query(
+          `UPDATE customer_wallets SET balance = balance + $1 WHERE wallet_id=$2`,
+          [refundAmount, customerWalletId]
+        );
+        await client.query(
+          `INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type)
+           VALUES ($1,$2,$3,'CREDIT')`,
+          [customerWalletId, id, refundAmount]
+        );
+
+        // Deduct provider payout
+        await client.query(
+          `UPDATE provider_wallets SET balance = balance - $1 WHERE serviceproviderid=$2`,
+          [refundAmount, providerId]
+        );
+
+        // Update payouts
+        await client.query(
+          `UPDATE payouts SET net_amount = net_amount - $1 WHERE engagement_id=$2`,
+          [refundAmount, id]
+        );
+
+        // Free provider availability
+        await client.query(
+          `UPDATE provider_availability
+           SET status='FREE'
+           WHERE engagement_id=$1
+             AND date BETWEEN $2::date AND $3::date`,
+          [id, vacStart, vacEnd]
+        );
+
+        // Update engagement with leave info
+        await client.query(
+          `UPDATE engagements
+           SET vacation_start_date=$1, vacation_end_date=$2, leave_days=$3
+           WHERE engagement_id=$4`,
+          [vacStart, vacEnd, leaveDays, id]
+        );
+
+        // Log modification
+        await client.query(
+          `INSERT INTO engagement_modifications
+           (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
+           VALUES ($1,$2::jsonb,$3,$4,NOW())`,
+          [
+            id,
+            JSON.stringify({
+              vacation_start_date: vacStart,
+              vacation_end_date: vacEnd,
+              leave_days: leaveDays,
+              refund: refundAmount,
+              penalty
+            }),
+            modified_by_id,
+            modified_by_role
+          ]
+        );
+      }
+
+    } else {
+      // --- Normal engagement update ---
       const setClauses = [];
       const values = [];
       let idx = 1;
-  
+
       if (start_date !== undefined) {
         setClauses.push(`start_date = $${idx++}`);
         values.push(start_date);
@@ -394,11 +598,11 @@ router.get("/", async (req, res) => {
         values.push(end_date);
       }
       if (start_time !== undefined) {
-        setClauses.push(`start_time = $${idx++}`);
+        setClauses.push(`start_time = $${idx++}::time`);
         values.push(start_time);
       }
       if (end_time !== undefined) {
-        setClauses.push(`end_time = $${idx++}`);
+        setClauses.push(`end_time = $${idx++}::time`);
         values.push(end_time);
       }
       if (responsibilities !== undefined) {
@@ -421,45 +625,57 @@ router.get("/", async (req, res) => {
         setClauses.push(`active = $${idx++}`);
         values.push(active);
       }
-  
-      if (setClauses.length === 0) {
-        return res.status(400).json({ error: "No fields provided for update" });
+      if (base_amount !== undefined) {
+        setClauses.push(`base_amount = $${idx++}`);
+        values.push(base_amount);
       }
-  
-      values.push(id); // engagement_id for WHERE clause
-  
-      const updateQuery = `
-        UPDATE engagements
-        SET ${setClauses.join(", ")}
-        WHERE engagement_id = $${idx}
-        RETURNING *;
-      `;
-  
-      const result = await pool.query(updateQuery, values);
-  
-      if (result.rows.length === 0) {
-        return res.status(404).json({ error: "Engagement not found" });
+
+      if (setClauses.length > 0) {
+        values.push(id);
+        await client.query(
+          `UPDATE engagements SET ${setClauses.join(", ")} WHERE engagement_id=$${idx}`,
+          values
+        );
       }
-  
-      const updatedEngagement = result.rows[0];
-  
-      // 🔹 Log modification
-      await pool.query(
-        `
-        INSERT INTO engagement_modifications
-          (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
-        VALUES
-          ($1, $2::jsonb, $3, $4, NOW());
-        `,
-        [id, JSON.stringify(req.body), modified_by_id || null, modified_by_role || null]
+
+      // Log modification
+      await client.query(
+        `INSERT INTO engagement_modifications
+         (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
+         VALUES ($1,$2::jsonb,$3,$4,NOW())`,
+        [id, JSON.stringify(req.body), modified_by_id, modified_by_role]
       );
-  
-      res.json(updatedEngagement);
-    } catch (err) {
-      console.error("Error modifying engagement:", err);
-      res.status(500).json({ error: "Failed to update engagement" });
     }
-  });
+
+    await client.query("COMMIT");
+
+    // Fetch updated engagement
+    const updatedRes = await pool.query(
+      "SELECT * FROM engagements WHERE engagement_id=$1",
+      [id]
+    );
+
+    res.json({
+      message: "Engagement updated successfully",
+      engagement: updatedRes.rows[0]
+    });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Error updating engagement:", err);
+    res.status(500).json({ error: "Failed to update engagement" });
+  } finally {
+    client.release();
+  }
+});
+
+
+
+
+
+
+  
+  
   
 
   // 📌 Get all engagements (bookings) for a customer
