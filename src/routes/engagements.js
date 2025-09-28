@@ -683,10 +683,10 @@ router.put("/:id", async (req, res) => {
     try {
       const { customerId } = req.params;
   
-      // 1️⃣ Fetch engagements (only active ones)
+      // 1️⃣ Fetch engagements (both active + inactive)
       const engagementsResult = await pool.query(
         `SELECT * FROM engagements 
-         WHERE customerid = $1 AND active = true
+         WHERE customerid = $1
          ORDER BY start_date ASC`,
         [customerId]
       );
@@ -721,7 +721,7 @@ router.put("/:id", async (req, res) => {
   
       // 4️⃣ Fetch limited provider info
       const providersResult = await pool.query(
-        `SELECT serviceproviderid, firstname, lastname, rating, profile_pic
+        `SELECT serviceproviderid, firstname, lastname, rating
          FROM serviceprovider
          WHERE serviceproviderid = ANY($1)`,
         [engagementsResult.rows.map(e => e.serviceproviderid).filter(Boolean)]
@@ -776,6 +776,8 @@ router.put("/:id", async (req, res) => {
           end_date: e.end_date,
           start_time: e.start_time,
           end_time: e.end_time,
+          status: e.active ? "active" : "inactive",   // 👈 active/inactive only
+          task_status: e.task_status,                 // 👈 from DB
           vacation: {
             start_date: e.vacation_start_date,
             end_date: e.vacation_end_date,
@@ -788,15 +790,12 @@ router.put("/:id", async (req, res) => {
             : null
         };
   
-        // Status
+        // Categorization into upcoming/ongoing/past
         if (now.isBefore(start)) {
-          engagement.status = "upcoming";
           upcoming.push(engagement);
         } else if (now.isAfter(end)) {
-          engagement.status = "past";
           past.push(engagement);
         } else {
-          engagement.status = "ongoing";
           ongoing.push(engagement);
         }
       });
@@ -813,6 +812,8 @@ router.put("/:id", async (req, res) => {
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
+  
   
 
 
