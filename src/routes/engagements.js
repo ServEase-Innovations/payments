@@ -680,52 +680,124 @@ router.put("/:id", async (req, res) => {
 
   // 📌 Get all engagements (bookings) for a customer
   router.get("/:customerId/engagements", async (req, res) => {
-  
     try {
       const { customerId } = req.params;
   
-      // Fetch engagements
+      // 1️⃣ Fetch engagements (only active ones)
       const engagementsResult = await pool.query(
-        `SELECT * FROM engagements WHERE customerid = $1 ORDER BY start_date ASC`,
+        `SELECT * FROM engagements 
+         WHERE customerid = $1 AND active = true
+         ORDER BY start_date ASC`,
         [customerId]
       );
   
-      // Fetch modifications for those engagements
+      if (engagementsResult.rows.length === 0) {
+        return res.json({
+          success: true,
+          upcoming: [],
+          ongoing: [],
+          past: []
+        });
+      }
+  
+      const engagementIds = engagementsResult.rows.map(e => e.engagement_id);
+  
+      // 2️⃣ Fetch modifications
       const modificationsResult = await pool.query(
-        `SELECT * FROM engagement_modifications 
-         WHERE engagement_id = ANY(SELECT engagement_id FROM engagements WHERE customerid = $1)
+        `SELECT engagement_id, modified_at, modified_fields
+         FROM engagement_modifications 
+         WHERE engagement_id = ANY($1)
          ORDER BY modified_at DESC`,
-        [customerId]
+        [engagementIds]
       );
   
-      const now = dayjs().tz("Asia/Kolkata");
-      const past = [], ongoing = [], upcoming = [];
+      // 3️⃣ Fetch payments (only customer-facing fields)
+      const paymentsResult = await pool.query(
+        `SELECT engagement_id, base_amount, total_amount, payment_mode, status
+         FROM payments 
+         WHERE engagement_id = ANY($1)`,
+        [engagementIds]
+      );
   
-      // Group modifications by engagement_id
+      // 4️⃣ Fetch limited provider info
+      const providersResult = await pool.query(
+        `SELECT serviceproviderid, firstname, lastname, rating, profile_pic
+         FROM serviceprovider
+         WHERE serviceproviderid = ANY($1)`,
+        [engagementsResult.rows.map(e => e.serviceproviderid).filter(Boolean)]
+      );
+  
+      // Grouping
       const modificationsByEngagement = {};
       modificationsResult.rows.forEach(mod => {
         if (!modificationsByEngagement[mod.engagement_id]) {
           modificationsByEngagement[mod.engagement_id] = [];
         }
-        modificationsByEngagement[mod.engagement_id].push(mod);
+        const parsedFields = typeof mod.modified_fields === "string" 
+          ? JSON.parse(mod.modified_fields) 
+          : mod.modified_fields;
+        modificationsByEngagement[mod.engagement_id].push({
+          date: mod.modified_at,
+          action: parsedFields?.cancel_vacation
+            ? "Vacation cancelled"
+            : parsedFields?.vacation_start_date
+            ? "Vacation updated"
+            : "Modified",
+          refund: parsedFields?.refund || null,
+          penalty: parsedFields?.penalty || null
+        });
       });
   
-      // Categorize engagements + attach modifications
+      const paymentsByEngagement = {};
+      paymentsResult.rows.forEach(pay => {
+        paymentsByEngagement[pay.engagement_id] = pay;
+      });
+  
+      const providersById = {};
+      providersResult.rows.forEach(p => {
+        providersById[p.serviceproviderid] = p;
+      });
+  
+      const now = dayjs().tz("Asia/Kolkata");
+      const past = [], ongoing = [], upcoming = [];
+  
+      // 5️⃣ Attach extra data + categorize
       engagementsResult.rows.forEach((e) => {
         const start = dayjs(e.start_date).tz("Asia/Kolkata");
         const end = dayjs(e.end_date).tz("Asia/Kolkata");
   
-        e.modifications = modificationsByEngagement[e.engagement_id] || [];
+        // Build safe response object
+        const engagement = {
+          engagement_id: e.engagement_id,
+          service_type: e.service_type,
+          booking_type: e.booking_type,
+          responsibilities: e.responsibilities,
+          start_date: e.start_date,
+          end_date: e.end_date,
+          start_time: e.start_time,
+          end_time: e.end_time,
+          vacation: {
+            start_date: e.vacation_start_date,
+            end_date: e.vacation_end_date,
+            leave_days: e.leave_days
+          },
+          payment: paymentsByEngagement[e.engagement_id] || null,
+          modifications: modificationsByEngagement[e.engagement_id] || [],
+          provider: e.serviceproviderid
+            ? providersById[e.serviceproviderid] || null
+            : null
+        };
   
+        // Status
         if (now.isBefore(start)) {
-          e.status = "upcoming";
-          upcoming.push(e);
+          engagement.status = "upcoming";
+          upcoming.push(engagement);
         } else if (now.isAfter(end)) {
-          e.status = "past";
-          past.push(e);
+          engagement.status = "past";
+          past.push(engagement);
         } else {
-          e.status = "ongoing";
-          ongoing.push(e);
+          engagement.status = "ongoing";
+          ongoing.push(engagement);
         }
       });
   
@@ -741,6 +813,7 @@ router.put("/:id", async (req, res) => {
       res.status(500).json({ success: false, error: "Internal server error" });
     }
   });
+  
 
 
   router.post("/:id/accept", async (req, res) => {
