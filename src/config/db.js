@@ -10,4 +10,8 @@ const pool = new Pool({
   port: 5432,
 });
 
+pool.query("SELECT current_database(), current_schema();")
+  .then(res => console.log(res.rows))
+  .catch(err => console.error(err));
+
 export default pool;

@@ -7,6 +7,8 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import { io } from "../../index.js"; // assuming you set up socket.io in server.js
 import geolib from "geolib"; // for distance calculation
+import customParseFormat from "dayjs/plugin/customParseFormat.js";
+dayjs.extend(customParseFormat);
 
 const router = express.Router();
 
@@ -67,27 +69,22 @@ router.post("/", async (req, res) => {
 
     const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
 
-    // 🕒 Parse times
-    const startDateTime = new Date(`1970-01-01T${start_time}`);
-    if (isNaN(startDateTime.getTime())) {
-      return res.status(400).json({ error: "Invalid start_time" });
-    }
+    // Parse the start time in IST correctly
+const startDateTime = dayjs.tz(start_time, "HH:mm", "Asia/Kolkata");
+if (!startDateTime.isValid()) {
+  return res.status(400).json({ error: "Invalid start_time" });
+}
 
-    // Calculate end_time
-    const endDateTime = new Date(startDateTime);
-    if (booking_type === "ON_DEMAND") {
-      endDateTime.setHours(endDateTime.getHours() + 2);
-    } else {
-      endDateTime.setHours(endDateTime.getHours() + 1);
-    }
+// Add duration
+const endDateTime = startDateTime.add(
+  booking_type === "ON_DEMAND" ? 2 : 1,
+  "hour"
+);
 
-    // ✅ Validate times
-    if (startDateTime >= endDateTime) {
-      return res.status(400).json({ error: "End time must be later than start time" });
-    }
+// Final HH:mm:ss strings
+const startTimeFormatted = startDateTime.format("HH:mm:ss");
+const endTimeFormatted   = endDateTime.format("HH:mm:ss");
 
-    const startTimeFormatted = startDateTime.toISOString().split("T")[1].split(".")[0]; // HH:mm:ss
-    const endTimeFormatted = endDateTime.toISOString().split("T")[1].split(".")[0];     // HH:mm:ss
 
     // 💰 Calculate fees
     const platform_fee = base_amount * 0.1;
@@ -98,20 +95,63 @@ router.post("/", async (req, res) => {
 
         // ⛔ Conflict check only if provider is assigned (skip for ON_DEMAND UNASSIGNED)
         if (providerId) {
-          const conflictCheck = await client.query(
-            `SELECT date, start_time, end_time
-             FROM provider_availability
-             WHERE provider_id = $1
-               AND date = $2::date
-               AND (tstzrange((date + start_time)::timestamptz, (date + end_time)::timestamptz, '[)') &&
-                    tstzrange(($2::date + $3::time)::timestamptz, ($2::date + $4::time)::timestamptz, '[)'))
-             LIMIT 1`,
-            [providerId, start_date, startTimeFormatted, endTimeFormatted]
-          );
-    
-          if (conflictCheck.rows.length > 0) {
+          // validate times again (defensive)
+          if (!startTimeFormatted || !endTimeFormatted) {
             await client.query("ROLLBACK");
-            const conflict = conflictCheck.rows[0];
+            return res.status(400).json({ error: "Missing or invalid start_time/end_time" });
+          }
+          // --- build timezone-aware start/end for the requested date ---
+const newStart = dayjs.tz(
+  `${start_date} ${startTimeFormatted}`,
+  "YYYY-MM-DD HH:mm:ss",
+  "Asia/Kolkata"
+);
+const newEnd = dayjs.tz(
+  `${start_date} ${endTimeFormatted}`,
+  "YYYY-MM-DD HH:mm:ss",
+  "Asia/Kolkata"
+);
+
+if (!newStart.isValid() || !newEnd.isValid() || newStart.isSame(newEnd) || newStart.isAfter(newEnd)) {
+  await client.query("ROLLBACK");
+  return res.status(400).json({ error: "Invalid time range requested" });
+}
+
+// overlap query — ensure we pass start then end (lower then upper)
+const overlapQuery = `
+  SELECT provider_id, date, start_time, end_time
+  FROM provider_availability
+  WHERE provider_id = $1
+    AND date = $2::date
+    AND start_time IS NOT NULL
+    AND end_time IS NOT NULL
+    AND (
+          tstzrange(
+              (date + start_time)::timestamptz,
+              (date + end_time)::timestamptz,
+              '[)'
+          )
+          &&
+          tstzrange(
+              ($2::date + $3::time)::timestamptz,
+              ($2::date + $4::time)::timestamptz,
+              '[)'
+          )
+    )
+  LIMIT 1;
+`;
+
+// pass START then END
+const overlapRes = await client.query(overlapQuery, [
+  providerId,
+  start_date,
+  startTimeFormatted, // $3 -> new range lower bound
+  endTimeFormatted    // $4 -> new range upper bound
+]);
+
+        
+          if (overlapRes.rows.length > 0) {
+            await client.query("ROLLBACK");
             return res.status(400).json({
               error: `Provider already has a booking on the selected date and time.`,
             });
