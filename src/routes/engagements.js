@@ -1,189 +1,171 @@
-// routes/engagements.js
+// routes/engagements.js  (Version A — Epoch Only, combined: PUT, vacation, cancellation, payouts)
 import express from "express";
 import pool from "../config/db.js";
 import Razorpay from "razorpay";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
-import { io } from "../../index.js"; // assuming you set up socket.io in server.js
-import geolib from "geolib"; // for distance calculation
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
+import geolib from "geolib";
+import { io } from "../../index.js";
+
 dayjs.extend(customParseFormat);
-
-const router = express.Router();
-
-
-
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.tz.setDefault("Asia/Kolkata");
 
-// Helper: find providers within 5km
-async function findNearbyProviders(lat, lng, radiusKm = 5) {
-  const query = `
-    SELECT serviceproviderid, firstname, lastname, mobileno, latitude, longitude
-    FROM serviceprovider
-    WHERE isactive = true
-      AND latitude IS NOT NULL
-      AND longitude IS NOT NULL
-  `;
-  const result = await pool.query(query);
-
-  // Filter in JS using haversine
-  const customerLoc = { lat, lng };
-  return result.rows.filter((p) => {
-    const providerLoc = { lat: p.latitude, lng: p.longitude };
-    const distMeters = haversine(customerLoc, providerLoc);
-    return distMeters <= radiusKm * 1000; // within radius
-  });
-}
-
+const router = express.Router();
 
 const razorpay = new Razorpay({
-    key_id: "rzp_test_lTdgjtSRlEwreA",
-    key_secret: "g15WB8CEwaYBQ5FqpIKKMdNS",
-  });
+  key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_lTdgjtSRlEwreA",
+  key_secret: process.env.RAZORPAY_KEY_SECRET || "g15WB8CEwaYBQ5FqpIKKMdNS",
+});
 
-// CREATE engagement
+// ----------------- Helpers -----------------
+
+function toEpochSeconds(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null;
+  const dt = dayjs.tz(`${dateStr} ${timeStr}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata");
+  if (!dt.isValid()) return null;
+  return dt.unix();
+}
+
+function epochToTimeHM(epochSeconds) {
+  if (!epochSeconds) return null;
+  return dayjs.unix(Number(epochSeconds)).tz("Asia/Kolkata").format("HH:mm");
+}
+
+function normalizeDateToIST(dateValue) {
+  if (!dateValue) return null;
+  const d = new Date(dateValue);
+  const ist = new Date(d.getTime() + 5.5 * 3600 * 1000);
+  return ist.toISOString().slice(0, 10);
+}
+
+function enumerateDates(start, end) {
+  const res = [];
+  const cur = new Date(start);
+  while (cur <= end) {
+    res.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return res;
+}
+
+async function getCustomerWalletId(client, customerId) {
+  const walletRes = await client.query(`SELECT wallet_id FROM customer_wallets WHERE customerid=$1`, [customerId]);
+  if (walletRes.rows.length === 0) {
+    const insertRes = await client.query(`INSERT INTO customer_wallets (customerid, balance) VALUES ($1,0) RETURNING wallet_id`, [customerId]);
+    return insertRes.rows[0].wallet_id;
+  }
+  return walletRes.rows[0].wallet_id;
+}
+
+async function ensureProviderWallet(client, providerId) {
+  if (!providerId) return null;
+  const walletRes = await client.query(`SELECT * FROM provider_wallets WHERE serviceproviderid=$1`, [providerId]);
+  if (walletRes.rows.length === 0) {
+    const insertRes = await client.query(`INSERT INTO provider_wallets (serviceproviderid, balance, security_deposit_collected) VALUES ($1,0,0) RETURNING *`, [providerId]);
+    return insertRes.rows[0];
+  }
+  return walletRes.rows[0];
+}
+
+// small util: compute daily rate
+function computeDailyRate(baseAmount, startDate, endDate) {
+  const totalDays = (new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24) + 1;
+  return Number(baseAmount) / totalDays;
+}
+
+// ----------------- CREATE Engagement -----------------
+
 router.post("/", async (req, res) => {
   const client = await pool.connect();
-
   try {
-    const { 
+    const {
       customerid,
       serviceproviderid,
-      start_date,   // "YYYY-MM-DD"
-      end_date,     // "YYYY-MM-DD"
-      start_time,   // "HH:mm" or "HH:mm AM/PM"
-      base_amount,
+      start_date,
+      end_date,
+      start_time,
       responsibilities,
       booking_type,
       service_type,
+      base_amount,
       latitude,
       longitude,
       payment_mode = "razorpay",
     } = req.body;
 
-    // ✅ Normalize serviceproviderid (0 => null)
-    const providerId = serviceproviderid === 0 ? null : serviceproviderid;
+    if (!customerid || !start_date || !end_date || !start_time || !base_amount || !booking_type || !service_type) {
+      return res.status(400).json({ error: "Missing required fields." });
+    }
 
+    const providerId = serviceproviderid || null;
     const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
 
-    // Parse the start time in IST correctly
-const startDateTime = dayjs.tz(start_time, "HH:mm", "Asia/Kolkata");
-if (!startDateTime.isValid()) {
-  return res.status(400).json({ error: "Invalid start_time" });
-}
+    const startEpoch = toEpochSeconds(start_date, start_time);
+    if (!startEpoch) return res.status(400).json({ error: "Invalid date/time" });
 
-// Add duration
-const endDateTime = startDateTime.add(
-  booking_type === "ON_DEMAND" ? 2 : 1,
-  "hour"
-);
-
-// Final HH:mm:ss strings
-const startTimeFormatted = startDateTime.format("HH:mm:ss");
-const endTimeFormatted   = endDateTime.format("HH:mm:ss");
-
-
-    // 💰 Calculate fees
-    const platform_fee = base_amount * 0.1;
-    const gst = platform_fee * 0.18;
-    const total_amount = base_amount + platform_fee + gst;
+    const hoursToAdd = booking_type === "ON_DEMAND" ? 2 : 1;
+    const endEpoch = startEpoch + hoursToAdd * 3600;
 
     await client.query("BEGIN");
 
-        // ⛔ Conflict check only if provider is assigned (skip for ON_DEMAND UNASSIGNED)
-        if (providerId) {
-          // validate times again (defensive)
-          if (!startTimeFormatted || !endTimeFormatted) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ error: "Missing or invalid start_time/end_time" });
-          }
-          // --- build timezone-aware start/end for the requested date ---
-const newStart = dayjs.tz(
-  `${start_date} ${startTimeFormatted}`,
-  "YYYY-MM-DD HH:mm:ss",
-  "Asia/Kolkata"
-);
-const newEnd = dayjs.tz(
-  `${start_date} ${endTimeFormatted}`,
-  "YYYY-MM-DD HH:mm:ss",
-  "Asia/Kolkata"
-);
+    // Validate FKs
+    const cust = await client.query(`SELECT 1 FROM customer WHERE customerid=$1`, [customerid]);
+    if (cust.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Customer not found" }); }
 
-if (!newStart.isValid() || !newEnd.isValid() || newStart.isSame(newEnd) || newStart.isAfter(newEnd)) {
-  await client.query("ROLLBACK");
-  return res.status(400).json({ error: "Invalid time range requested" });
-}
+    if (providerId) {
+      const prov = await client.query(`SELECT 1 FROM serviceprovider WHERE serviceproviderid=$1`, [providerId]);
+      if (prov.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Provider not found" }); }
+    }
 
-// overlap query — ensure we pass start then end (lower then upper)
-const overlapQuery = `
-  SELECT provider_id, date, start_time, end_time
-  FROM provider_availability
-  WHERE provider_id = $1
-    AND date = $2::date
-    AND start_time IS NOT NULL
-    AND end_time IS NOT NULL
-    AND (
-          tstzrange(
-              (date + start_time)::timestamptz,
-              (date + end_time)::timestamptz,
-              '[)'
-          )
-          &&
-          tstzrange(
-              ($2::date + $3::time)::timestamptz,
-              ($2::date + $4::time)::timestamptz,
-              '[)'
-          )
-    )
-  LIMIT 1;
-`;
+    // Overlap check (epoch)
+    if (providerId) {
+      const overlap = await client.query(
+        `SELECT 1 FROM provider_availability
+         WHERE serviceproviderid=$1
+           AND $2 < slot_end_epoch
+           AND $3 > slot_start_epoch
+         LIMIT 1`,
+        [providerId, startEpoch, endEpoch]
+      );
+      if (overlap.rows.length > 0) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "Provider already has a booking on the selected date/time" });
+      }
+    }
 
-// pass START then END
-const overlapRes = await client.query(overlapQuery, [
-  providerId,
-  start_date,
-  startTimeFormatted, // $3 -> new range lower bound
-  endTimeFormatted    // $4 -> new range upper bound
-]);
-
-        
-          if (overlapRes.rows.length > 0) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({
-              error: `Provider already has a booking on the selected date and time.`,
-            });
-          }
-        }
-    
-
-    // 1️⃣ Insert engagement
-    const engagementResult = await client.query(
-      `INSERT INTO engagements 
+    // Insert engagement (store date columns as well for human-friendly queries)
+    const engQ = `
+      INSERT INTO engagements
         (customerid, serviceproviderid, start_date, end_date, responsibilities,
-         booking_type, service_type, task_status, active, base_amount, created_at, start_time, end_time, assignment_status)
-       VALUES 
-        ($1,$2,$3::date,$4::date,$5,$6,$7,'NOT_STARTED', true, $8, NOW(), $9::time, $10::time, $11)
-       RETURNING *`,
-      [
-        customerid,
-        providerId,
-        start_date,
-        end_date,
-        responsibilities,
-        booking_type,
-        service_type,
-        base_amount,
-        startTimeFormatted,
-        endTimeFormatted,
-        assignment_status
-      ]
-    );
-    const engagement = engagementResult.rows[0];
+         booking_type, service_type, task_status, active, base_amount,
+         created_at, assignment_status, start_epoch, end_epoch)
+      VALUES ($1,$2,$3::date,$4::date,$5,$6,$7,'NOT_STARTED',true,$8,NOW(),$9,$10,$11)
+      RETURNING *`;
+    const engVals = [
+      customerid,
+      providerId,
+      start_date,
+      end_date,
+      responsibilities,
+      booking_type,
+      service_type,
+      base_amount,
+      assignment_status,
+      startEpoch,
+      endEpoch,
+    ];
+    const engRes = await client.query(engQ, engVals);
+    const engagement = engRes.rows[0];
 
-    // 2️⃣ Razorpay order
+    // Payment creation
+    const platform_fee = Number(base_amount) * 0.1;
+    const gst = platform_fee * 0.18;
+    const total_amount = Number(base_amount) + platform_fee + gst;
+
     let razorpay_order_id = null;
     if (payment_mode === "razorpay") {
       const order = await razorpay.orders.create({
@@ -195,825 +177,701 @@ const overlapRes = await client.query(overlapQuery, [
       razorpay_order_id = order.id;
     }
 
-    // 3️⃣ Insert payment
-    const paymentResult = await client.query(
-      `INSERT INTO payments
+    const payQ = `
+      INSERT INTO payments
         (engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, status, razorpay_order_id, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,NOW())
-       RETURNING *`,
-      [engagement.engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, razorpay_order_id]
-    );
-    const payment = paymentResult.rows[0];
+      VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,NOW())
+      RETURNING *`;
+    const payRes = await client.query(payQ, [engagement.engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, razorpay_order_id]);
 
-    // 4️⃣ Provider wallet & payout
-    let updated_wallet = null;
-    let payout = null;
-
+    // Create provider_availability rows daily for the engagement
     if (providerId) {
-      const walletRes = await client.query(
-        "SELECT balance, security_deposit_collected FROM provider_wallets WHERE serviceproviderid=$1",
-        [providerId]
-      );
-      const providerWallet = walletRes.rows[0] || { balance: 0, security_deposit_collected: 0 };
+      const startD = new Date(start_date);
+      const endD = new Date(end_date);
+      for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+        const day = d.toISOString().slice(0, 10);
+        const dayStartEpoch = toEpochSeconds(day, start_time);
+        const dayEndEpoch = dayStartEpoch + hoursToAdd * 3600;
 
-      let provider_payout;
-      let new_security_deposit = providerWallet.security_deposit_collected;
-
-      if (providerWallet.security_deposit_collected < 5000) {
-        const remaining_deposit = 5000 - providerWallet.security_deposit_collected;
-        const deduction = Math.min(base_amount * 0.1, remaining_deposit);
-        provider_payout = base_amount - deduction;
-        new_security_deposit += deduction;
-      } else {
-        provider_payout = base_amount;
+        await client.query(
+          `INSERT INTO provider_availability
+            (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at)
+           VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())`,
+          [providerId, engagement.engagement_id, day, dayStartEpoch, dayEndEpoch]
+        );
       }
-
-      const updatedWalletRes = await client.query(
-        `UPDATE provider_wallets
-         SET balance = balance + $1,
-             security_deposit_collected = $2
-         WHERE serviceproviderid = $3
-         RETURNING *`,
-        [provider_payout, new_security_deposit, providerId]
-      );
-      updated_wallet = updatedWalletRes.rows[0];
-
-      const payoutResult = await client.query(
-        `INSERT INTO payouts
-          (serviceproviderid, engagement_id, gross_amount, provider_fee, tds_amount, net_amount, payout_mode, status, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,NULL,'INITIATED', NOW())
-         RETURNING *`,
-        [
-          providerId,
-          engagement.engagement_id,
-          base_amount,
-          new_security_deposit - providerWallet.security_deposit_collected,
-          0,
-          provider_payout
-        ]
-      );
-      payout = payoutResult.rows[0];
-
-      // 5️⃣ Insert into provider_availability
-if (serviceproviderid) {
-  if (booking_type === "ON_DEMAND") {
-    // Just 1 day slot
-    await client.query(
-      `INSERT INTO provider_availability
-         (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
-       VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
-      [serviceproviderid, engagement.engagement_id, start_date, startTimeFormatted, endTimeFormatted]
-    );
-  } else {
-    // Monthly or Short-term: fill for every day between start_date and end_date
-    const start = new Date(start_date);
-    const end = new Date(end_date);
-
-    for (
-      let d = new Date(start);
-      d <= end;
-      d.setDate(d.getDate() + 1)
-    ) {
-      const day = d.toISOString().slice(0, 10); // YYYY-MM-DD
-      await client.query(
-        `INSERT INTO provider_availability
-           (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
-         VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
-        [serviceproviderid, engagement.engagement_id, day, startTimeFormatted, endTimeFormatted]
-      );
-    }
-  }
-}
     }
 
     await client.query("COMMIT");
 
-    // ✅ Step 6: If no provider assigned → notify nearby providers
-    if (!providerId && latitude && longitude) {
-      const providerRes = await pool.query(
-        `SELECT serviceproviderid, firstname, lastname, latitude, longitude
-         FROM serviceprovider
-         WHERE isactive = true
-           AND latitude IS NOT NULL
-           AND longitude IS NOT NULL`
-      );
+    // prepare response (normalize dates + build times)
+    engagement.start_date = normalizeDateToIST(engagement.start_date);
+    engagement.end_date = normalizeDateToIST(engagement.end_date);
+    engagement.start_time = epochToTimeHM(engagement.start_epoch);
+    engagement.end_time = epochToTimeHM(engagement.end_epoch);
 
-      const nearbyProviders = providerRes.rows.filter((p) => {
-        const distance = geolib.getDistance(
-          { latitude, longitude },
-          { latitude: p.latitude, longitude: p.longitude }
-        );
-        return distance <= 5000; // within 5 km
-      });
-
-      console.log("Nearby providers found:", nearbyProviders.length);
-
-      // Send notifications
-      nearbyProviders.forEach((p) => {
-        io.to(`provider_${p.serviceproviderid}`).emit("new-engagement", {
-          engagement: {
-            engagement_id: engagement.engagement_id,
-            service_type,
-            booking_type,
-            start_date,
-            end_date,
-            start_time: startTimeFormatted,
-            end_time: endTimeFormatted,
-            base_amount,
-          },
-          payment, // optional: include payment if you want
-        });
-      });
-    }
-
-    res.status(201).json({
-      message: "Engagement created successfully",
-      engagement,
-      payment,
-      updated_wallet,
-      payout,
-    });
-  } catch (error) {
-    await client.query("ROLLBACK");
-    console.error("Error creating engagement:", error);
-    res.status(500).json({ error: "Failed to create engagement" });
+    return res.status(201).json({ message: "Engagement created", engagement, payment: payRes.rows[0] });
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch (e) {}
+    console.error("Error creating engagement:", err);
+    return res.status(500).json({ error: "Failed to create engagement", detail: err.message });
   } finally {
     client.release();
   }
 });
 
+// GET all engagements for a customer (FULL VERSION)
+// Includes: provider details, payments, modifications, vacations, epoch times
 
+router.get("/:customerId/engagements", async (req, res) => {
+  try {
+    const { customerId } = req.params;
 
-
-
-  
-
-// GET /api/engagements - list all engagements
-router.get("/", async (req, res) => {
-    try {
-      const result = await pool.query("SELECT * FROM engagements ORDER BY created_at DESC");
-      res.json(result.rows);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Failed to fetch engagements" });
-    }
-  });
-
-  // GET /api/engagements/:id - get engagement by ID
-
-  router.get("/:id", async (req, res) => {
-    try {
-      const result = await pool.query("SELECT * FROM engagements WHERE engagement_id=$1", [req.params.id]);
-      if (result.rows.length === 0) return res.status(404).json({ error: "Engagement not found" });
-      res.json(result.rows[0]);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch engagement" });
-    }
-  });
-
-  // PUT /api/engagements/:id - update engagement by ID
-  
-
-  // PATCH /api/engagements/:id/cancel - cancel engagement
-
-  router.patch("/:id/cancel", async (req, res) => {
-    try {
-      const result = await pool.query(
-        `UPDATE engagements SET status='cancelled', updated_at=NOW() WHERE engagement_id=$1 RETURNING *`,
-        [req.params.id]
-      );
-  
-      if (result.rows.length === 0) return res.status(404).json({ error: "Engagement not found" });
-      res.json({ message: "Engagement cancelled", engagement: result.rows[0] });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to cancel engagement" });
-    }
-  });
-
-  // DELETE /api/engagements/:id - delete engagement by ID
-  router.delete("/:id", async (req, res) => {
-    try {
-      const result = await pool.query("DELETE FROM engagements WHERE engagement_id=$1 RETURNING *", [req.params.id]);
-      if (result.rows.length === 0) return res.status(404).json({ error: "Engagement not found" });
-      res.json({ message: "Engagement deleted", engagement: result.rows[0] });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete engagement" });
-    }
-  });
-
-
-// Utility: fetch or create customer's wallet_id
-async function getCustomerWalletId(client, customerId) {
-  const walletRes = await client.query(
-    `SELECT wallet_id FROM customer_wallets WHERE customerid=$1`,
-    [customerId]
-  );
-
-  if (walletRes.rows.length === 0) {
-    const insertRes = await client.query(
-      `INSERT INTO customer_wallets (customerid, balance)
-       VALUES ($1, 0)
-       RETURNING wallet_id`,
+    // ---- Fetch all engagements ----
+    const engagementsRes = await pool.query(
+      `SELECT * FROM engagements WHERE customerid=$1 ORDER BY start_date ASC`,
       [customerId]
     );
-    console.log(`✅ Created wallet for customer ${customerId}`);
-    return insertRes.rows[0].wallet_id;
-  }
 
-  return walletRes.rows[0].wallet_id;
-}
+    if (engagementsRes.rows.length === 0) {
+      return res.json({ upcoming: [], ongoing: [], past: [] });
+    }
 
-// Utility: ensure provider wallet exists
-async function ensureProviderWallet(client, providerId) {
-  const walletRes = await client.query(
-    `SELECT * FROM provider_wallets WHERE serviceproviderid=$1`,
-    [providerId]
-  );
+    const engagements = engagementsRes.rows;
+    const engagementIds = engagements.map(e => e.engagement_id);
 
-  if (walletRes.rows.length === 0) {
-    const insertRes = await client.query(
-      `INSERT INTO provider_wallets (serviceproviderid, balance, security_deposit_collected)
-       VALUES ($1, 0, 0)
-       RETURNING *`,
-      [providerId]
+    // ---- Fetch modifications ----
+    const modRes = await pool.query(
+      `SELECT engagement_id, modified_at, modified_fields 
+       FROM engagement_modifications 
+       WHERE engagement_id = ANY($1)
+       ORDER BY modified_at DESC`,
+      [engagementIds]
     );
-    console.log(`✅ Created wallet for provider ${providerId}`);
-    return insertRes.rows[0];
+
+    // ---- Fetch payments ----
+    const paymentsRes = await pool.query(
+      `SELECT engagement_id, base_amount, platform_fee, gst, total_amount, 
+              payment_mode, status, created_at 
+       FROM payments 
+       WHERE engagement_id = ANY($1)`,
+      [engagementIds]
+    );
+
+    // ---- Fetch provider details ----
+    const providerIds = engagements.map(e => e.serviceproviderid).filter(Boolean);
+    const providerRes = await pool.query(
+      `SELECT serviceproviderid, firstname, lastname, rating 
+       FROM serviceprovider 
+       WHERE serviceproviderid = ANY($1)`,
+      [providerIds]
+    );
+
+    // ---- Map providers ----
+    const providerById = {};
+    providerRes.rows.forEach(p => {
+      providerById[p.serviceproviderid] = p;
+    });
+
+    // ---- Map payments ----
+    const paymentByEng = {};
+    paymentsRes.rows.forEach(p => {
+      paymentByEng[p.engagement_id] = p;
+    });
+
+    // ---- Prepare modifications & vacations ----
+    const modsByEng = {};
+    const vacationsByEng = {};
+
+    modRes.rows.forEach(mod => {
+      const parsed =
+        typeof mod.modified_fields === "string"
+          ? JSON.parse(mod.modified_fields)
+          : mod.modified_fields;
+
+      if (!modsByEng[mod.engagement_id]) modsByEng[mod.engagement_id] = [];
+      if (!vacationsByEng[mod.engagement_id]) vacationsByEng[mod.engagement_id] = [];
+
+      let action = "Modified";
+
+      if (parsed?.modification_type === "VACATION_ADDED") action = "Vacation Applied";
+      if (parsed?.modification_type === "VACATION_MODIFIED") action = "Vacation Updated";
+      if (parsed?.modification_type === "VACATION_CANCELLED") action = "Vacation Cancelled";
+
+      // Push into modifications[]
+      modsByEng[mod.engagement_id].push({
+        date: mod.modified_at,
+        action,
+        refund:
+          parsed?.updated?.refund ??
+          parsed?.wallet_effect?.customer_credit ??
+          null,
+        penalty:
+          parsed?.wallet_effect?.customer_debit ??
+          parsed?.updated?.penalty ??
+          null,
+      });
+
+      // Push into vacations[] only if it's a vacation event
+      if (parsed?.modification_type?.startsWith("VACATION")) {
+        vacationsByEng[mod.engagement_id].push({
+          start_date: parsed?.updated?.vacation_start_date || null,
+          end_date: parsed?.updated?.vacation_end_date || null,
+          leave_days: parsed?.updated?.leave_days || null,
+          refund:
+            parsed?.updated?.refund ??
+            parsed?.wallet_effect?.customer_credit ??
+            null,
+          penalty:
+            parsed?.wallet_effect?.customer_debit ??
+            parsed?.updated?.penalty ??
+            null,
+          action,
+          applied_on: mod.modified_at,
+        });
+      }
+    });
+
+    // ---- Group engagements ----
+    const now = dayjs().unix();
+    const upcoming = [];
+    const ongoing = [];
+    const past = [];
+
+    engagements.forEach(e => {
+      const start = Number(e.start_epoch);
+      const end = Number(e.end_epoch);
+
+      const enriched = {
+        ...e,
+        start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
+        end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
+
+        provider: providerById[e.serviceproviderid] || null,
+        payment: paymentByEng[e.engagement_id] || null,
+        modifications: modsByEng[e.engagement_id] || [],
+        vacations: vacationsByEng[e.engagement_id] || [],
+      };
+
+      if (now < start) upcoming.push(enriched);
+      else if (now > end) past.push(enriched);
+      else ongoing.push(enriched);
+    });
+
+    return res.json({ upcoming, ongoing, past });
+
+  } catch (err) {
+    console.error("GET engagements error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
+});
 
-  return walletRes.rows[0];
-}
 
+
+// ----------------- PUT /:id — update engagement (supports time/provider/date changes & vacation) -----------------
+//
+// Supports:
+// - updating start_date, end_date, start_time (recomputes epochs & availability)
+// - changing serviceproviderid (reassign provider) — will check availability/conflicts
+// - applying/modifying/cancelling vacation (see fields below)
+// - updating other fields: responsibilities, booking_type, service_type, base_amount, task_status, active
+//
+// Vacation-specific fields (in body):
+//  - vacation_start_date (YYYY-MM-DD)
+//  - vacation_end_date   (YYYY-MM-DD)
+//  - cancel_vacation (boolean)
+//  - modified_by_id, modified_by_role
+//
+// Note: business rules you confirmed:
+//  - refund = dailyRate * leaveDays
+//  - penalty = 400 when modifying existing vacation
+//
 router.put("/:id", async (req, res) => {
   const client = await pool.connect();
   const { id } = req.params;
-
   try {
     await client.query("BEGIN");
 
-    // 1️⃣ Fetch engagement
-    const engRes = await client.query(
-      "SELECT * FROM engagements WHERE engagement_id=$1",
-      [id]
-    );
-    if (engRes.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "Engagement not found" });
-    }
-    const oldEng = engRes.rows[0];
-    const providerId = oldEng.serviceproviderid;
+    // Lock engagement row
+    const engRow = await client.query(`SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`, [id]);
+    if (engRow.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Engagement not found" }); }
+    const oldEng = engRow.rows[0];
+
+    const providerBefore = oldEng.serviceproviderid;
     const customerId = oldEng.customerid;
 
-    // Ensure wallets exist
+    // ensure wallets exist
     const customerWalletId = await getCustomerWalletId(client, customerId);
-    await ensureProviderWallet(client, providerId);
+    await ensureProviderWallet(client, providerBefore);
 
-    // 2️⃣ Extract request fields
+    // Extract body
+    const body = req.body || {};
     const {
       start_date,
       end_date,
       start_time,
-      end_time,
+      serviceproviderid,
       responsibilities,
       booking_type,
       service_type,
+      base_amount,
       task_status,
       active,
-      base_amount,
       vacation_start_date,
       vacation_end_date,
       cancel_vacation,
       modified_by_id,
       modified_by_role
-    } = req.body;
+    } = body;
 
-    // --- Utility: daily rate ---
-    const totalDays =
-      (new Date(oldEng.end_date) - new Date(oldEng.start_date)) /
-        (1000 * 60 * 60 * 24) +
-      1;
-    const dailyRate = Number(oldEng.base_amount) / totalDays;
+    const isVacationOperation = (vacation_start_date !== undefined) || (vacation_end_date !== undefined) || (cancel_vacation);
 
-    // --- Vacation Handling ---
-    if (vacation_start_date || vacation_end_date || cancel_vacation) {
-      const prevLeaveDays = oldEng.leave_days || 0;
-
-      if (cancel_vacation) {
-        // ➡️ Cancel leave
-        const refundToRevert = prevLeaveDays * dailyRate;
-
-        // Customer wallet (DEBIT)
-        await client.query(
-          `UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`,
-          [refundToRevert, customerWalletId]
-        );
-        await client.query(
-          `INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type)
-           VALUES ($1,$2,$3,'DEBIT')`,
-          [customerWalletId, id, refundToRevert]
-        );
-
-        // Provider wallet (CREDIT)
-        await client.query(
-          `UPDATE provider_wallets SET balance = balance + $1 WHERE serviceproviderid=$2`,
-          [refundToRevert, providerId]
-        );
-
-        // Update payouts
-        await client.query(
-          `UPDATE payouts SET net_amount = net_amount + $1 WHERE engagement_id=$2`,
-          [refundToRevert, id]
-        );
-
-        // Restore provider availability
-        await client.query(
-          `UPDATE provider_availability SET status='BOOKED' WHERE engagement_id=$1`,
-          [id]
-        );
-
-        // Log modification
-        await client.query(
-          `INSERT INTO engagement_modifications
-           (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
-           VALUES ($1,$2::jsonb,$3,$4,NOW())`,
-          [id, JSON.stringify({ cancel_vacation: true }), modified_by_id, modified_by_role]
-        );
-
-      } else {
-        // ➡️ Apply or modify leave
-        const vacStart = new Date(vacation_start_date || oldEng.vacation_start_date);
-        const vacEnd = new Date(vacation_end_date || oldEng.vacation_end_date);
-
-        const leaveDays = (vacEnd - vacStart) / (1000 * 60 * 60 * 24) + 1;
-        const refundAmount = leaveDays * dailyRate;
-
-        let penalty = 0;
-        if (prevLeaveDays > 0) {
-          // Modification case → apply ₹400 penalty
-          penalty = 400;
-
-          await client.query(
-            `UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`,
-            [penalty, customerWalletId]
-          );
-          await client.query(
-            `INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type)
-             VALUES ($1,$2,$3,'DEBIT')`,
-            [customerWalletId, id, penalty]
-          );
-        }
-
-        // Refund to customer (CREDIT)
-        await client.query(
-          `UPDATE customer_wallets SET balance = balance + $1 WHERE wallet_id=$2`,
-          [refundAmount, customerWalletId]
-        );
-        await client.query(
-          `INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type)
-           VALUES ($1,$2,$3,'CREDIT')`,
-          [customerWalletId, id, refundAmount]
-        );
-
-        // Deduct provider payout
-        await client.query(
-          `UPDATE provider_wallets SET balance = balance - $1 WHERE serviceproviderid=$2`,
-          [refundAmount, providerId]
-        );
-
-        // Update payouts
-        await client.query(
-          `UPDATE payouts SET net_amount = net_amount - $1 WHERE engagement_id=$2`,
-          [refundAmount, id]
-        );
-
-        // Free provider availability
-        await client.query(
-          `UPDATE provider_availability
-           SET status='FREE'
-           WHERE engagement_id=$1
-             AND date BETWEEN $2::date AND $3::date`,
-          [id, vacStart, vacEnd]
-        );
-
-        // Update engagement with leave info
-        await client.query(
-          `UPDATE engagements
-           SET vacation_start_date=$1, vacation_end_date=$2, leave_days=$3
-           WHERE engagement_id=$4`,
-          [vacStart, vacEnd, leaveDays, id]
-        );
-
-        // Log modification
-        await client.query(
-          `INSERT INTO engagement_modifications
-           (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
-           VALUES ($1,$2::jsonb,$3,$4,NOW())`,
-          [
-            id,
-            JSON.stringify({
-              vacation_start_date: vacStart,
-              vacation_end_date: vacEnd,
-              leave_days: leaveDays,
-              refund: refundAmount,
-              penalty
-            }),
-            modified_by_id,
-            modified_by_role
-          ]
-        );
-      }
-
-    } else {
-      // --- Normal engagement update ---
+    // If it's a non-vacation update that can include changing time/provider/dates -> handle separately
+    if (!isVacationOperation) {
+      // Build update set
       const setClauses = [];
       const values = [];
       let idx = 1;
 
-      if (start_date !== undefined) {
-        setClauses.push(`start_date = $${idx++}`);
-        values.push(start_date);
-      }
-      if (end_date !== undefined) {
-        setClauses.push(`end_date = $${idx++}`);
-        values.push(end_date);
-      }
-      if (start_time !== undefined) {
-        setClauses.push(`start_time = $${idx++}::time`);
-        values.push(start_time);
-      }
-      if (end_time !== undefined) {
-        setClauses.push(`end_time = $${idx++}::time`);
-        values.push(end_time);
-      }
-      if (responsibilities !== undefined) {
-        setClauses.push(`responsibilities = $${idx++}::jsonb`);
-        values.push(JSON.stringify(responsibilities));
-      }
-      if (booking_type !== undefined) {
-        setClauses.push(`booking_type = $${idx++}`);
-        values.push(booking_type);
-      }
-      if (service_type !== undefined) {
-        setClauses.push(`service_type = $${idx++}`);
-        values.push(service_type);
-      }
-      if (task_status !== undefined) {
-        setClauses.push(`task_status = $${idx++}`);
-        values.push(task_status);
-      }
-      if (active !== undefined) {
-        setClauses.push(`active = $${idx++}`);
-        values.push(active);
-      }
-      if (base_amount !== undefined) {
-        setClauses.push(`base_amount = $${idx++}`);
-        values.push(base_amount);
+      // fields allowed to update (including changing provider/time/date)
+      const mapping = {
+        start_date: { cast: '::date' },
+        end_date: { cast: '::date' },
+        responsibilities: { json: true },
+        booking_type: {},
+        service_type: {},
+        task_status: {},
+        active: {},
+        base_amount: {},
+        serviceproviderid: {},
+      };
+
+      for (const f of Object.keys(mapping)) {
+        if (body[f] !== undefined) {
+          if (f === 'responsibilities') {
+            setClauses.push(`${f} = $${idx++}`);
+            values.push(JSON.stringify(body[f]));
+          } else {
+            setClauses.push(`${f} = $${idx++}`);
+            values.push(body[f]);
+          }
+        }
       }
 
+      // handle time/date -> recompute epochs and update provider_availability accordingly
+      let newStartEpoch = oldEng.start_epoch;
+      let newEndEpoch = oldEng.end_epoch;
+      let newStartDate = oldEng.start_date;
+      let newEndDate = oldEng.end_date;
+      let newProviderId = (body.serviceproviderid !== undefined) ? body.serviceproviderid : oldEng.serviceproviderid;
+      let newStartTimeStr = start_time || epochToTimeHM(oldEng.start_epoch);
+
+      if ((start_date && start_time) || (start_date && !start_time && oldEng.start_epoch)) {
+        // we have a new start_date and possibly start_time -> compute newStartEpoch
+        const timeForStart = start_time || epochToTimeHM(oldEng.start_epoch);
+        newStartEpoch = toEpochSeconds(start_date, timeForStart);
+        newStartDate = start_date;
+      } else if (start_time && !start_date) {
+        // change only time; date stays same
+        const timeForStart = start_time;
+        newStartEpoch = toEpochSeconds(oldEng.start_date.toISOString ? oldEng.start_date.toISOString().slice(0,10) : oldEng.start_date, timeForStart);
+        newStartDate = normalizeDateToIST(oldEng.start_date);
+      }
+
+      if ((end_date && start_time) || (end_date && !start_time && oldEng.end_epoch)) {
+        const timeForEnd = start_time || epochToTimeHM(oldEng.end_epoch);
+        // endEpoch computed by adding duration (we preserve original duration)
+        // original duration:
+        const origDur = (oldEng.end_epoch && oldEng.start_epoch) ? (Number(oldEng.end_epoch) - Number(oldEng.start_epoch)) : 3600;
+        newEndEpoch = (newStartEpoch) ? newStartEpoch + origDur : oldEng.end_epoch;
+        newEndDate = end_date;
+      } else if (end_date && !start_time) {
+        // date changed only: shift end accordingly preserving time
+        const origDur = (oldEng.end_epoch && oldEng.start_epoch) ? (Number(oldEng.end_epoch) - Number(oldEng.start_epoch)) : 3600;
+        const startForNew = toEpochSeconds(end_date, epochToTimeHM(oldEng.start_epoch));
+        newEndEpoch = startForNew + origDur;
+        newEndDate = end_date;
+      } else if (start_time && !end_date && !start_date) {
+        // only time changed -> shift end as well preserving duration
+        const origDur = (oldEng.end_epoch && oldEng.start_epoch) ? (Number(oldEng.end_epoch) - Number(oldEng.start_epoch)) : 3600;
+        const startForNew = toEpochSeconds(normalizeDateToIST(oldEng.start_date), start_time);
+        newStartEpoch = startForNew;
+        newEndEpoch = startForNew + origDur;
+      }
+
+      // If provider changed, validate new provider
+      if (newProviderId && newProviderId !== providerBefore) {
+        const provCheck = await client.query(`SELECT 1 FROM serviceprovider WHERE serviceproviderid=$1`, [newProviderId]);
+        if (provCheck.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "New provider not found" }); }
+        await ensureProviderWallet(client, newProviderId);
+      }
+
+      // Overlap checks for new provider/time/dates: check each daily slot that would be created
+      // Build list of dates for new availability
+      const startDateOnly = newStartDate ? new Date(newStartDate) : new Date(oldEng.start_date);
+      const endDateOnly = newEndDate ? new Date(newEndDate) : new Date(oldEng.end_date);
+      const dateList = enumerateDates(startDateOnly, endDateOnly);
+
+      // compute representative daily slot times (HH:mm) from newStartEpoch
+      const dailyStartTime = epochToTimeHM(newStartEpoch);
+      const dailyEndTime = epochToTimeHM(newEndEpoch);
+
+      // check conflicts for each day if provider assigned
+      if (newProviderId) {
+        for (const day of dateList) {
+          const dayStart = toEpochSeconds(day, dailyStartTime);
+          const dayEnd = dayStart + (Number(newEndEpoch) - Number(newStartEpoch));
+          const conflict = await client.query(
+            `SELECT engagement_id FROM provider_availability
+             WHERE serviceproviderid=$1
+               AND $2 < slot_end_epoch
+               AND $3 > slot_start_epoch
+               AND engagement_id != $4
+             LIMIT 1`,
+            [newProviderId, dayStart, dayEnd, id]
+          );
+          if (conflict.rows.length > 0) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ error: "Time overlap with another engagement for the provider", conflict: conflict.rows[0] });
+          }
+        }
+      }
+
+      // --- Proceed update: update provider_availability (free old provider slots, insert or update new provider slots)
+      // Free old provider availability rows (for the engagement)
+      if (providerBefore) {
+        await client.query(`UPDATE provider_availability SET status='FREE', slot_start_epoch=NULL, slot_end_epoch=NULL WHERE engagement_id=$1`, [id]);
+      }
+
+      // Insert/Update availability for new provider (daily)
+      if (newProviderId) {
+        const origDur = (oldEng.end_epoch && oldEng.start_epoch) ? (Number(oldEng.end_epoch) - Number(oldEng.start_epoch)) : 3600;
+        // clear any existing rows for engagement for new provider's dates (defensive)
+        for (const day of dateList) {
+          const ds = toEpochSeconds(day, dailyStartTime);
+          const de = ds + origDur;
+          // if a row exists for this engagement & day -> update, else insert
+          const exists = await client.query(
+            `SELECT 1 FROM provider_availability WHERE engagement_id=$1 AND date=$2::date LIMIT 1`,
+            [id, day]
+          );
+          if (exists.rows.length > 0) {
+            await client.query(
+              `UPDATE provider_availability
+               SET serviceproviderid=$1, slot_start_epoch=$2, slot_end_epoch=$3, status='BOOKED', updated_at=NOW()
+               WHERE engagement_id=$4 AND date=$5::date`,
+              [newProviderId, ds, de, id, day]
+            );
+          } else {
+            await client.query(
+              `INSERT INTO provider_availability
+                (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at)
+               VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())`,
+              [newProviderId, id, day, ds, de]
+            );
+          }
+        }
+      }
+
+      // Now update engagements table with new computed epoch and provider if provided
       if (setClauses.length > 0) {
         values.push(id);
-        await client.query(
-          `UPDATE engagements SET ${setClauses.join(", ")} WHERE engagement_id=$${idx}`,
-          values
-        );
+        await client.query(`UPDATE engagements SET ${setClauses.join(", ")} WHERE engagement_id=$${values.length}`, values);
+      }
+
+      // update epoch/date/provider fields explicitly if they changed
+      const updateFields = [];
+      const updateVals = [];
+      let uIdx = 1;
+      if (newStartEpoch !== oldEng.start_epoch) {
+        updateFields.push(`start_epoch = $${uIdx++}`); updateVals.push(newStartEpoch);
+      }
+      if (newEndEpoch !== oldEng.end_epoch) {
+        updateFields.push(`end_epoch = $${uIdx++}`); updateVals.push(newEndEpoch);
+      }
+      if (newStartDate && newStartDate !== oldEng.start_date) {
+        updateFields.push(`start_date = $${uIdx++}::date`); updateVals.push(newStartDate);
+      }
+      if (newEndDate && newEndDate !== oldEng.end_date) {
+        updateFields.push(`end_date = $${uIdx++}::date`); updateVals.push(newEndDate);
+      }
+      if (newProviderId !== providerBefore) {
+        updateFields.push(`serviceproviderid = $${uIdx++}`); updateVals.push(newProviderId);
+      }
+
+      if (updateFields.length > 0) {
+        updateVals.push(id);
+        await client.query(`UPDATE engagements SET ${updateFields.join(", ")} WHERE engagement_id=$${updateVals.length}`, updateVals);
       }
 
       // Log modification
       await client.query(
-        `INSERT INTO engagement_modifications
-         (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
+        `INSERT INTO engagement_modifications (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
          VALUES ($1,$2::jsonb,$3,$4,NOW())`,
-        [id, JSON.stringify(req.body), modified_by_id, modified_by_role]
+        [id, JSON.stringify({ updated_fields: body }), modified_by_id || null, modified_by_role || null]
       );
+
+      await client.query("COMMIT");
+
+      // return updated row
+      const updated = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+      updated.start_date = normalizeDateToIST(updated.start_date);
+      updated.end_date = normalizeDateToIST(updated.end_date);
+      updated.start_time = epochToTimeHM(updated.start_epoch);
+      updated.end_time = epochToTimeHM(updated.end_epoch);
+      return res.json({ message: "Engagement updated", engagement: updated });
     }
 
+    // ---------- Vacation specific flows ----------
+    // lock provider_availability rows for this engagement (we will update them)
+    await ensureProviderWallet(client, providerBefore);
+
+    // fetch previous vacation info
+    const prevVacStart = oldEng.vacation_start_date ? new Date(oldEng.vacation_start_date) : null;
+    const prevVacEnd = oldEng.vacation_end_date ? new Date(oldEng.vacation_end_date) : null;
+    const prevDates = (prevVacStart && prevVacEnd) ? enumerateDates(prevVacStart, prevVacEnd) : [];
+
+    // CANCEL vacation
+    if (cancel_vacation) {
+      if (prevDates.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "No existing vacation to cancel" }); }
+
+      // compute refund revert (customer to be debited, provider credited)
+      const dailyRate = computeDailyRate(oldEng.base_amount, oldEng.start_date, oldEng.end_date);
+      const refundToRevert = (oldEng.leave_days || prevDates.length) * dailyRate;
+
+      // ensure provider has availability free on those dates (no other engagements)
+      await client.query(`SELECT 1 FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) FOR UPDATE`, [providerBefore, prevDates]);
+      const conflicts = await client.query(
+        `SELECT engagement_id, date FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) AND engagement_id != $3 AND status='BOOKED'`,
+        [providerBefore, prevDates, id]
+      );
+      if (conflicts.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Cannot cancel vacation; provider is booked on some previously-vacation dates", conflicts: conflicts.rows }); }
+
+      // wallet ops: debit customer, credit provider
+      await client.query(`UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`, [refundToRevert, customerWalletId]);
+      await client.query(`INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type) VALUES ($1,$2,$3,'DEBIT')`, [customerWalletId, id, refundToRevert]);
+
+      await client.query(`UPDATE provider_wallets SET balance = balance + $1 WHERE serviceproviderid=$2`, [refundToRevert, providerBefore]);
+      await client.query(`UPDATE payouts SET net_amount = net_amount + $1 WHERE engagement_id=$2`, [refundToRevert, id]);
+
+      // restore provider availability rows (set to BOOKED)
+      await client.query(`UPDATE provider_availability SET status='BOOKED' WHERE engagement_id=$1 AND date = ANY($2)`, [id, prevDates]);
+
+      // update engagement
+      await client.query(`UPDATE engagements SET vacation_start_date=NULL, vacation_end_date=NULL, leave_days=0 WHERE engagement_id=$1`, [id]);
+
+      // audit
+      const audit = {
+        modification_type: "VACATION_CANCELLED",
+        previous: { vacation_start_date: prevVacStart ? prevVacStart.toISOString().slice(0,10) : null, vacation_end_date: prevVacEnd ? prevVacEnd.toISOString().slice(0,10) : null, leave_days: prevDates.length },
+        updated: null,
+        wallet_effect: { customer_debit: refundToRevert, provider_credit: refundToRevert }
+      };
+      await client.query(`INSERT INTO engagement_modifications (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at) VALUES ($1,$2::jsonb,$3,$4,NOW())`, [id, JSON.stringify(audit), modified_by_id || null, modified_by_role || null]);
+
+      await client.query("COMMIT");
+      const updated = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+      updated.start_date = normalizeDateToIST(updated.start_date);
+      updated.end_date = normalizeDateToIST(updated.end_date);
+      updated.start_time = epochToTimeHM(updated.start_epoch);
+      updated.end_time = epochToTimeHM(updated.end_epoch);
+      return res.json({ message: "Vacation cancelled", engagement: updated });
+    }
+
+    // APPLY or MODIFY vacation
+    if (!vacation_start_date || !vacation_end_date) {
+      await client.query("ROLLBACK"); return res.status(400).json({ error: "Both vacation_start_date and vacation_end_date are required" });
+    }
+
+    const vacStart = new Date(vacation_start_date);
+    const vacEnd = new Date(vacation_end_date);
+    if (vacStart > vacEnd) { await client.query("ROLLBACK"); return res.status(400).json({ error: "vacation_start_date must be <= vacation_end_date" }); }
+
+    // ensure vacation within engagement bounds
+    const engStart = new Date(oldEng.start_date);
+    const engEnd = new Date(oldEng.end_date);
+    if (vacStart < engStart || vacEnd > engEnd) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Vacation dates must fall within engagement start/end dates" }); }
+
+    const newDates = enumerateDates(vacStart, vacEnd);
+    const restoredDates = prevDates.filter(d => !newDates.includes(d)); // dates being restored (previously vacation, now active)
+    const freedDates = newDates.filter(d => !prevDates.includes(d)); // dates that become vacation (become free)
+
+    // If restoredDates exist -> check provider availability conflicts & time overlaps
+    if (restoredDates.length > 0) {
+      // compute daily start time (HH:mm) from engagement epochs
+      const checkStartTime = epochToTimeHM(oldEng.start_epoch);
+      const checkEndTime = epochToTimeHM(oldEng.end_epoch);
+      if (!checkStartTime || !checkEndTime) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Missing start/end time for overlap checks" }); }
+
+      // lock candidate rows
+      await client.query(`SELECT 1 FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) FOR UPDATE`, [providerBefore, restoredDates]);
+
+      // check for booked conflicts
+      const availConflicts = await client.query(
+        `SELECT date, engagement_id FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) AND engagement_id != $3 AND status='BOOKED'`,
+        [providerBefore, restoredDates, id]
+      );
+      if (availConflicts.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Provider is already booked on some restored dates", conflicts: availConflicts.rows }); }
+
+      // time overlap check using epoch math per day
+      for (const day of restoredDates) {
+        const dayStartEpoch = toEpochSeconds(day, checkStartTime);
+        const dayEndEpoch = toEpochSeconds(day, checkEndTime);
+        if (!dayStartEpoch || !dayEndEpoch || dayStartEpoch >= dayEndEpoch) { await client.query("ROLLBACK"); return res.status(400).json({ error: `Invalid computed time range for date ${day}` }); }
+
+        const timeConflict = await client.query(
+          `SELECT engagement_id, date FROM provider_availability WHERE serviceproviderid=$1 AND date=$2::date AND engagement_id != $3 AND $4 < slot_end_epoch AND $5 > slot_start_epoch LIMIT 1`,
+          [providerBefore, day, id, dayStartEpoch, dayEndEpoch]
+        );
+        if (timeConflict.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Time overlap with other engagements on restored dates", conflict: timeConflict.rows[0] }); }
+      }
+    }
+
+    // compute refund and penalty
+    const dailyRate = computeDailyRate(oldEng.base_amount, oldEng.start_date, oldEng.end_date);
+    const prevLeaveDays = oldEng.leave_days || prevDates.length || 0;
+    const newLeaveDays = newDates.length;
+    const refundAmount = newLeaveDays * dailyRate;
+    let penalty = 0;
+    if (prevLeaveDays > 0) penalty = 400; // business rule confirmed
+
+    // apply penalty (debit customer)
+    if (penalty > 0) {
+      await client.query(`UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`, [penalty, customerWalletId]);
+      await client.query(`INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type) VALUES ($1,$2,$3,'DEBIT')`, [customerWalletId, id, penalty]);
+    }
+
+    // credit refund to customer
+    await client.query(`UPDATE customer_wallets SET balance = balance + $1 WHERE wallet_id=$2`, [refundAmount, customerWalletId]);
+    await client.query(`INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type) VALUES ($1,$2,$3,'CREDIT')`, [customerWalletId, id, refundAmount]);
+
+    // deduct provider payout & adjust payouts
+    await client.query(`UPDATE provider_wallets SET balance = balance - $1 WHERE serviceproviderid=$2`, [refundAmount, providerBefore]);
+    await client.query(`UPDATE payouts SET net_amount = net_amount - $1 WHERE engagement_id=$2`, [refundAmount, id]);
+
+    // Update provider_availability rows:
+    // restoredDates -> BOOKED (update slot epochs as required), freedDates -> FREE
+    if (restoredDates.length > 0) {
+      // compute representative day epoch times
+      const repStartTime = epochToTimeHM(oldEng.start_epoch);
+      const repEndTime = epochToTimeHM(oldEng.end_epoch);
+      for (const day of restoredDates) {
+        const ds = toEpochSeconds(day, repStartTime);
+        const de = toEpochSeconds(day, repEndTime);
+        await client.query(`UPDATE provider_availability SET status='BOOKED', slot_start_epoch=$1, slot_end_epoch=$2 WHERE engagement_id=$3 AND date=$4::date`, [ds, de, id, day]);
+      }
+    }
+    if (freedDates.length > 0) {
+      for (const day of freedDates) {
+        await client.query(`UPDATE provider_availability SET status='FREE', slot_start_epoch=NULL, slot_end_epoch=NULL WHERE engagement_id=$1 AND date=$2::date`, [id, day]);
+      }
+    }
+
+    // Update engagement row with vacation info
+    await client.query(`UPDATE engagements SET vacation_start_date=$1::date, vacation_end_date=$2::date, leave_days=$3 WHERE engagement_id=$4`, [vacation_start_date, vacation_end_date, newLeaveDays, id]);
+
+    // Audit
+    const auditEntry = {
+      modification_type: prevDates.length === 0 ? "VACATION_ADDED" : "VACATION_MODIFIED",
+      previous: prevDates.length > 0 ? { vacation_start_date: prevVacStart ? prevVacStart.toISOString().slice(0,10) : null, vacation_end_date: prevVacEnd ? prevVacEnd.toISOString().slice(0,10) : null, leave_days: prevDates.length } : null,
+      updated: { vacation_start_date: vacation_start_date, vacation_end_date: vacation_end_date, leave_days: newLeaveDays, refund: refundAmount },
+      difference: { days_added: Math.max(0, newLeaveDays - prevLeaveDays), days_removed: Math.max(0, prevLeaveDays - newLeaveDays), refund_change: refundAmount - (oldEng.refund || 0), penalty },
+      wallet_effect: { customer_credit: refundAmount, customer_debit: penalty, provider_debit: refundAmount, payout_adjustment: -refundAmount },
+      availability_changes: { dates_freed: freedDates, dates_rebooked: restoredDates }
+    };
+
+    await client.query(`INSERT INTO engagement_modifications (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at) VALUES ($1,$2::jsonb,$3,$4,NOW())`, [id, JSON.stringify(auditEntry), modified_by_id || null, modified_by_role || null]);
+
     await client.query("COMMIT");
+    const updatedEng = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+    updatedEng.start_date = normalizeDateToIST(updatedEng.start_date);
+    updatedEng.end_date = normalizeDateToIST(updatedEng.end_date);
+    updatedEng.start_time = epochToTimeHM(updatedEng.start_epoch);
+    updatedEng.end_time = epochToTimeHM(updatedEng.end_epoch);
 
-    // Fetch updated engagement
-    const updatedRes = await pool.query(
-      "SELECT * FROM engagements WHERE engagement_id=$1",
-      [id]
-    );
-
-    res.json({
-      message: "Engagement updated successfully",
-      engagement: updatedRes.rows[0]
-    });
+    return res.json({ message: "Vacation applied/modified successfully", engagement: updatedEng, audit: auditEntry });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    try { await client.query("ROLLBACK"); } catch (e) {}
     console.error("Error updating engagement:", err);
-    res.status(500).json({ error: "Failed to update engagement" });
+    return res.status(500).json({ error: "Failed to update engagement", detail: err.message });
   } finally {
     client.release();
   }
 });
 
+// ----------------- Cancel engagement (simple) -----------------
+router.patch("/:id/cancel", async (req, res) => {
+  try {
+    const result = await pool.query(`UPDATE engagements SET status='cancelled', updated_at=NOW() WHERE engagement_id=$1 RETURNING *`, [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: "Engagement not found" });
+    // Mark provider availability FREE for this engagement
+    await pool.query(`UPDATE provider_availability SET status='FREE', slot_start_epoch=NULL, slot_end_epoch=NULL WHERE engagement_id=$1`, [req.params.id]);
+    return res.json({ message: "Engagement cancelled", engagement: result.rows[0] });
+  } catch (err) {
+    console.error("Error cancelling engagement:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
+// ----------------- Accept endpoint (simple) -----------------
+router.post("/:id/accept", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { serviceproviderid } = req.body;
+    const { id } = req.params;
+    if (!serviceproviderid) return res.status(400).json({ error: "serviceproviderid is required" });
 
+    await client.query("BEGIN");
+    const eng = await client.query(`SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`, [id]);
+    if (eng.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Engagement not found" }); }
+    const e = eng.rows[0];
+    if (e.assignment_status !== "UNASSIGNED") { await client.query("ROLLBACK"); return res.status(409).json({ error: "Engagement already assigned" }); }
 
+    // Check provider availability for the entire date range
+    const startD = new Date(e.start_date);
+    const endD = new Date(e.end_date);
+    const startTimeHM = epochToTimeHM(e.start_epoch);
+    const duration = (e.end_epoch && e.start_epoch) ? (Number(e.end_epoch) - Number(e.start_epoch)) : 3600;
 
-
-  
-  
-  
-
-  // 📌 Get all engagements (bookings) for a customer
-  router.get("/:customerId/engagements", async (req, res) => {
-    try {
-      const { customerId } = req.params;
-  
-      // 1️⃣ Fetch engagements (both active + inactive)
-      const engagementsResult = await pool.query(
-        `SELECT * FROM engagements 
-         WHERE customerid = $1
-         ORDER BY start_date ASC`,
-        [customerId]
-      );
-  
-      if (engagementsResult.rows.length === 0) {
-        return res.json({
-          success: true,
-          upcoming: [],
-          ongoing: [],
-          past: []
-        });
-      }
-  
-      const engagementIds = engagementsResult.rows.map(e => e.engagement_id);
-  
-      // 2️⃣ Fetch modifications
-      const modificationsResult = await pool.query(
-        `SELECT engagement_id, modified_at, modified_fields
-         FROM engagement_modifications 
-         WHERE engagement_id = ANY($1)
-         ORDER BY modified_at DESC`,
-        [engagementIds]
-      );
-  
-      // 3️⃣ Fetch payments (only customer-facing fields)
-      const paymentsResult = await pool.query(
-        `SELECT engagement_id, base_amount, total_amount, payment_mode, status
-         FROM payments 
-         WHERE engagement_id = ANY($1)`,
-        [engagementIds]
-      );
-  
-      // 4️⃣ Fetch limited provider info
-      const providersResult = await pool.query(
-        `SELECT serviceproviderid, firstname, lastname, rating
-         FROM serviceprovider
-         WHERE serviceproviderid = ANY($1)`,
-        [engagementsResult.rows.map(e => e.serviceproviderid).filter(Boolean)]
-      );
-  
-      // Grouping
-      const modificationsByEngagement = {};
-      modificationsResult.rows.forEach(mod => {
-        if (!modificationsByEngagement[mod.engagement_id]) {
-          modificationsByEngagement[mod.engagement_id] = [];
-        }
-        const parsedFields = typeof mod.modified_fields === "string" 
-          ? JSON.parse(mod.modified_fields) 
-          : mod.modified_fields;
-        modificationsByEngagement[mod.engagement_id].push({
-          date: mod.modified_at,
-          action: parsedFields?.cancel_vacation
-            ? "Vacation cancelled"
-            : parsedFields?.vacation_start_date
-            ? "Vacation updated"
-            : "Modified",
-          refund: parsedFields?.refund || null,
-          penalty: parsedFields?.penalty || null
-        });
-      });
-  
-      const paymentsByEngagement = {};
-      paymentsResult.rows.forEach(pay => {
-        paymentsByEngagement[pay.engagement_id] = pay;
-      });
-  
-      const providersById = {};
-      providersResult.rows.forEach(p => {
-        providersById[p.serviceproviderid] = p;
-      });
-  
-      const now = dayjs().tz("Asia/Kolkata");
-      const past = [], ongoing = [], upcoming = [];
-  
-      // 5️⃣ Attach extra data + categorize
-      engagementsResult.rows.forEach((e) => {
-        const start = dayjs(e.start_date).tz("Asia/Kolkata");
-        const end = dayjs(e.end_date).tz("Asia/Kolkata");
-  
-        // Build safe response object
-        const engagement = {
-          engagement_id: e.engagement_id,
-          service_type: e.service_type,
-          booking_type: e.booking_type,
-          responsibilities: e.responsibilities,
-          start_date: e.start_date,
-          end_date: e.end_date,
-          start_time: e.start_time,
-          end_time: e.end_time,
-          status: e.active ? "active" : "inactive",   // 👈 active/inactive only
-          task_status: e.task_status,                 // 👈 from DB
-          vacation: {
-            start_date: e.vacation_start_date,
-            end_date: e.vacation_end_date,
-            leave_days: e.leave_days
-          },
-          payment: paymentsByEngagement[e.engagement_id] || null,
-          modifications: modificationsByEngagement[e.engagement_id] || [],
-          provider: e.serviceproviderid
-            ? providersById[e.serviceproviderid] || null
-            : null
-        };
-  
-        // Categorization into upcoming/ongoing/past
-        if (now.isBefore(start)) {
-          upcoming.push(engagement);
-        } else if (now.isAfter(end)) {
-          past.push(engagement);
-        } else {
-          ongoing.push(engagement);
-        }
-      });
-  
-      return res.json({
-        success: true,
-        upcoming,
-        ongoing,
-        past
-      });
-  
-    } catch (error) {
-      console.error("Error fetching bookings:", error);
-      res.status(500).json({ success: false, error: "Internal server error" });
+    for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+      const day = d.toISOString().slice(0, 10);
+      const ds = toEpochSeconds(day, startTimeHM);
+      const de = ds + duration;
+      const conflict = await client.query(`SELECT 1 FROM provider_availability WHERE serviceproviderid=$1 AND $2 < slot_end_epoch AND $3 > slot_start_epoch LIMIT 1`, [serviceproviderid, ds, de]);
+      if (conflict.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Provider has conflict for date " + day }); }
     }
-  });
-  
-  
-  
 
+    const upd = await client.query(`UPDATE engagements SET serviceproviderid=$1, assignment_status='ASSIGNED' WHERE engagement_id=$2 RETURNING *`, [serviceproviderid, id]);
 
-  router.post("/:id/accept", async (req, res) => {
-    const client = await pool.connect();
-    try {
-      const { id } = req.params;
-      const { provider_id } = req.body;
-  
-      await client.query("BEGIN");
-  
-      // Lock engagement row to prevent race conditions
-      const engagementRes = await client.query(
-        `SELECT * FROM engagements 
-         WHERE engagement_id = $1
-         FOR UPDATE`,
-        [id]
-      );
-  
-      if (engagementRes.rows.length === 0) {
-        await client.query("ROLLBACK");
-        return res.status(404).json({ success: false, error: "Engagement not found" });
+    // Insert availability rows for the provider for each day (or update)
+    for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+      const day = d.toISOString().slice(0, 10);
+      const ds = toEpochSeconds(day, epochToTimeHM(e.start_epoch));
+      const de = ds + duration;
+      const exists = await client.query(`SELECT 1 FROM provider_availability WHERE engagement_id=$1 AND date=$2::date LIMIT 1`, [id, day]);
+      if (exists.rows.length > 0) {
+        await client.query(`UPDATE provider_availability SET serviceproviderid=$1, slot_start_epoch=$2, slot_end_epoch=$3, status='BOOKED', updated_at=NOW() WHERE engagement_id=$4 AND date=$5::date`, [serviceproviderid, ds, de, id, day]);
+      } else {
+        await client.query(`INSERT INTO provider_availability (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at) VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())`, [serviceproviderid, id, day, ds, de]);
       }
-  
-      const engagement = engagementRes.rows[0];
-  
-      if (engagement.assignment_status !== "UNASSIGNED") {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ success: false, error: "Engagement already assigned" });
-      }
-  
-      // ✅ Assign to provider
-      const updateRes = await client.query(
-        `UPDATE engagements
-         SET serviceproviderid = $1, assignment_status = 'ASSIGNED'
-         WHERE engagement_id = $2
-         RETURNING *`,
-        [provider_id, id]
-      );
-  
-      const updatedEngagement = updateRes.rows[0];
-  
-      // Insert into provider_availability (mark booked)
-      await client.query(
-        `INSERT INTO provider_availability 
-          (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
-         VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
-        [
-          provider_id,
-          updatedEngagement.engagement_id,
-          updatedEngagement.start_date,
-          updatedEngagement.start_time,
-          updatedEngagement.end_time,
-        ]
-      );
-  
-      await client.query("COMMIT");
-  
-      // 🔔 Notify winner
-      sendToProvider(provider_id, {
-        type: "ENGAGEMENT_ASSIGNED",
-        engagement: updatedEngagement,
-      });
-  
-      // 🔔 Optionally notify others (losers)
-      // broadcastToOthers(provider_id, { type: "ALREADY_ASSIGNED", engagement_id: id });
-  
-      return res.json({
-        success: true,
-        message: "Engagement assigned successfully",
-        engagement: updatedEngagement,
-      });
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.error("Error accepting engagement:", err);
-      return res.status(500).json({ success: false, error: "Internal server error" });
-    } finally {
-      client.release();
     }
-  });
 
+    await client.query("COMMIT");
 
-  router.patch("/:id/accept", async (req, res) => {
-    const client = await pool.connect();
-    try {
-      const engagementId = req.params.id;
-      const { providerId } = req.body;
-  
-      if (!providerId) {
-        return res.status(400).json({ error: "providerId is required" });
-      }
-  
-      await client.query("BEGIN");
-  
-      // 🔍 Fetch engagement
-      const engRes = await client.query(
-        `SELECT * FROM engagements WHERE engagement_id = $1 FOR UPDATE`,
-        [engagementId]
-      );
-      const engagement = engRes.rows[0];
-  
-      if (!engagement) {
-        await client.query("ROLLBACK");
-        return res.status(404).json({ error: "Engagement not found" });
-      }
-  
-      if (engagement.assignment_status !== "UNASSIGNED") {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ error: "Engagement already assigned" });
-      }
-  
-      // ✅ Update engagement with provider
-      const updateRes = await client.query(
-        `UPDATE engagements
-         SET serviceproviderid = $1,
-             assignment_status = 'ASSIGNED'
-         WHERE engagement_id = $2
-         RETURNING *`,
-        [providerId, engagementId]
-      );
-      const updatedEngagement = updateRes.rows[0];
-  
-      // ✅ Insert into provider_availability
-      await client.query(
-        `INSERT INTO provider_availability
-           (provider_id, engagement_id, date, start_time, end_time, status, created_at, updated_at)
-         VALUES ($1, $2, $3::date, $4::time, $5::time, 'BOOKED', NOW(), NOW())`,
-        [
-          providerId,
-          engagementId,
-          engagement.start_date,
-          engagement.start_time,
-          engagement.end_time,
-        ]
-      );
-  
-      await client.query("COMMIT");
-  
-      return res.json({
-        success: true,
-        message: "Engagement accepted successfully",
-        engagement: updatedEngagement,
-      });
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.error("Error accepting engagement:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    } finally {
-      client.release();
-    }
-  });
-  
-  
-  
-  
-  
-  
-  
+    const updated = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+    updated.start_date = normalizeDateToIST(updated.start_date);
+    updated.end_date = normalizeDateToIST(updated.end_date);
+    updated.start_time = epochToTimeHM(updated.start_epoch);
+    updated.end_time = epochToTimeHM(updated.end_epoch);
+    return res.json({ message: "Engagement assigned successfully", engagement: updated });
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch (e) {}
+    console.error("Error accepting engagement:", err);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
-  export default router;
-  
-  
-  
+export default router;

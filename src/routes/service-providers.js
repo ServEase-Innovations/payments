@@ -1,92 +1,100 @@
 import express from "express";
 import pool from "../config/db.js";
 import dayjs from "dayjs";
-import { DateTime } from "luxon";
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault("Asia/Kolkata");
 
 const router = express.Router();
 
-/**
- * GET provider payout summary and details
- * Optional query params: month=YYYY-MM, detailed=true
- */
+// Convert epoch → HH:mm (IST)
+function epochToTime(epoch) {
+  if (!epoch) return null;
+  return dayjs.unix(Number(epoch)).tz("Asia/Kolkata").format("HH:mm");
+}
+
+// Convert PG date → YYYY-MM-DD
+function normalizeDate(dateVal) {
+  if (!dateVal) return null;
+  return new Date(dateVal).toISOString().slice(0, 10);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                            PROVIDER PAYOUT SUMMARY                          */
+/* -------------------------------------------------------------------------- */
+
 router.get("/:providerId/payouts", async (req, res) => {
   const { providerId } = req.params;
   const { month, detailed } = req.query;
 
   try {
-    // 1️⃣ Fetch provider wallet and security deposit info
+    // 1️⃣ Fetch provider deposit
     const providerRes = await pool.query(
-      `SELECT serviceproviderid, security_deposit_collected 
-       FROM serviceprovider 
-       WHERE serviceproviderid=$1`,
+      `SELECT serviceproviderid, security_deposit_collected
+       FROM serviceprovider WHERE serviceproviderid=$1`,
       [providerId]
     );
 
-    if (providerRes.rows.length === 0) {
+    if (providerRes.rows.length === 0)
       return res.status(404).json({ success: false, error: "Provider not found" });
-    }
 
     const provider = providerRes.rows[0];
 
-    // 2️⃣ Prepare date filter safely
+    // 2️⃣ Build month filter
     let dateFilter = "";
-    let queryParams = [providerId];
+    const params = [providerId];
+
     if (month) {
-      if (!/^\d{4}-\d{2}$/.test(month)) {
-        return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
-      }
+      if (!/^\d{4}-\d{2}$/.test(month))
+        return res.status(400).json({ error: "Invalid month format. Use YYYY-MM" });
 
-      const startDate = dayjs(`${month}-01`).startOf("month").format("YYYY-MM-DD");
-      const endDate = dayjs(`${month}-01`).endOf("month").format("YYYY-MM-DD");
-
-      dateFilter = "AND created_at BETWEEN $2 AND $3";
-      queryParams.push(startDate, endDate);
+      dateFilter = "AND TO_CHAR(created_at,'YYYY-MM') = $2";
+      params.push(month);
     }
 
     // 3️⃣ Fetch payouts
     const payoutsRes = await pool.query(
-      `SELECT * 
-       FROM payouts 
-       WHERE serviceproviderid=$1 ${dateFilter} 
+      `SELECT * FROM payouts
+       WHERE serviceproviderid=$1 ${dateFilter}
        ORDER BY created_at ASC`,
-      queryParams
+      params
     );
 
     const payouts = payoutsRes.rows;
 
-    // 4️⃣ Calculate totals
-    const totalEarned = payouts.reduce((acc, p) => acc + parseFloat(p.net_amount || 0), 0);
+    // 4️⃣ Calculate summary
+    const totalEarned = payouts.reduce((a, p) => a + Number(p.net_amount || 0), 0);
     const totalWithdrawn = payouts
-      .filter(p => p.status === "SUCCESS")
-      .reduce((acc, p) => acc + parseFloat(p.net_amount || 0), 0);
+      .filter((p) => p.status === "SUCCESS")
+      .reduce((a, p) => a + Number(p.net_amount || 0), 0);
 
     const availableToWithdraw = totalEarned - totalWithdrawn;
+    const securityDepositPaid = Number(provider.security_deposit_collected || 0) >= 5000;
 
-    const securityDepositPaid = parseFloat(provider.security_deposit_collected || 0) >= 5000;
-    const securityDepositAmount = parseFloat(provider.security_deposit_collected || 0);
-
-    // 5️⃣ Prepare response
+    // 5️⃣ Response
     const response = {
       success: true,
       serviceproviderid: providerId,
-      month: month || null,
       summary: {
         total_earned: totalEarned,
         total_withdrawn: totalWithdrawn,
         available_to_withdraw: availableToWithdraw,
         security_deposit_paid: securityDepositPaid,
-        security_deposit_amount: securityDepositAmount,
+        security_deposit_amount: Number(provider.security_deposit_collected),
       },
     };
 
     if (detailed === "true") {
-      response.payouts = payouts.map(p => ({
+      response.payouts = payouts.map((p) => ({
         payout_id: p.payout_id,
         engagement_id: p.engagement_id,
-        gross_amount: parseFloat(p.gross_amount),
-        provider_fee: parseFloat(p.provider_fee),
-        tds_amount: parseFloat(p.tds_amount),
-        net_amount: parseFloat(p.net_amount),
+        gross_amount: Number(p.gross_amount),
+        provider_fee: Number(p.provider_fee),
+        tds_amount: Number(p.tds_amount),
+        net_amount: Number(p.net_amount),
         payout_mode: p.payout_mode,
         status: p.status,
         created_at: p.created_at,
@@ -96,174 +104,167 @@ router.get("/:providerId/payouts", async (req, res) => {
     return res.json(response);
   } catch (err) {
     console.error("Error fetching provider payouts:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*                      GET ALL ENGAGEMENTS FOR PROVIDER                      */
+/* -------------------------------------------------------------------------- */
+
+router.get("/:providerId/engagements", async (req, res) => {
+  const { providerId } = req.params;
+  const { status, month } = req.query;
+
+  try {
+    let query = `
+      SELECT 
+        e.engagement_id,
+        e.customerid,
+        e.serviceproviderid,
+        e.start_date,
+        e.end_date,
+        e.start_epoch,
+        e.end_epoch,
+        e.responsibilities,
+        e.booking_type,
+        e.service_type,
+        e.task_status,
+        e.assignment_status,
+        e.base_amount,
+        e.created_at,
+        e.vacation_start_date,
+        e.vacation_end_date,
+        e.leave_days,
+        c.firstname,
+        c.lastname,
+        c.mobileno
+      FROM engagements e
+      LEFT JOIN customer c ON e.customerid = c.customerid
+      WHERE e.serviceproviderid = $1
+    `;
+
+    const params = [providerId];
+    let idx = 2;
+
+    // Filter by status
+    if (status) {
+      query += ` AND e.task_status = $${idx}`;
+      params.push(status);
+      idx++;
+    }
+
+    // Filter by month
+    if (month) {
+      if (!/^\d{4}-\d{2}$/.test(month))
+        return res.status(400).json({ success: false, error: "Invalid month format" });
+
+      query += ` AND TO_CHAR(e.start_date,'YYYY-MM') = $${idx}`;
+      params.push(month);
+      idx++;
+    }
+
+    query += " ORDER BY e.start_date DESC";
+
+    const result = await pool.query(query, params);
+
+    const nowEpoch = dayjs().unix();
+    const current = [];
+    const past = [];
+    const upcoming = [];
+
+    result.rows.forEach((row) => {
+      row.startDate = normalizeDate(row.start_date);
+      row.endDate = normalizeDate(row.end_date);
+      row.startTime = epochToTime(row.start_epoch);
+      row.endTime = epochToTime(row.end_epoch);
+
+      if (nowEpoch < row.start_epoch) {
+        upcoming.push(row);
+      } else if (nowEpoch > row.end_epoch) {
+        past.push(row);
+      } else {
+        current.push(row);
+      }
+    });
+
+    return res.json({
+      success: true,
+      serviceproviderid: providerId,
+      current,
+      upcoming,
+      past,
+    });
+  } catch (err) {
+    console.error("Error fetching provider engagements:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/*                           PROVIDER CALENDAR API                             */
+/* -------------------------------------------------------------------------- */
 
-/**
- * GET all engagements for a service provider
- * Optional query params:
- *   - status (e.g., NOT_STARTED, IN_PROGRESS, COMPLETED, CANCELLED)
- *   - month=YYYY-MM (filter engagements by month)
- */
-router.get("/:providerId/engagements", async (req, res) => {
-    const { providerId } = req.params;
-    const { status, month } = req.query;
-  
-    try {
-      let query = `
-        SELECT 
-          e.engagement_id AS id,
-          e.customerid AS "customerId",
-          e.serviceproviderid AS "serviceProviderId",
-          e.start_date AS "startDate",
-          e.end_date AS "endDate",
-          e.start_time AS "startTime",
-          e.end_time AS "endTime",
-          e.responsibilities,
-          e.booking_type AS "bookingType",
-          e.service_type AS "serviceType",
-          e.task_status AS "taskStatus",
-          e.assignment_status AS "assignmentStatus",
-          e.base_amount AS "monthlyAmount",
-          e.created_at AS "bookingDate",
-          c.firstname,
-          c.middlename,
-          c.lastname,
-          c.mobileno
-        FROM engagements e
-        LEFT JOIN customer c ON e.customerid = c.customerid
-        WHERE e.serviceproviderid = $1
-      `;
-      let params = [providerId];
-      let paramIndex = 2;
-  
-      // Filter by status if provided
-      if (status) {
-        query += ` AND e.task_status = $${paramIndex}`;
-        params.push(status);
-        paramIndex++;
-      }
-  
-      // Filter by month if provided
-      if (month) {
-        if (!/^\d{4}-\d{2}$/.test(month)) {
-          return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
-        }
-        query += ` AND TO_CHAR(e.start_date, 'YYYY-MM') = $${paramIndex}`;
-        params.push(month);
-        paramIndex++;
-      }
-  
-      query += " ORDER BY e.start_date DESC, e.start_time ASC";
-  
-      const result = await pool.query(query, params);
-  
-      // Normalize today in UTC (YYYY-MM-DD)
-      const today = new Date().toISOString().slice(0, 10);
-      console.debug("DEBUG: Today =", today);
-      console.debug("DEBUG: Retrieved rows =", result.rows.length);
-  
-      const current = [];
-      const past = [];
-      const upcoming = [];
-  
-      result.rows.forEach((row) => {
-        // Convert startDate and endDate safely to YYYY-MM-DD
-        const startDate = row.startDate ? new Date(row.startDate).toISOString().slice(0, 10) : null;
-        const endDate = row.endDate ? new Date(row.endDate).toISOString().slice(0, 10) : null;
-  
-        console.debug(`DEBUG row: ${row.id} startDate: ${startDate} endDate: ${endDate}`);
-  
-        if (startDate && endDate && today >= startDate && today <= endDate) {
-          current.push(row);
-        } else if (endDate && today > endDate) {
-          past.push(row);
-        } else if (startDate && today < startDate) {
-          upcoming.push(row);
-        }
-      });
-  
-      console.debug("DEBUG: Current =", current.length, "Upcoming =", upcoming.length, "Past =", past.length);
-  
-      return res.json({
-        success: true,
-        serviceproviderid: providerId,
-        current,
-        upcoming,
-        past,
-      });
-    } catch (err) {
-      console.error("Error fetching engagements:", err);
-      res.status(500).json({ success: false, error: "Internal server error" });
-    }
-  });
-
-  /**
- * Get a service provider’s calendar
- * Supports optional filters by month and status
- */
 router.get("/:providerId/calendar", async (req, res) => {
-    const { providerId } = req.params;
-    const { month, status } = req.query;
-  
-    try {
-      let query = `
-        SELECT 
-          id,
-          provider_id,
-          engagement_id,
-          date,
-          start_time,
-          end_time,
-          status,
-          created_at,
-          updated_at
-        FROM provider_availability
-        WHERE provider_id = $1
-      `;
-      const params = [providerId];
-      let paramIndex = 2;
-  
-      // Month filter
-      if (month) {
-        if (!/^\d{4}-\d{2}$/.test(month)) {
-          return res.status(400).json({ success: false, error: "Invalid month format. Use YYYY-MM" });
-        }
-        query += ` AND TO_CHAR(date, 'YYYY-MM') = $${paramIndex}`;
-        params.push(month);
-        paramIndex++;
-      }
-  
-      // Status filter
-      if (status) {
-        query += ` AND status = $${paramIndex}`;
-        params.push(status.toUpperCase());
-        paramIndex++;
-      }
-  
-      query += " ORDER BY date ASC, start_time ASC";
-  
-      const result = await pool.query(query, params);
-  
-      return res.json({
-        success: true,
-        providerId,
-        calendar: result.rows,
-      });
-    } catch (err) {
-      console.error("Error fetching provider calendar:", err);
-      res.status(500).json({ success: false, error: "Internal server error" });
-    }
-  });
-  
-  
-  
-  
-  
-  
+  const { providerId } = req.params;
+  const { month, status } = req.query;
 
-  
+  try {
+    let query = `
+      SELECT 
+        id,
+        serviceproviderid,
+        engagement_id,
+        date,
+        slot_start_epoch,
+        slot_end_epoch,
+        status,
+        created_at,
+        updated_at
+      FROM provider_availability
+      WHERE serviceproviderid = $1
+    `;
+
+    const params = [providerId];
+    let idx = 2;
+
+    // Month filter
+    if (month) {
+      if (!/^\d{4}-\d{2}$/.test(month))
+        return res.status(400).json({ success: false, error: "Invalid month format" });
+
+      query += ` AND TO_CHAR(date,'YYYY-MM') = $${idx}`;
+      params.push(month);
+      idx++;
+    }
+
+    // Status filter
+    if (status) {
+      query += ` AND status = $${idx}`;
+      params.push(status.toUpperCase());
+      idx++;
+    }
+
+    query += " ORDER BY date ASC, slot_start_epoch ASC";
+
+    const result = await pool.query(query, params);
+
+    const calendar = result.rows.map((r) => ({
+      ...r,
+      date: normalizeDate(r.date),
+      start_time: epochToTime(r.slot_start_epoch),
+      end_time: epochToTime(r.slot_end_epoch),
+    }));
+
+    return res.json({
+      success: true,
+      providerId,
+      calendar,
+    });
+  } catch (err) {
+    console.error("Error fetching provider calendar:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
 
 export default router;
