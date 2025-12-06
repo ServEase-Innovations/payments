@@ -1,77 +1,54 @@
-name: CI/CD Deploy to AWS EC2
+name: Test SSH Connectivity
 
 on:
-  push:
-    branches: [ "dev", "qa", "prod" ]
-
   workflow_dispatch:
     inputs:
-      env:
-        description: "Select environment"
-        type: choice
+      environment:
+        description: "Select Environment"
         required: true
-        options:
-          - dev
-          - qa
-          - prod
+        type: choice
+        options: [dev, qa, uat, prod]
 
 jobs:
-  deploy:
+  ssh-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🛎️ Checkout code
-        uses: actions/checkout@v3
-
-      - name: 📌 Detect Target Environment
-        id: env
+      - name: Set EC2 Environment Config
+        id: envcfg
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            BRANCH="${{ github.event.inputs.env }}"
-          else
-            BRANCH="${GITHUB_REF##*/}"
-          fi
+          ENV="${{ github.event.inputs.environment }}"
+          echo "Testing SSH for environment: $ENV"
 
-          echo "Selected env = $BRANCH"
-
-          if [[ "$BRANCH" == "dev" ]]; then
+          if [ "$ENV" = "dev" ]; then
             echo "host=${{ secrets.DEV_HOST }}" >> $GITHUB_OUTPUT
-            echo "path=${{ secrets.DEV_PATH }}" >> $GITHUB_OUTPUT
-            echo "pm2_name=serveaso-dev" >> $GITHUB_OUTPUT
-            echo "env_file=.env.dev" >> $GITHUB_OUTPUT
+            echo "user=${{ secrets.DEV_USER }}" >> $GITHUB_OUTPUT
+            echo "key=${{ secrets.DEV_KEY }}" >> $GITHUB_OUTPUT
 
-          elif [[ "$BRANCH" == "qa" ]]; then
+          elif [ "$ENV" = "qa" ]; then
             echo "host=${{ secrets.QA_HOST }}" >> $GITHUB_OUTPUT
-            echo "path=${{ secrets.QA_PATH }}" >> $GITHUB_OUTPUT
-            echo "pm2_name=serveaso-qa" >> $GITHUB_OUTPUT
-            echo "env_file=.env.qa" >> $GITHUB_OUTPUT
+            echo "user=${{ secrets.QA_USER }}" >> $GITHUB_OUTPUT
+            echo "key=${{ secrets.QA_KEY }}" >> $GITHUB_OUTPUT
 
-          else
+          elif [ "$ENV" = "uat" ]; then
+            echo "host=${{ secrets.UAT_HOST }}" >> $GITHUB_OUTPUT
+            echo "user=${{ secrets.UAT_USER }}" >> $GITHUB_OUTPUT
+            echo "key=${{ secrets.UAT_KEY }}" >> $GITHUB_OUTPUT
+
+          elif [ "$ENV" = "prod" ]; then
             echo "host=${{ secrets.PROD_HOST }}" >> $GITHUB_OUTPUT
-            echo "path=${{ secrets.PROD_PATH }}" >> $GITHUB_OUTPUT
-            echo "pm2_name=serveaso-prod" >> $GITHUB_OUTPUT
-            echo "env_file=.env.prod" >> $GITHUB_OUTPUT
+            echo "user=${{ secrets.PROD_USER }}" >> $GITHUB_OUTPUT
+            echo "key=${{ secrets.PROD_KEY }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: 🔐 Setup SSH Agent
-        uses: webfactory/ssh-agent@v0.9.0
+      - name: Test SSH Connection
+        uses: appleboy/ssh-action@v1.1.0
         with:
-          ssh-private-key: ${{ secrets.SSH_KEY }}
-
-      - name: 🧿 Add EC2 host to known_hosts
-        run: |
-          ssh-keyscan -H ${{ steps.env.outputs.host }} >> ~/.ssh/known_hosts
-
-      - name: 📤 Upload project to EC2
-        run: |
-          rsync -avz --exclude=".git" --exclude="node_modules" \
-            ./ ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }}:${{ steps.env.outputs.path }}
-
-      - name: 🚀 Install & Restart on EC2
-        run: |
-          ssh ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }} << EOF
-            cd ${ steps.env.outputs.path }
-            npm install --legacy-peer-deps
-            cp ${ steps.env.outputs.env_file } .env
-            pm2 startOrReload ecosystem.config.js --name "${ steps.env.outputs.pm2_name }"
-          EOF
+          host: ${{ steps.envcfg.outputs.host }}
+          username: ${{ steps.envcfg.outputs.user }}
+          key: ${{ steps.envcfg.outputs.key }}
+          script: |
+            echo "SSH CONNECTION SUCCESSFUL!"
+            echo "Hostname:" $(hostname)
+            echo "Current user:" $(whoami)
+            echo "Current directory:" $(pwd)
