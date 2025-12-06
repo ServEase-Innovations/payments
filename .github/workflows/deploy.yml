@@ -4,6 +4,17 @@ on:
   push:
     branches: [ "dev", "qa", "prod" ]
 
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Select environment"
+        type: choice
+        required: true
+        options:
+          - dev
+          - qa
+          - prod
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -12,15 +23,23 @@ jobs:
       - name: 🛎️ Checkout code
         uses: actions/checkout@v3
 
-      - name: 📌 Set Deployment Environment
+      - name: 📌 Detect Target Environment
         id: env
         run: |
-          if [[ "${GITHUB_REF##*/}" == "dev" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BRANCH="${{ github.event.inputs.env }}"
+          else
+            BRANCH="${GITHUB_REF##*/}"
+          fi
+
+          echo "Selected env = $BRANCH"
+
+          if [[ "$BRANCH" == "dev" ]]; then
             echo "host=${{ secrets.DEV_HOST }}" >> $GITHUB_OUTPUT
             echo "path=${{ secrets.DEV_PATH }}" >> $GITHUB_OUTPUT
             echo "pm2_name=serveaso-dev" >> $GITHUB_OUTPUT
             echo "env_file=.env.dev" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF##*/}" == "qa" ]]; then
+          elif [[ "$BRANCH" == "qa" ]]; then
             echo "host=${{ secrets.QA_HOST }}" >> $GITHUB_OUTPUT
             echo "path=${{ secrets.QA_PATH }}" >> $GITHUB_OUTPUT
             echo "pm2_name=serveaso-qa" >> $GITHUB_OUTPUT
