@@ -1,0 +1,51 @@
+name: CI/CD Deploy to AWS EC2
+
+on:
+  push:
+    branches: [ "dev", "qa", "prod" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🛎️ Checkout code
+        uses: actions/checkout@v3
+
+      - name: 📌 Set Deployment Environment
+        id: env
+        run: |
+          if [[ "${GITHUB_REF##*/}" == "dev" ]]; then
+            echo "host=${{ secrets.DEV_HOST }}" >> $GITHUB_OUTPUT
+            echo "path=${{ secrets.DEV_PATH }}" >> $GITHUB_OUTPUT
+            echo "pm2_name=serveaso-dev" >> $GITHUB_OUTPUT
+            echo "env_file=.env.dev" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF##*/}" == "qa" ]]; then
+            echo "host=${{ secrets.QA_HOST }}" >> $GITHUB_OUTPUT
+            echo "path=${{ secrets.QA_PATH }}" >> $GITHUB_OUTPUT
+            echo "pm2_name=serveaso-qa" >> $GITHUB_OUTPUT
+            echo "env_file=.env.qa" >> $GITHUB_OUTPUT
+          else
+            echo "host=${{ secrets.PROD_HOST }}" >> $GITHUB_OUTPUT
+            echo "path=${{ secrets.PROD_PATH }}" >> $GITHUB_OUTPUT
+            echo "pm2_name=serveaso-prod" >> $GITHUB_OUTPUT
+            echo "env_file=.env.prod" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🔐 Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: 📤 Upload project to EC2
+        run: |
+          rsync -avz --exclude=".git" --exclude="node_modules" ./ ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }}:${{ steps.env.outputs.path }}
+
+      - name: 🚀 Install & Restart on EC2
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }} << EOF
+            cd ${ steps.env.outputs.path }
+            npm install --legacy-peer-deps
+            cp ${ steps.env.outputs.env_file } .env
+            pm2 startOrReload ecosystem.config.js --name "${ steps.env.outputs.pm2_name }"
+          EOF
