@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "NODE_ENV=development nodemon index.js",
+    "qa": "NODE_ENV=qa node index.js",
+    "prod": "NODE_ENV=production node index.js"
   },
   "keywords": [],
   "author": "",

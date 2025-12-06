@@ -1,13 +1,14 @@
 import pg from "pg";
+import config from "../config/config.js";
 
 const { Pool } = pg;
 
 const pool = new Pool({
-  user: "serveaso",
-  host: "13.126.11.184",
-  database: "serveaso",
-  password: "serveaso",
-  port: 5432,
+  host: config.postgres.host,
+  user: config.postgres.user,
+  password: config.postgres.password,
+  database: config.postgres.database,
+  port: config.postgres.port,
 });
 
 pool.query("SELECT current_database(), current_schema();")

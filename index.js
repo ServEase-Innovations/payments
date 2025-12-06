@@ -11,7 +11,7 @@ import serviceProviderRoutes from "./src/routes/service-providers.js";
 import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-
+import config from "./src/config/config.js";
 
 
 const app = express();
@@ -77,7 +77,13 @@ io.on("connection", (socket) => {
   });
 });
 
-
+app.get("/", async (req, res) => {
+  const result = await pool.query("SELECT NOW()");
+  res.send({
+    environment: config.env,
+    postgres_time: result.rows[0],
+  });
+});
 
 
 
