@@ -11,10 +11,11 @@ dotenv.config({
 export default {
   env,
   postgres: {
-    host: process.env.PG_HOST,
-    user: process.env.PG_USER,
-    password: process.env.PG_PASSWORD,
-    database: process.env.PG_DB,
+    host: process.env.host,
+    user: process.env.user,
+    password: process.env.password,
+    database: process.env.database,
+    port: process.env.port
   },
   mongo: {
     uri: process.env.MONGO_URI
