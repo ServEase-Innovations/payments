@@ -56,7 +56,7 @@ jobs:
       - name: 🔐 Setup SSH Agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ steps.env.outputs.QA_KEY }}
+          ssh-private-key: ${{ steps.env.outputs.ssh_key }}
 
       - name: 🧿 Add EC2 host to known_hosts
         run: |
