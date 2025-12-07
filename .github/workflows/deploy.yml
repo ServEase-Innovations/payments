@@ -78,7 +78,7 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no \
             ${{ steps.env.outputs.ssh_user }}@${{ steps.env.outputs.host }} \
-            echo '${{ steps.env.outputs.env_content }}' > $PATH/.env.${{ steps.env.outputs.env }}
+            "echo '${{ steps.env.outputs.env_content }}' > ${{ steps.env.outputs.path }}/.env.${{ steps.env.outputs.env }}"
 
       - name: 🚀 Install & Restart on EC2
         run: |
