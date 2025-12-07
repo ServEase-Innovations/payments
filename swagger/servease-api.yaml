@@ -7,6 +7,7 @@ info:
 servers:
   - url: http://localhost:5000/api
   - url : https://payments-j5id.onrender.com/api
+  - url : http://98.130.60.70:5000/api
 
 tags:
   - name: customer
