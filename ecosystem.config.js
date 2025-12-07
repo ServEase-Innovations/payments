@@ -1,21 +1,25 @@
 module.exports = {
   apps: [
     {
-      name: "serveaso-dev",
+      name: "payments",
       script: "index.js",
-      env_dev: {
-        NODE_ENV: "development"
-      },
+      env: {
+        NODE_ENV: "dev"
+      }
+    },
+    {
       name: "serveaso-qa",
       script: "index.js",
-      env_qa: {
+      env: {
         NODE_ENV: "qa"
-      },
+      }
+    },
+    {
       name: "serveaso-prod",
       script: "index.js",
-      env_prod: {
-        NODE_ENV: "production"
+      env: {
+        NODE_ENV: "prod"
       }
     }
   ]
-}
+};
