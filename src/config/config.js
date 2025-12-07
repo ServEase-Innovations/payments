@@ -2,28 +2,20 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 
-// Determine environment (local uses NODE_ENV)
 const ENV = process.env.NODE_ENV || "development";
 
-// Determine which .env file to load
-let envPath;
+// EC2 will always have only `.env` because GitHub writes it.
+// Local will load `.env.<env>` if available.
+let envPath = path.resolve(process.cwd(), `.env.${ENV}`);
 
-// Priority #1 → EC2 uses ONLY `.env`
-if (fs.existsSync(path.resolve(process.cwd(), ".env"))) {
-  envPath = path.resolve(process.cwd(), ".env");
-}
-// Priority #2 → Local uses `.env.<env>`
-else if (fs.existsSync(path.resolve(process.cwd(), `.env.${ENV}`))) {
-  envPath = path.resolve(process.cwd(), `.env.${ENV}`);
-}
-// Priority #3 → fallback to `.env`
-else {
+// If env file does not exist (EC2), fallback to `.env`
+if (!fs.existsSync(envPath)) {
   envPath = path.resolve(process.cwd(), ".env");
 }
 
 dotenv.config({ path: envPath });
 
-console.log("Loaded env file:", envPath);
+console.log("✔ Loaded env file:", envPath);
 
 export default {
   env: ENV,
