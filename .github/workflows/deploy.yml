@@ -64,9 +64,9 @@ jobs:
 
       - name: 📤 Upload project to EC2
         run: |
-          rsync -avz --exclude=".git" --exclude="node_modules" \
-            ./ ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }}:${{ steps.env.outputs.path }}
-
+          rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
+          --exclude=".git" --exclude="node_modules" \
+          ./ ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }}:${{ steps.env.outputs.path }}
       - name: 🚀 Install & Restart on EC2
         run: |
           ssh ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }} << EOF
