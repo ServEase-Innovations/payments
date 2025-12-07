@@ -36,6 +36,7 @@ jobs:
             echo "path=${{ secrets.DEV_PATH }}" >> $GITHUB_OUTPUT
             echo "pm2_name=serveaso-dev" >> $GITHUB_OUTPUT
             echo "env_file=.env.dev" >> $GITHUB_OUTPUT
+            echo "ssh_user=${{ secrets.DEV_USER }}" >> $GITHUB_OUTPUT
             { echo "ssh_key<<EOF"; echo "${{ secrets.DEV_KEY }}"; echo "EOF"; } >> $GITHUB_OUTPUT
 
           elif [[ "$BRANCH" == "qa" ]]; then
@@ -43,6 +44,7 @@ jobs:
             echo "path=${{ secrets.QA_PATH }}" >> $GITHUB_OUTPUT
             echo "pm2_name=serveaso-qa" >> $GITHUB_OUTPUT
             echo "env_file=.env.qa" >> $GITHUB_OUTPUT
+            echo "ssh_user=${{ secrets.QA_USER }}" >> $GITHUB_OUTPUT
             { echo "ssh_key<<EOF"; echo "${{ secrets.QA_KEY }}"; echo "EOF"; } >> $GITHUB_OUTPUT
 
           else
@@ -50,6 +52,7 @@ jobs:
             echo "path=${{ secrets.PROD_PATH }}" >> $GITHUB_OUTPUT
             echo "pm2_name=serveaso-prod" >> $GITHUB_OUTPUT
             echo "env_file=.env.prod" >> $GITHUB_OUTPUT
+            echo "ssh_user=${{ secrets.PROD_USER }}" >> $GITHUB_OUTPUT
             { echo "ssh_key<<EOF"; echo "${{ secrets.PROD_KEY }}"; echo "EOF"; } >> $GITHUB_OUTPUT
           fi
 
@@ -65,11 +68,13 @@ jobs:
       - name: 📤 Upload project to EC2
         run: |
           rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
-          --exclude=".git" --exclude="node_modules" \
-          ./ ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }}:${{ steps.env.outputs.path }}
+            --exclude=".git" \
+            --exclude="node_modules" \
+            ./ ${{ steps.env.outputs.ssh_user }}@${{ steps.env.outputs.host }}:${{ steps.env.outputs.path }}
+
       - name: 🚀 Install & Restart on EC2
         run: |
-          ssh ${{ secrets.SSH_USER }}@${{ steps.env.outputs.host }} << EOF
+          ssh -o StrictHostKeyChecking=no ${{ steps.env.outputs.ssh_user }}@${{ steps.env.outputs.host }} << 'EOF'
             cd ${ steps.env.outputs.path }
             npm install --legacy-peer-deps
             cp ${ steps.env.outputs.env_file } .env
