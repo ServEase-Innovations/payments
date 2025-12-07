@@ -3,22 +3,15 @@ module.exports = {
     {
       name: "payments",
       script: "index.js",
+
       env: {
-        NODE_ENV: "dev"
-      }
-    },
-    {
-      name: "serveaso-qa",
-      script: "index.js",
-      env: {
+        NODE_ENV: "development"
+      },
+      env_qa: {
         NODE_ENV: "qa"
-      }
-    },
-    {
-      name: "serveaso-prod",
-      script: "index.js",
-      env: {
-        NODE_ENV: "prod"
+      },
+      env_production: {
+        NODE_ENV: "production"
       }
     }
   ]
