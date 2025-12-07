@@ -79,9 +79,10 @@ jobs:
 
       - name: 🚀 Install & Restart on EC2
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ steps.env.outputs.ssh_user }}@${{ steps.env.outputs.host }} << EOF
-            cd /home/ubuntu/payments
-            npm install --legacy-peer-deps
-            cp ${ steps.env.outputs.env_file } .env
-            pm2 startOrReload ecosystem.config.js --name "${ steps.env.outputs.pm2_name }"
+          ssh -o StrictHostKeyChecking=no \
+            ${{ steps.env.outputs.ssh_user }}@${{ steps.env.outputs.host }} \
+            "cd /home/ubuntu/payments && \
+             npm install --legacy-peer-deps && \
+             cp ${{ steps.env.outputs.env_file }} .env && \
+             pm2 startOrReload ecosystem.config.js --name '${{ steps.env.outputs.pm2_name }}'"
           EOF
