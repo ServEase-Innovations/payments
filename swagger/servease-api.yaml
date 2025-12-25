@@ -15,6 +15,7 @@ tags:
   - name: Engagements
   - name: Payments
   - name: Wallets
+  - name : Service Days
 
 paths:
   /engagements:
@@ -693,7 +694,7 @@ paths:
         Fetches all engagements for a given service provider.  
         Supports optional filters by engagement status and month.
       tags:
-        - Service Providers
+        - Provider
       parameters:
         - name: providerId
           in: path
@@ -826,41 +827,145 @@ paths:
                     type: string
                     example: "Internal server error"
 
-  /service-providers/{providerId}/calendar:
-    get:
-      summary: Get service provider calendar
+    /engagement-service/service-days/{id}/start:
+    post:
+      summary: Start a service day
       description: >
-        Fetches a service provider’s calendar from the **provider_availability** table.  
-        Supports optional filtering by **month (YYYY-MM)** and **status (AVAILABLE, BOOKED, UNAVAILABLE)**.
-      tags:
-        - Service Providers
+        Marks a service day as IN_PROGRESS.
+        Triggered by the service provider when they start work.
+      tags: [Service Days]
       parameters:
         - in: path
-          name: providerId
+          name: id
+          required: true
+          description: Service Day ID
+          schema:
+            type: integer
+            example: 101
+      responses:
+        "200":
+          description: Service started successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardMessage"
+        "400":
+          description: Service day cannot be started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Service day not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
+  /engagement-service/service-days/{id}/otp:
+    post:
+      summary: Generate OTP for service completion
+      description: >
+        Generates a 6-digit OTP for a service day.
+        OTP expires in 10 minutes and is sent to the customer.
+      tags: [Service Days]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: Service Day ID
+          schema:
+            type: integer
+            example: 101
+      responses:
+        "200":
+          description: OTP generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardMessage"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
+  /engagement-service/service-days/{id}/complete:
+    post:
+      summary: Complete service day using OTP
+      description: >
+        Verifies OTP, marks the service day as COMPLETED,
+        and credits the provider with daily earnings.
+      tags: [Service Days]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: Service Day ID
+          schema:
+            type: integer
+            example: 101
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteServiceDayRequest"
+      responses:
+        "200":
+          description: Service completed and earnings credited
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Service completed & earnings credited
+                  dailyRate:
+                    type: number
+                    format: float
+                    example: 183.33
+        "400":
+          description: Invalid or expired OTP
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
+  /engagement-service/engagements/{engagementId}/service-days:
+    get:
+      summary: Get service days for an engagement
+      description: >
+        Returns all service days created for an engagement,
+        including their status and timestamps.
+      tags: [Service Days]
+      parameters:
+        - in: path
+          name: engagementId
           required: true
           schema:
             type: integer
-          description: ID of the service provider
-          example: 202
-        - in: query
-          name: month
-          required: false
-          schema:
-            type: string
-            pattern: "^[0-9]{4}-[0-9]{2}$"
-            example: "2025-09"
-          description: Filter calendar entries for a given month (format YYYY-MM)
-        - in: query
-          name: status
-          required: false
-          schema:
-            type: string
-            enum: [AVAILABLE, BOOKED, UNAVAILABLE]
-            example: BOOKED
-          description: Filter by slot status
+            example: 14
       responses:
         "200":
-          description: Successful response with provider calendar
+          description: List of service days
           content:
             application/json:
               schema:
@@ -869,50 +974,38 @@ paths:
                   success:
                     type: boolean
                     example: true
-                  providerId:
+                  engagement_id:
                     type: integer
-                    example: 202
-                  calendar:
+                    example: 14
+                  service_days:
                     type: array
                     items:
-                      type: object
-                      properties:
-                        id:
-                          type: integer
-                          example: 15
-                        provider_id:
-                          type: integer
-                          example: 202
-                        engagement_id:
-                          type: integer
-                          nullable: true
-                          example: 280
-                        date:
-                          type: string
-                          format: date
-                          example: "2025-09-19"
-                        start_time:
-                          type: string
-                          format: time
-                          example: "06:30:00"
-                        end_time:
-                          type: string
-                          format: time
-                          example: "07:30:00"
-                        status:
-                          type: string
-                          enum: [AVAILABLE, BOOKED, UNAVAILABLE]
-                          example: BOOKED
-                        created_at:
-                          type: string
-                          format: date-time
-                          example: "2025-09-12T10:20:00Z"
-                        updated_at:
-                          type: string
-                          format: date-time
-                          example: "2025-09-12T10:20:00Z"
-        "400":
-          description: Invalid month format (not YYYY-MM)
+                      $ref: "#/components/schemas/ServiceDay"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
+  /engagement-service/engagements/{engagementId}/service-days/today:
+    get:
+      summary: Get today's service day for an engagement
+      description: >
+        Returns the service day scheduled for today (if any).
+        Useful for OTP and task execution flows.
+      tags: [Service Days]
+      parameters:
+        - in: path
+          name: engagementId
+          required: true
+          schema:
+            type: integer
+            example: 14
+      responses:
+        "200":
+          description: Today's service day
           content:
             application/json:
               schema:
@@ -920,10 +1013,65 @@ paths:
                 properties:
                   success:
                     type: boolean
-                    example: false
+                    example: true
+                  service_day:
+                    $ref: "#/components/schemas/ServiceDay"
+        "404":
+          description: No service scheduled today
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
+  /engagement-service/service-days/{id}/start:
+    post:
+      summary: Start a service day
+      description: >
+        Marks a service day as **IN_PROGRESS**.
+        This endpoint is called by the service provider when starting work
+        for a scheduled service day.
+      tags:
+        - Service Days
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Unique ID of the service day
+          schema:
+            type: integer
+            example: 101
+      responses:
+        "200":
+          description: Service started successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Service started
+        "400":
+          description: Service cannot be started (invalid status)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
                   error:
                     type: string
-                    example: "Invalid month format. Use YYYY-MM"
+                    example: Service cannot be started
+        "404":
+          description: Service day not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Service day not found
         "500":
           description: Internal server error
           content:
@@ -931,12 +1079,12 @@ paths:
               schema:
                 type: object
                 properties:
-                  success:
-                    type: boolean
-                    example: false
                   error:
                     type: string
-                    example: "Internal server error"               
+                    example: Unexpected server error
+
+  
+
 components:
   schemas:
     Engagement:
@@ -1057,3 +1205,59 @@ components:
         razorpaySignature:
           type: string
           example: f3b2c1d4e5a6b7c8d9f0
+
+    ServiceDay:
+      type: object
+      properties:
+        service_day_id:
+          type: integer
+          example: 101
+        engagement_id:
+          type: integer
+          example: 14
+        service_date:
+          type: string
+          format: date
+          example: "2025-12-22"
+        status:
+          type: string
+          enum: [SCHEDULED, IN_PROGRESS, COMPLETED, MISSED, VACATION]
+          example: COMPLETED
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        otp_verified:
+          type: boolean
+          example: true
+
+    CompleteServiceDayRequest:
+      type: object
+      required:
+        - otp
+      properties:
+        otp:
+          type: string
+          example: "482913"
+
+    StandardMessage:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Operation successful
+
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Invalid or expired OTP
+
+
+    

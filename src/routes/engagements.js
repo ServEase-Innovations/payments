@@ -8,6 +8,8 @@ import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
 import { io } from "../../index.js";
+import { createServiceDays } from "../routes/serviceDays.service.js";
+
 
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
@@ -160,6 +162,15 @@ router.post("/", async (req, res) => {
     ];
     const engRes = await client.query(engQ, engVals);
     const engagement = engRes.rows[0];
+    // 🔹 Create service_days for the engagement (NEW)
+    await createServiceDays(
+  client,
+  engagement.engagement_id,
+  start_date,
+  end_date
+);
+
+
 
     // Payment creation
     const platform_fee = Number(base_amount) * 0.1;
@@ -240,10 +251,52 @@ router.get("/:customerId/engagements", async (req, res) => {
     const engagements = engagementsRes.rows;
     const engagementIds = engagements.map(e => e.engagement_id);
 
+    // ---- Fetch today's service days ----
+    const todayServiceRes = await pool.query(
+      `
+      SELECT
+        service_day_id,
+        engagement_id,
+        status,
+        started_at,
+        completed_at
+      FROM service_days
+      WHERE engagement_id = ANY($1)
+        AND service_date = CURRENT_DATE
+      `,
+      [engagementIds]
+    );
+
+    const todayServiceByEng = {};
+    todayServiceRes.rows.forEach(sd => {
+      todayServiceByEng[sd.engagement_id] = sd;
+    });
+
+    // ---- Fetch active OTPs ----
+    const serviceDayIds = todayServiceRes.rows.map(s => s.service_day_id);
+    const otpByServiceDay = {};
+
+    if (serviceDayIds.length > 0) {
+      const otpRes = await pool.query(
+        `
+        SELECT service_day_id
+        FROM service_day_otps
+        WHERE service_day_id = ANY($1)
+          AND verified_at IS NULL
+          AND expires_at > NOW()
+        `,
+        [serviceDayIds]
+      );
+
+      otpRes.rows.forEach(o => {
+        otpByServiceDay[o.service_day_id] = true;
+      });
+    }
+
     // ---- Fetch modifications ----
     const modRes = await pool.query(
-      `SELECT engagement_id, modified_at, modified_fields 
-       FROM engagement_modifications 
+      `SELECT engagement_id, modified_at, modified_fields
+       FROM engagement_modifications
        WHERE engagement_id = ANY($1)
        ORDER BY modified_at DESC`,
       [engagementIds]
@@ -251,9 +304,9 @@ router.get("/:customerId/engagements", async (req, res) => {
 
     // ---- Fetch payments ----
     const paymentsRes = await pool.query(
-      `SELECT engagement_id, base_amount, platform_fee, gst, total_amount, 
-              payment_mode, status, created_at 
-       FROM payments 
+      `SELECT engagement_id, base_amount, platform_fee, gst, total_amount,
+              payment_mode, status, created_at
+       FROM payments
        WHERE engagement_id = ANY($1)`,
       [engagementIds]
     );
@@ -261,25 +314,19 @@ router.get("/:customerId/engagements", async (req, res) => {
     // ---- Fetch provider details ----
     const providerIds = engagements.map(e => e.serviceproviderid).filter(Boolean);
     const providerRes = await pool.query(
-      `SELECT serviceproviderid, firstname, lastname, rating 
-       FROM serviceprovider 
+      `SELECT serviceproviderid, firstname, lastname, rating
+       FROM serviceprovider
        WHERE serviceproviderid = ANY($1)`,
       [providerIds]
     );
 
-    // ---- Map providers ----
+    // ---- Maps ----
     const providerById = {};
-    providerRes.rows.forEach(p => {
-      providerById[p.serviceproviderid] = p;
-    });
+    providerRes.rows.forEach(p => providerById[p.serviceproviderid] = p);
 
-    // ---- Map payments ----
     const paymentByEng = {};
-    paymentsRes.rows.forEach(p => {
-      paymentByEng[p.engagement_id] = p;
-    });
+    paymentsRes.rows.forEach(p => paymentByEng[p.engagement_id] = p);
 
-    // ---- Prepare modifications & vacations ----
     const modsByEng = {};
     const vacationsByEng = {};
 
@@ -293,39 +340,24 @@ router.get("/:customerId/engagements", async (req, res) => {
       if (!vacationsByEng[mod.engagement_id]) vacationsByEng[mod.engagement_id] = [];
 
       let action = "Modified";
-
       if (parsed?.modification_type === "VACATION_ADDED") action = "Vacation Applied";
       if (parsed?.modification_type === "VACATION_MODIFIED") action = "Vacation Updated";
       if (parsed?.modification_type === "VACATION_CANCELLED") action = "Vacation Cancelled";
 
-      // Push into modifications[]
       modsByEng[mod.engagement_id].push({
         date: mod.modified_at,
         action,
-        refund:
-          parsed?.updated?.refund ??
-          parsed?.wallet_effect?.customer_credit ??
-          null,
-        penalty:
-          parsed?.wallet_effect?.customer_debit ??
-          parsed?.updated?.penalty ??
-          null,
+        refund: parsed?.updated?.refund ?? parsed?.wallet_effect?.customer_credit ?? null,
+        penalty: parsed?.wallet_effect?.customer_debit ?? parsed?.updated?.penalty ?? null,
       });
 
-      // Push into vacations[] only if it's a vacation event
       if (parsed?.modification_type?.startsWith("VACATION")) {
         vacationsByEng[mod.engagement_id].push({
-          start_date: parsed?.updated?.vacation_start_date || null,
-          end_date: parsed?.updated?.vacation_end_date || null,
-          leave_days: parsed?.updated?.leave_days || null,
-          refund:
-            parsed?.updated?.refund ??
-            parsed?.wallet_effect?.customer_credit ??
-            null,
-          penalty:
-            parsed?.wallet_effect?.customer_debit ??
-            parsed?.updated?.penalty ??
-            null,
+          start_date: parsed?.updated?.vacation_start_date,
+          end_date: parsed?.updated?.vacation_end_date,
+          leave_days: parsed?.updated?.leave_days,
+          refund: parsed?.updated?.refund,
+          penalty: parsed?.updated?.penalty,
           action,
           applied_on: mod.modified_at,
         });
@@ -342,15 +374,29 @@ router.get("/:customerId/engagements", async (req, res) => {
       const start = Number(e.start_epoch);
       const end = Number(e.end_epoch);
 
+      const todayService = todayServiceByEng[e.engagement_id] || null;
+
+      let today_service = null;
+      if (todayService) {
+        today_service = {
+          service_day_id: todayService.service_day_id,
+          status: todayService.status,
+          can_start: todayService.status === "SCHEDULED",
+          can_generate_otp: todayService.status === "IN_PROGRESS",
+          can_complete: todayService.status === "IN_PROGRESS",
+          otp_active: !!otpByServiceDay[todayService.service_day_id]
+        };
+      }
+
       const enriched = {
         ...e,
         start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
         end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
-
         provider: providerById[e.serviceproviderid] || null,
         payment: paymentByEng[e.engagement_id] || null,
         modifications: modsByEng[e.engagement_id] || [],
         vacations: vacationsByEng[e.engagement_id] || [],
+        today_service
       };
 
       if (now < start) upcoming.push(enriched);
@@ -365,6 +411,7 @@ router.get("/:customerId/engagements", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 
 
@@ -873,5 +920,23 @@ router.post("/:id/accept", async (req, res) => {
     client.release();
   }
 });
+
+function getDateRange(startDate, endDate) {
+  const dates = [];
+
+  let current = new Date(startDate + "T00:00:00");
+  const end = new Date(endDate + "T00:00:00");
+
+  while (current <= end) {
+    dates.push(new Date(current));
+    current.setDate(current.getDate() + 1);
+  }
+
+  return dates;
+}
+
+
+
+
 
 export default router;
