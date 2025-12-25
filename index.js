@@ -79,14 +79,6 @@ io.on("connection", (socket) => {
   });
 });
 
-app.get("/", async (req, res) => {
-  const result = await pool.query("SELECT NOW()");
-  res.send({
-    environment: config.env,
-    postgres_time: result.rows[0],
-  });
-});
-
 
 
 

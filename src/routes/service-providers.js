@@ -140,51 +140,119 @@ router.get("/:providerId/engagements", async (req, res) => {
         c.lastname,
         c.mobileno
       FROM engagements e
-      LEFT JOIN customer c ON e.customerid = c.customerid
+      JOIN customer c ON e.customerid = c.customerid
       WHERE e.serviceproviderid = $1
     `;
 
     const params = [providerId];
     let idx = 2;
 
-    // Filter by status
     if (status) {
-      query += ` AND e.task_status = $${idx}`;
+      query += ` AND e.task_status = $${idx++}`;
       params.push(status);
-      idx++;
     }
 
-    // Filter by month
     if (month) {
-      if (!/^\d{4}-\d{2}$/.test(month))
+      if (!/^\d{4}-\d{2}$/.test(month)) {
         return res.status(400).json({ success: false, error: "Invalid month format" });
-
-      query += ` AND TO_CHAR(e.start_date,'YYYY-MM') = $${idx}`;
+      }
+      query += ` AND TO_CHAR(e.start_date,'YYYY-MM') = $${idx++}`;
       params.push(month);
-      idx++;
     }
 
     query += " ORDER BY e.start_date DESC";
 
     const result = await pool.query(query, params);
 
-    const nowEpoch = dayjs().unix();
-    const current = [];
-    const past = [];
-    const upcoming = [];
+    if (result.rows.length === 0) {
+      return res.json({
+        success: true,
+        serviceproviderid: providerId,
+        current: [],
+        upcoming: [],
+        past: []
+      });
+    }
 
-    result.rows.forEach((row) => {
+    const engagementIds = result.rows.map(r => r.engagement_id);
+
+    // ---- Fetch today's service days ----
+    const todayServiceRes = await pool.query(
+      `
+      SELECT service_day_id, engagement_id, status
+      FROM service_days
+      WHERE engagement_id = ANY($1)
+        AND service_date = CURRENT_DATE
+      `,
+      [engagementIds]
+    );
+
+    const todayServiceByEng = {};
+    todayServiceRes.rows.forEach(sd => {
+      todayServiceByEng[sd.engagement_id] = sd;
+    });
+
+    // ---- Fetch active OTPs ----
+    const serviceDayIds = todayServiceRes.rows.map(sd => sd.service_day_id);
+    const otpByServiceDay = {};
+
+    if (serviceDayIds.length > 0) {
+      const otpRes = await pool.query(
+        `
+        SELECT service_day_id
+        FROM service_day_otps
+        WHERE service_day_id = ANY($1)
+          AND verified_at IS NULL
+          AND expires_at > NOW()
+        `,
+        [serviceDayIds]
+      );
+
+      otpRes.rows.forEach(o => {
+        otpByServiceDay[o.service_day_id] = true;
+      });
+    }
+
+    // ---- Group engagements ----
+    const today = dayjs().tz("Asia/Kolkata").startOf("day");
+    const current = [];
+    const upcoming = [];
+    const past = [];
+
+    result.rows.forEach(row => {
       row.startDate = normalizeDate(row.start_date);
       row.endDate = normalizeDate(row.end_date);
       row.startTime = epochToTime(row.start_epoch);
       row.endTime = epochToTime(row.end_epoch);
 
-      if (nowEpoch < row.start_epoch) {
-        upcoming.push(row);
-      } else if (nowEpoch > row.end_epoch) {
-        past.push(row);
+      const engagementStart = dayjs(row.start_date).startOf("day");
+      const engagementEnd = dayjs(row.end_date).endOf("day");
+
+      const todayService = todayServiceByEng[row.engagement_id] || null;
+
+      let today_service = null;
+      if (todayService) {
+        today_service = {
+          service_day_id: todayService.service_day_id,
+          status: todayService.status,
+          can_start: todayService.status === "SCHEDULED",
+          can_generate_otp: todayService.status === "IN_PROGRESS",
+          can_complete: todayService.status === "IN_PROGRESS",
+          otp_active: !!otpByServiceDay[todayService.service_day_id]
+        };
+      }
+
+      const enriched = {
+        ...row,
+        today_service
+      };
+
+      if (today.isBefore(engagementStart)) {
+        upcoming.push(enriched);
+      } else if (today.isAfter(engagementEnd)) {
+        past.push(enriched);
       } else {
-        current.push(row);
+        current.push(enriched);
       }
     });
 
@@ -193,13 +261,15 @@ router.get("/:providerId/engagements", async (req, res) => {
       serviceproviderid: providerId,
       current,
       upcoming,
-      past,
+      past
     });
+
   } catch (err) {
     console.error("Error fetching provider engagements:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
+
 
 /* -------------------------------------------------------------------------- */
 /*                           PROVIDER CALENDAR API                             */

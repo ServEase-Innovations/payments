@@ -370,39 +370,45 @@ router.get("/:customerId/engagements", async (req, res) => {
     const ongoing = [];
     const past = [];
 
+    const today = dayjs().tz("Asia/Kolkata").startOf("day");
+
     engagements.forEach(e => {
-      const start = Number(e.start_epoch);
-      const end = Number(e.end_epoch);
+      const engagementStart = dayjs(e.start_date).startOf("day");
+      const engagementEnd = dayjs(e.end_date).endOf("day");
 
       const todayService = todayServiceByEng[e.engagement_id] || null;
 
-      let today_service = null;
-      if (todayService) {
-        today_service = {
-          service_day_id: todayService.service_day_id,
-          status: todayService.status,
-          can_start: todayService.status === "SCHEDULED",
-          can_generate_otp: todayService.status === "IN_PROGRESS",
-          can_complete: todayService.status === "IN_PROGRESS",
-          otp_active: !!otpByServiceDay[todayService.service_day_id]
-        };
-      }
+  let today_service = null;
+  if (todayService) {
+    today_service = {
+      service_day_id: todayService.service_day_id,
+      status: todayService.status,
+      can_start: todayService.status === "SCHEDULED",
+      can_generate_otp: todayService.status === "IN_PROGRESS",
+      can_complete: todayService.status === "IN_PROGRESS",
+      otp_active: !!otpByServiceDay[todayService.service_day_id]
+    };
+  }
 
-      const enriched = {
-        ...e,
-        start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
-        end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
-        provider: providerById[e.serviceproviderid] || null,
-        payment: paymentByEng[e.engagement_id] || null,
-        modifications: modsByEng[e.engagement_id] || [],
-        vacations: vacationsByEng[e.engagement_id] || [],
-        today_service
-      };
+  const enriched = {
+    ...e,
+    start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
+    end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
+    provider: providerById[e.serviceproviderid] || null,
+    payment: paymentByEng[e.engagement_id] || null,
+    modifications: modsByEng[e.engagement_id] || [],
+    vacations: vacationsByEng[e.engagement_id] || [],
+    today_service
+  };
 
-      if (now < start) upcoming.push(enriched);
-      else if (now > end) past.push(enriched);
-      else ongoing.push(enriched);
-    });
+  if (today.isBefore(engagementStart)) {
+    upcoming.push(enriched);
+  } else if (today.isAfter(engagementEnd)) {
+    past.push(enriched);
+  } else {
+    ongoing.push(enriched);
+  }
+});
 
     return res.json({ upcoming, ongoing, past });
 
