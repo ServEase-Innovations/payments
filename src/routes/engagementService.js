@@ -106,7 +106,7 @@ router.post("/service-days/:id/otp", async (req, res) => {
     }
 
     // 4️⃣ Send OTP via Twilio
-    const twilioClient = twilio( 'ACb8d75549bf92b390e5ac0e6b623389b3', '78388b87b6bb3ca8450c648885b591ae' );
+    const twilioClient = twilio( process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN );
 
     await twilioClient.messages.create({
       body: `Your Servease OTP is ${otp}. Valid for 2 hours.`,
