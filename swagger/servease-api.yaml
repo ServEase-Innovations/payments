@@ -827,48 +827,6 @@ paths:
                     type: string
                     example: "Internal server error"
 
-    /engagement-service/service-days/{id}/start:
-    post:
-      summary: Start a service day
-      description: >
-        Marks a service day as IN_PROGRESS.
-        Triggered by the service provider when they start work.
-      tags: [Service Days]
-      parameters:
-        - in: path
-          name: id
-          required: true
-          description: Service Day ID
-          schema:
-            type: integer
-            example: 101
-      responses:
-        "200":
-          description: Service started successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StandardMessage"
-        "400":
-          description: Service day cannot be started
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: Service day not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: Server error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-
   /engagement-service/service-days/{id}/otp:
     post:
       summary: Generate OTP for service completion
