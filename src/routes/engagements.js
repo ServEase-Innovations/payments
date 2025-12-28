@@ -83,15 +83,16 @@ function computeDailyRate(baseAmount, startDate, endDate) {
 
 router.post("/", async (req, res) => {
   const client = await pool.connect();
+
   try {
     const {
       customerid,
-      serviceproviderid,
+      serviceproviderid, // optional (MONTHLY), always null for ON_DEMAND
       start_date,
       end_date,
       start_time,
       responsibilities,
-      booking_type,
+      booking_type, // ON_DEMAND | MONTHLY
       service_type,
       base_amount,
       latitude,
@@ -99,32 +100,42 @@ router.post("/", async (req, res) => {
       payment_mode = "razorpay",
     } = req.body;
 
+    // 1️⃣ Validation
     if (!customerid || !start_date || !end_date || !start_time || !base_amount || !booking_type || !service_type) {
-      return res.status(400).json({ error: "Missing required fields." });
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const providerId = serviceproviderid || null;
+    const providerId = booking_type === "ON_DEMAND" ? null : serviceproviderid;
     const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
 
-    const startEpoch = toEpochSeconds(start_date, start_time);
-    if (!startEpoch) return res.status(400).json({ error: "Invalid date/time" });
+    // 2️⃣ Epochs — ONLY for non-ON_DEMAND
+    const startEpoch =
+      booking_type === "ON_DEMAND" ? null : toEpochSeconds(start_date, start_time);
 
     const hoursToAdd = booking_type === "ON_DEMAND" ? 2 : 1;
-    const endEpoch = startEpoch + hoursToAdd * 3600;
+
+    const endEpoch =
+      booking_type === "ON_DEMAND" ? null : startEpoch + hoursToAdd * 3600;
 
     await client.query("BEGIN");
 
-    // Validate FKs
-    const cust = await client.query(`SELECT 1 FROM customer WHERE customerid=$1`, [customerid]);
-    if (cust.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Customer not found" }); }
+    // 3️⃣ FK validation
+    const cust = await client.query(
+      `SELECT customerid, firstname, lastname FROM customer WHERE customerid=$1`,
+      [customerid]
+    );
+    if (cust.rows.length === 0) throw new Error("Customer not found");
 
     if (providerId) {
-      const prov = await client.query(`SELECT 1 FROM serviceprovider WHERE serviceproviderid=$1`, [providerId]);
-      if (prov.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Provider not found" }); }
+      const prov = await client.query(
+        `SELECT serviceproviderid FROM serviceprovider WHERE serviceproviderid=$1`,
+        [providerId]
+      );
+      if (prov.rows.length === 0) throw new Error("Provider not found");
     }
 
-    // Overlap check (epoch)
-    if (providerId) {
+    // 4️⃣ Overlap check (ONLY for non-ON_DEMAND)
+    if (providerId && booking_type !== "ON_DEMAND") {
       const overlap = await client.query(
         `SELECT 1 FROM provider_availability
          WHERE serviceproviderid=$1
@@ -133,46 +144,85 @@ router.post("/", async (req, res) => {
          LIMIT 1`,
         [providerId, startEpoch, endEpoch]
       );
-      if (overlap.rows.length > 0) {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ error: "Provider already has a booking on the selected date/time" });
+      if (overlap.rows.length) {
+        throw new Error("Provider already has a booking at this time");
       }
     }
 
-    // Insert engagement (store date columns as well for human-friendly queries)
-    const engQ = `
-      INSERT INTO engagements
-        (customerid, serviceproviderid, start_date, end_date, responsibilities,
-         booking_type, service_type, task_status, active, base_amount,
-         created_at, assignment_status, start_epoch, end_epoch)
-      VALUES ($1,$2,$3::date,$4::date,$5,$6,$7,'NOT_STARTED',true,$8,NOW(),$9,$10,$11)
-      RETURNING *`;
-    const engVals = [
-      customerid,
-      providerId,
-      start_date,
-      end_date,
-      responsibilities,
-      booking_type,
-      service_type,
-      base_amount,
-      assignment_status,
-      startEpoch,
-      endEpoch,
-    ];
-    const engRes = await client.query(engQ, engVals);
+    // 5️⃣ Create engagement
+    const engRes = await client.query(
+      `
+      INSERT INTO engagements (
+        customerid,
+        serviceproviderid,
+        start_date,
+        end_date,
+        responsibilities,
+        booking_type,
+        service_type,
+        task_status,
+        active,
+        base_amount,
+        assignment_status,
+        start_epoch,
+        end_epoch,
+        created_at
+      )
+      VALUES (
+        $1,$2,$3::date,$4::date,$5,$6,$7,
+        'NOT_STARTED',true,$8,$9,$10,$11,NOW()
+      )
+      RETURNING *
+      `,
+      [
+        customerid,
+        providerId,
+        start_date,
+        end_date,
+        responsibilities,
+        booking_type,
+        service_type,
+        base_amount,
+        assignment_status,
+        startEpoch,
+        endEpoch,
+      ]
+    );
+
     const engagement = engRes.rows[0];
-    // 🔹 Create service_days for the engagement (NEW)
-    await createServiceDays(
-  client,
-  engagement.engagement_id,
-  start_date,
-  end_date
-);
 
+    // 6️⃣ Create service_days ONLY for non-ON_DEMAND
+    if (booking_type !== "ON_DEMAND") {
+      await createServiceDays(
+        client,
+        engagement.engagement_id,
+        start_date,
+        end_date
+      );
+    }
 
+    // 7️⃣ Provider availability ONLY for non-ON_DEMAND
+    if (providerId && booking_type !== "ON_DEMAND") {
+      const startD = new Date(start_date);
+      const endD = new Date(end_date);
 
-    // Payment creation
+      for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+        const day = d.toISOString().slice(0, 10);
+        const dayStartEpoch = toEpochSeconds(day, start_time);
+        const dayEndEpoch = dayStartEpoch + hoursToAdd * 3600;
+
+        await client.query(
+          `
+          INSERT INTO provider_availability
+          (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at)
+          VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())
+          `,
+          [providerId, engagement.engagement_id, day, dayStartEpoch, dayEndEpoch]
+        );
+      }
+    }
+
+    // 8️⃣ Payment (PENDING)
     const platform_fee = Number(base_amount) * 0.1;
     const gst = platform_fee * 0.18;
     const total_amount = Number(base_amount) + platform_fee + gst;
@@ -183,53 +233,93 @@ router.post("/", async (req, res) => {
         amount: Math.round(total_amount * 100),
         currency: "INR",
         receipt: `eng_${engagement.engagement_id}`,
-        payment_capture: 1,
       });
       razorpay_order_id = order.id;
     }
 
-    const payQ = `
+    const paymentRes = await client.query(
+      `
       INSERT INTO payments
-        (engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, status, razorpay_order_id, created_at)
+      (engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, status, razorpay_order_id, created_at)
       VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,NOW())
-      RETURNING *`;
-    const payRes = await client.query(payQ, [engagement.engagement_id, base_amount, platform_fee, gst, total_amount, payment_mode, razorpay_order_id]);
-
-    // Create provider_availability rows daily for the engagement
-    if (providerId) {
-      const startD = new Date(start_date);
-      const endD = new Date(end_date);
-      for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
-        const day = d.toISOString().slice(0, 10);
-        const dayStartEpoch = toEpochSeconds(day, start_time);
-        const dayEndEpoch = dayStartEpoch + hoursToAdd * 3600;
-
-        await client.query(
-          `INSERT INTO provider_availability
-            (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at)
-           VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())`,
-          [providerId, engagement.engagement_id, day, dayStartEpoch, dayEndEpoch]
-        );
-      }
-    }
+      RETURNING *
+      `,
+      [
+        engagement.engagement_id,
+        base_amount,
+        platform_fee,
+        gst,
+        total_amount,
+        payment_mode,
+        razorpay_order_id,
+      ]
+    );
 
     await client.query("COMMIT");
 
-    // prepare response (normalize dates + build times)
-    engagement.start_date = normalizeDateToIST(engagement.start_date);
-    engagement.end_date = normalizeDateToIST(engagement.end_date);
-    engagement.start_time = epochToTimeHM(engagement.start_epoch);
-    engagement.end_time = epochToTimeHM(engagement.end_epoch);
+    
 
-    return res.status(201).json({ message: "Engagement created", engagement, payment: payRes.rows[0] });
+   if (!providerId && latitude && longitude) {
+  const providerRes = await pool.query(`
+    SELECT serviceproviderid, latitude, longitude
+    FROM serviceprovider
+    WHERE isactive = true
+      AND latitude IS NOT NULL
+      AND longitude IS NOT NULL
+  `);
+
+  const nearbyProviders = providerRes.rows.filter((p) => {
+    const distance = geolib.getDistance(
+      { latitude, longitude },
+      { latitude: p.latitude, longitude: p.longitude }
+    );
+    return distance <= 5000;
+  });
+
+  console.log("Nearby providers found:", nearbyProviders.length);
+
+  for (const p of nearbyProviders) {
+    const room = `provider_${p.serviceproviderid}`;
+
+    const sockets = await req.io.in(room).fetchSockets();
+
+    console.log(`📡 ${room} sockets:`, sockets.length);
+
+    if (sockets.length > 0) {
+      req.io.to(room).emit("new-engagement", {
+        engagement: {
+          engagement_id: engagement.engagement_id,
+          service_type,
+          booking_type,
+          start_date,
+          end_date,
+          start_time,
+          base_amount,
+        },
+      });
+
+      console.log(`🚀 Notification sent to ${room}`);
+    }
+  }
+}
+
+
+    // 🔟 Response
+    return res.status(201).json({
+      message: "Engagement created successfully",
+      engagement,
+      payment: paymentRes.rows[0],
+    });
+
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch (e) {}
-    console.error("Error creating engagement:", err);
-    return res.status(500).json({ error: "Failed to create engagement", detail: err.message });
+    await client.query("ROLLBACK");
+    console.error("Create engagement error:", err);
+    return res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
 });
+
 
 // GET all engagements for a customer (FULL VERSION)
 // Includes: provider details, payments, modifications, vacations, epoch times
