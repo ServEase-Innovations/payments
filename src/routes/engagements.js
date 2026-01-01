@@ -959,62 +959,121 @@ router.patch("/:id/cancel", async (req, res) => {
 // ----------------- Accept endpoint (simple) -----------------
 router.post("/:id/accept", async (req, res) => {
   const client = await pool.connect();
+
   try {
     const { serviceproviderid } = req.body;
     const { id } = req.params;
-    if (!serviceproviderid) return res.status(400).json({ error: "serviceproviderid is required" });
+
+    if (!serviceproviderid) {
+      return res.status(400).json({ error: "serviceproviderid is required" });
+    }
 
     await client.query("BEGIN");
-    const eng = await client.query(`SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`, [id]);
-    if (eng.rows.length === 0) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Engagement not found" }); }
-    const e = eng.rows[0];
-    if (e.assignment_status !== "UNASSIGNED") { await client.query("ROLLBACK"); return res.status(409).json({ error: "Engagement already assigned" }); }
 
-    // Check provider availability for the entire date range
-    const startD = new Date(e.start_date);
-    const endD = new Date(e.end_date);
-    const startTimeHM = epochToTimeHM(e.start_epoch);
-    const duration = (e.end_epoch && e.start_epoch) ? (Number(e.end_epoch) - Number(e.start_epoch)) : 3600;
+    // 1️⃣ Lock engagement
+    const engRes = await client.query(
+      `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+      [id]
+    );
 
-    for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
-      const day = d.toISOString().slice(0, 10);
-      const ds = toEpochSeconds(day, startTimeHM);
-      const de = ds + duration;
-      const conflict = await client.query(`SELECT 1 FROM provider_availability WHERE serviceproviderid=$1 AND $2 < slot_end_epoch AND $3 > slot_start_epoch LIMIT 1`, [serviceproviderid, ds, de]);
-      if (conflict.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Provider has conflict for date " + day }); }
+    if (engRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
     }
 
-    const upd = await client.query(`UPDATE engagements SET serviceproviderid=$1, assignment_status='ASSIGNED' WHERE engagement_id=$2 RETURNING *`, [serviceproviderid, id]);
+    const e = engRes.rows[0];
 
-    // Insert availability rows for the provider for each day (or update)
-    for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
-      const day = d.toISOString().slice(0, 10);
-      const ds = toEpochSeconds(day, epochToTimeHM(e.start_epoch));
-      const de = ds + duration;
-      const exists = await client.query(`SELECT 1 FROM provider_availability WHERE engagement_id=$1 AND date=$2::date LIMIT 1`, [id, day]);
-      if (exists.rows.length > 0) {
-        await client.query(`UPDATE provider_availability SET serviceproviderid=$1, slot_start_epoch=$2, slot_end_epoch=$3, status='BOOKED', updated_at=NOW() WHERE engagement_id=$4 AND date=$5::date`, [serviceproviderid, ds, de, id, day]);
-      } else {
-        await client.query(`INSERT INTO provider_availability (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at) VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())`, [serviceproviderid, id, day, ds, de]);
-      }
+    if (e.assignment_status !== "UNASSIGNED") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "Engagement already assigned" });
     }
+
+    if (!e.start_epoch || !e.end_epoch) {
+      throw new Error("Engagement start/end time missing");
+    }
+
+    const duration = Number(e.end_epoch) - Number(e.start_epoch);
+
+    // 2️⃣ Provider availability check (single slot)
+    const conflict = await client.query(
+      `
+      SELECT 1
+      FROM provider_availability
+      WHERE serviceproviderid=$1
+        AND $2 < slot_end_epoch
+        AND $3 > slot_start_epoch
+      LIMIT 1
+      `,
+      [serviceproviderid, e.start_epoch, e.end_epoch]
+    );
+
+    if (conflict.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "Provider has time conflict" });
+    }
+
+    // 3️⃣ Assign provider
+    await client.query(
+      `
+      UPDATE engagements
+      SET serviceproviderid=$1,
+          assignment_status='ASSIGNED'
+      WHERE engagement_id=$2
+      `,
+      [serviceproviderid, id]
+    );
+
+    // 4️⃣ Create provider availability (ONE row)
+    await client.query(
+      `
+      INSERT INTO provider_availability
+      (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at)
+      VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())
+      `,
+      [
+        serviceproviderid,
+        id,
+        e.start_date,
+        e.start_epoch,
+        e.end_epoch,
+      ]
+    );
+
+    // 5️⃣ Create service_day (ONE row)
+    await client.query(
+      `
+      INSERT INTO service_days
+      (engagement_id, service_date, status, created_at)
+      VALUES ($1,$2::date,'SCHEDULED',NOW())
+      ON CONFLICT DO NOTHING
+      `,
+      [id, e.start_date]
+    );
 
     await client.query("COMMIT");
 
-    const updated = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
-    updated.start_date = normalizeDateToIST(updated.start_date);
-    updated.end_date = normalizeDateToIST(updated.end_date);
+    // 6️⃣ Return normalized response
+    const updated = (
+      await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])
+    ).rows[0];
+
     updated.start_time = epochToTimeHM(updated.start_epoch);
     updated.end_time = epochToTimeHM(updated.end_epoch);
-    return res.json({ message: "Engagement assigned successfully", engagement: updated });
+
+    return res.json({
+      message: "Engagement accepted successfully",
+      engagement: updated,
+    });
+
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch (e) {}
-    console.error("Error accepting engagement:", err);
+    await client.query("ROLLBACK");
+    console.error("Accept engagement error:", err);
     return res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
 });
+
 
 function getDateRange(startDate, endDate) {
   const dates = [];
