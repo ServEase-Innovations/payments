@@ -109,13 +109,15 @@ router.post("/", async (req, res) => {
     const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
 
     // 2️⃣ Epochs — ONLY for non-ON_DEMAND
-    const startEpoch =
-      booking_type === "ON_DEMAND" ? null : toEpochSeconds(start_date, start_time);
+    const startEpoch = toEpochSeconds(start_date, start_time);
+if (!startEpoch) throw new Error("Invalid date/time");
 
-    const hoursToAdd = booking_type === "ON_DEMAND" ? 2 : 1;
+const hoursToAdd = booking_type === "ON_DEMAND" ? 2 : 1;
+const endEpoch = startEpoch + hoursToAdd * 3600;
 
-    const endEpoch =
-      booking_type === "ON_DEMAND" ? null : startEpoch + hoursToAdd * 3600;
+const effectiveEndDate =
+  booking_type === "ON_DEMAND" ? start_date : end_date;
+
 
     await client.query("BEGIN");
 
@@ -151,60 +153,57 @@ router.post("/", async (req, res) => {
 
     // 5️⃣ Create engagement
     const engRes = await client.query(
-      `
-      INSERT INTO engagements (
-        customerid,
-        serviceproviderid,
-        start_date,
-        end_date,
-        responsibilities,
-        booking_type,
-        service_type,
-        task_status,
-        active,
-        base_amount,
-        assignment_status,
-        start_epoch,
-        end_epoch,
-        created_at
-      )
-      VALUES (
-        $1,$2,$3::date,$4::date,$5,$6,$7,
-        'NOT_STARTED',true,$8,$9,$10,$11,NOW()
-      )
-      RETURNING *
-      `,
-      [
-        customerid,
-        providerId,
-        start_date,
-        end_date,
-        responsibilities,
-        booking_type,
-        service_type,
-        base_amount,
-        assignment_status,
-        startEpoch,
-        endEpoch,
-      ]
-    );
+  `
+  INSERT INTO engagements (
+    customerid,
+    serviceproviderid,
+    start_date,
+    end_date,
+    responsibilities,
+    booking_type,
+    service_type,
+    task_status,
+    active,
+    base_amount,
+    assignment_status,
+    start_epoch,
+    end_epoch,
+    created_at
+  )
+  VALUES (
+    $1,$2,$3::date,$4::date,$5,$6,$7,
+    'NOT_STARTED',true,$8,$9,$10,$11,NOW()
+  )
+  RETURNING *
+  `,
+  [
+    customerid,
+    providerId,
+    start_date,
+    effectiveEndDate,   // ✅ IMPORTANT
+    responsibilities,
+    booking_type,
+    service_type,
+    base_amount,
+    assignment_status,
+    startEpoch,
+    endEpoch,
+  ]
+);
+
 
     const engagement = engRes.rows[0];
 
     // 6️⃣ Create service_days ONLY for non-ON_DEMAND
     if (booking_type !== "ON_DEMAND") {
-      await createServiceDays(
-        client,
-        engagement.engagement_id,
-        start_date,
-        end_date
-      );
+      await createServiceDays(client, engagement.engagement_id, start_date, effectiveEndDate);
     }
 
     // 7️⃣ Provider availability ONLY for non-ON_DEMAND
     if (providerId && booking_type !== "ON_DEMAND") {
       const startD = new Date(start_date);
-      const endD = new Date(end_date);
+      const endD = new Date(effectiveEndDate);
+
 
       for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
         const day = d.toISOString().slice(0, 10);
