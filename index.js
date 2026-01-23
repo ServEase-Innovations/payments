@@ -13,6 +13,7 @@ import { Server } from "socket.io";
 import cors from "cors";
 import config from "./src/config/config.js";
 import engagementsServiceRouter from "./src/routes/engagementService.js";
+import adminPaymentsRouter from "./src/routes/adminPayments.js";
 
 
 const app = express();
@@ -61,6 +62,7 @@ app.use("/api", walletRoutes);
 app.use("/api/service-providers", serviceProviderRoutes);
 app.use("/api/customers", engagementsRouter);
 app.use("/api/engagement-service", engagementsServiceRouter);
+app.use("/api/admin", adminPaymentsRouter);
 
 
 
