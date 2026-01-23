@@ -6,53 +6,59 @@ const router = express.Router();
 
 router.post("/verify", async (req, res) => {
   const {
-    razorpayOrderId,
-    razorpayPaymentId,
-    razorpaySignature,
+    engagementId,
+    razorpay_order_id,
+    razorpay_payment_id,
+    razorpay_signature,
   } = req.body;
 
   try {
-    // 1️⃣ Verify signature (always in prod)
-    const generatedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-      .digest("hex");
+    // 🔹 DEV / TEST MODE → SKIP SIGNATURE CHECK
+    if (process.env.NODE_ENV !== "production") {
+      console.log("⚠️ DEV MODE: Skipping Razorpay signature verification");
+    } else {
+      // 🔐 PROD MODE → VERIFY SIGNATURE
+      const body = `${razorpay_order_id}|${razorpay_payment_id}`;
 
-    if (generatedSignature !== razorpaySignature) {
-      return res.status(400).json({ error: "Invalid payment signature" });
+      const expectedSignature = crypto
+        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(body)
+        .digest("hex");
+
+      if (expectedSignature !== razorpay_signature) {
+        return res.status(400).json({ error: "Invalid payment signature" });
+      }
     }
 
-    // 2️⃣ Ensure idempotency
-    const existing = await pool.query(
-      `SELECT status FROM payments WHERE razorpay_order_id=$1`,
-      [razorpayOrderId]
-    );
-
-    if (existing.rows.length === 0)
-      return res.status(404).json({ error: "Payment not found" });
-
-    if (existing.rows[0].status === "SUCCESS") {
-      return res.json({ message: "Payment already verified" });
-    }
-
-    // 3️⃣ Mark payment SUCCESS
-    await pool.query(
+    // ✅ Mark payment SUCCESS
+    const payRes = await pool.query(
       `
       UPDATE payments
       SET status='SUCCESS',
           transaction_id=$1,
           updated_at=NOW()
       WHERE razorpay_order_id=$2
+      RETURNING *
       `,
-      [razorpayPaymentId, razorpayOrderId]
+      [razorpay_payment_id, razorpay_order_id]
     );
 
-    return res.json({ message: "Payment verified successfully" });
+    if (payRes.rows.length === 0) {
+      return res.status(404).json({ error: "Payment not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "Payment verified successfully",
+      payment: payRes.rows[0],
+    });
+
   } catch (err) {
-    console.error("Verify payment error:", err);
+    console.error("❌ Payment verify error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
+
 
 
 
