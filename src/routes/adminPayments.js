@@ -155,6 +155,7 @@ router.get("/ledger", async (req, res) => {
     const params = [];
     let where = "";
 
+    // ---- Date filters ----
     if (from) {
       params.push(from);
       where += ` AND created_at::date >= $${params.length}`;
@@ -165,15 +166,15 @@ router.get("/ledger", async (req, res) => {
       where += ` AND created_at::date <= $${params.length}`;
     }
 
-    // 1️⃣ Payments (CREDIT)
+    // ---- 1️⃣ Payments (CREDIT) ----
     const paymentsQuery = `
       SELECT
         created_at::date AS date,
         'PAYMENT' AS type,
         transaction_id AS reference,
         engagement_id,
-        0 AS debit,
-        total_amount AS credit,
+        0::numeric AS debit,
+        total_amount::numeric AS credit,
         'Customer payment' AS note,
         created_at
       FROM payments
@@ -181,15 +182,15 @@ router.get("/ledger", async (req, res) => {
       ${where}
     `;
 
-    // 2️⃣ Provider payouts (DEBIT)
+    // ---- 2️⃣ Provider payouts (DEBIT) ----
     const payoutsQuery = `
       SELECT
         created_at::date AS date,
         'PAYOUT' AS type,
         payout_id::text AS reference,
         engagement_id,
-        net_amount AS debit,
-        0 AS credit,
+        net_amount::numeric AS debit,
+        0::numeric AS credit,
         'Provider payout' AS note,
         created_at
       FROM payouts
@@ -197,7 +198,7 @@ router.get("/ledger", async (req, res) => {
       ${where}
     `;
 
-    // 3️⃣ Union ledger
+    // ---- 3️⃣ Ledger rows ----
     const ledgerQuery = `
       SELECT * FROM (
         ${paymentsQuery}
@@ -205,14 +206,17 @@ router.get("/ledger", async (req, res) => {
         ${payoutsQuery}
       ) l
       ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
+      LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2}
     `;
 
-    const { rows } = await pool.query(ledgerQuery, params);
+    const ledgerParams = [...params, Number(limit), Number(offset)];
+    const { rows } = await pool.query(ledgerQuery, ledgerParams);
 
-    // 4️⃣ Running balance
+    // ---- 4️⃣ Running balance (page-level) ----
     let balance = 0;
     const ledger = rows
+      .slice()
       .reverse()
       .map((r) => {
         balance += Number(r.credit) - Number(r.debit);
@@ -220,29 +224,54 @@ router.get("/ledger", async (req, res) => {
       })
       .reverse();
 
-    // 5️⃣ Summary
-    const summaryRes = await pool.query(`
+    // ---- 5️⃣ Summary (FULL, matches UI) ----
+    const summaryQuery = `
       SELECT
-        COUNT(*) FILTER (WHERE status='SUCCESS') AS total_transactions,
-        COALESCE(SUM(total_amount),0) AS total_collected,
-        COALESCE(SUM(platform_fee),0) AS platform_fee,
-        COALESCE(SUM(gst),0) AS gst,
-        COALESCE(SUM(platform_fee - gst),0) AS net_revenue
-      FROM payments
-      WHERE status='SUCCESS'
-    `);
+        COALESCE(pay.total_collected, 0)       AS total_collected,
+        COALESCE(pay.platform_fee, 0)          AS platform_revenue,
+        COALESCE(pay.gst, 0)                    AS gst_payable,
+        COALESCE(pout.provider_payouts, 0)     AS provider_payouts,
+        0                                      AS refunds,
+        (
+          COALESCE(pay.total_collected, 0)
+          - COALESCE(pout.provider_payouts, 0)
+        )                                      AS net_balance
+      FROM
+        (
+          SELECT
+            SUM(total_amount) AS total_collected,
+            SUM(platform_fee) AS platform_fee,
+            SUM(gst) AS gst
+          FROM payments
+          WHERE status='SUCCESS'
+          ${where}
+        ) pay
+      LEFT JOIN
+        (
+          SELECT
+            SUM(net_amount) AS provider_payouts
+          FROM payouts
+          WHERE status='SUCCESS'
+          ${where}
+        ) pout ON true
+    `;
 
+    const summaryRes = await pool.query(summaryQuery, params);
+
+    // ---- Response ----
     res.json({
       success: true,
       summary: summaryRes.rows[0],
       ledger,
       count: ledger.length,
     });
+
   } catch (err) {
     console.error("Admin ledger error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
+
 
 
 
