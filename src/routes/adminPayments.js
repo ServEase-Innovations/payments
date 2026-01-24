@@ -144,6 +144,107 @@ router.get("/payments/:paymentId", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/ledger
+ * Admin – Serveaso Ledger
+ */
+router.get("/ledger", async (req, res) => {
+  try {
+    const { from, to, limit = 50, offset = 0 } = req.query;
+
+    const params = [];
+    let where = "";
+
+    if (from) {
+      params.push(from);
+      where += ` AND created_at::date >= $${params.length}`;
+    }
+
+    if (to) {
+      params.push(to);
+      where += ` AND created_at::date <= $${params.length}`;
+    }
+
+    // 1️⃣ Payments (CREDIT)
+    const paymentsQuery = `
+      SELECT
+        created_at::date AS date,
+        'PAYMENT' AS type,
+        transaction_id AS reference,
+        engagement_id,
+        0 AS debit,
+        total_amount AS credit,
+        'Customer payment' AS note,
+        created_at
+      FROM payments
+      WHERE status = 'SUCCESS'
+      ${where}
+    `;
+
+    // 2️⃣ Provider payouts (DEBIT)
+    const payoutsQuery = `
+      SELECT
+        created_at::date AS date,
+        'PAYOUT' AS type,
+        payout_id::text AS reference,
+        engagement_id,
+        net_amount AS debit,
+        0 AS credit,
+        'Provider payout' AS note,
+        created_at
+      FROM payouts
+      WHERE status = 'SUCCESS'
+      ${where}
+    `;
+
+    // 3️⃣ Union ledger
+    const ledgerQuery = `
+      SELECT * FROM (
+        ${paymentsQuery}
+        UNION ALL
+        ${payoutsQuery}
+      ) l
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+
+    const { rows } = await pool.query(ledgerQuery, params);
+
+    // 4️⃣ Running balance
+    let balance = 0;
+    const ledger = rows
+      .reverse()
+      .map((r) => {
+        balance += Number(r.credit) - Number(r.debit);
+        return { ...r, balance };
+      })
+      .reverse();
+
+    // 5️⃣ Summary
+    const summaryRes = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status='SUCCESS') AS total_transactions,
+        COALESCE(SUM(total_amount),0) AS total_collected,
+        COALESCE(SUM(platform_fee),0) AS platform_fee,
+        COALESCE(SUM(gst),0) AS gst,
+        COALESCE(SUM(platform_fee - gst),0) AS net_revenue
+      FROM payments
+      WHERE status='SUCCESS'
+    `);
+
+    res.json({
+      success: true,
+      summary: summaryRes.rows[0],
+      ledger,
+      count: ledger.length,
+    });
+  } catch (err) {
+    console.error("Admin ledger error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+
 
 
 

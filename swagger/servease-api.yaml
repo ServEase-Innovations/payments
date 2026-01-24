@@ -1147,7 +1147,79 @@ paths:
         "500":
           description: Server error
 
-  
+  /admin/ledger:
+    get:
+      summary: Get Serveaso ledger (Admin)
+      description: >
+        Returns the **platform ledger** showing all money movement
+        including customer payments and provider payouts.
+        Also returns a summary useful for admin dashboards.
+      tags:
+        - Admin Payments
+      parameters:
+        - in: query
+          name: from
+          description: Filter ledger from this date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+            example: "2026-01-01"
+
+        - in: query
+          name: to
+          description: Filter ledger up to this date (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+            example: "2026-01-31"
+
+        - in: query
+          name: limit
+          description: Number of records to return
+          schema:
+            type: integer
+            default: 50
+            example: 50
+
+        - in: query
+          name: offset
+          description: Pagination offset
+          schema:
+            type: integer
+            default: 0
+            example: 0
+
+      responses:
+        "200":
+          description: Ledger fetched successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+
+                  summary:
+                    $ref: "#/components/schemas/AdminLedgerSummary"
+
+                  ledger:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminLedgerEntry"
+
+                  count:
+                    type: integer
+                    example: 25
+
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden (Admin only)
+        "500":
+          description: Internal server error
+
 
   
 
