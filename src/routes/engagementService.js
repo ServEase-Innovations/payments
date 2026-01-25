@@ -131,75 +131,151 @@ router.post("/service-days/:id/otp", async (req, res) => {
 
 router.post("/service-days/:id/complete", async (req, res) => {
   const client = await pool.connect();
+
   try {
-    const { id } = req.params;
+    const { id: serviceDayId } = req.params;
     const { otp } = req.body;
+
+    if (!otp) {
+      return res.status(400).json({ error: "OTP is required" });
+    }
 
     await client.query("BEGIN");
 
+    /* 1️⃣ Validate OTP */
     const otpRes = await client.query(
-      `SELECT * FROM service_day_otps
-       WHERE service_day_id=$1
-         AND otp_code=$2
-         AND expires_at > NOW()
-         AND verified_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [id, otp]
+      `
+      SELECT otp_id
+      FROM service_day_otps
+      WHERE service_day_id = $1
+        AND otp_code = $2
+        AND verified_at IS NULL
+        AND expires_at > NOW()
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [serviceDayId, otp]
     );
 
-    if (otpRes.rows.length === 0)
+    if (otpRes.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ error: "Invalid or expired OTP" });
+    }
 
-    await client.query(
-      `UPDATE service_day_otps
-       SET verified_at=NOW()
-       WHERE otp_id=$1`,
-      [otpRes.rows[0].otp_id]
-    );
-
+    /* 2️⃣ Lock service day */
     const sdRes = await client.query(
-      `SELECT sd.*, e.serviceproviderid, e.base_amount, e.start_date, e.end_date
-       FROM service_days sd
-       JOIN engagements e ON e.engagement_id = sd.engagement_id
-       WHERE sd.service_day_id=$1 FOR UPDATE`,
-      [id]
+      `
+      SELECT
+        sd.service_day_id,
+        sd.engagement_id,
+        sd.status,
+        e.serviceproviderid,
+        e.base_amount,
+        e.start_date,
+        e.end_date
+      FROM service_days sd
+      JOIN engagements e ON e.engagement_id = sd.engagement_id
+      WHERE sd.service_day_id = $1
+      FOR UPDATE
+      `,
+      [serviceDayId]
     );
+
+    if (sdRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Service day not found" });
+    }
 
     const sd = sdRes.rows[0];
 
+    if (sd.status !== "IN_PROGRESS") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Service day cannot be completed" });
+    }
+
+    if (!sd.serviceproviderid) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Provider not assigned" });
+    }
+
+    /* 3️⃣ Calculate daily earning */
     const totalDays =
       (new Date(sd.end_date) - new Date(sd.start_date)) /
         (1000 * 60 * 60 * 24) +
       1;
 
-    const dailyRate = Number(sd.base_amount) / totalDays;
+    const dailyEarning = Number(sd.base_amount) / totalDays;
 
-    // Mark service day completed
+    /* 4️⃣ Mark OTP verified */
     await client.query(
-      `UPDATE service_days
-       SET status='COMPLETED', completed_at=NOW(), otp_verified=true
-       WHERE service_day_id=$1`,
-      [id]
+      `UPDATE service_day_otps SET verified_at = NOW() WHERE otp_id = $1`,
+      [otpRes.rows[0].otp_id]
     );
 
-    // Ledger credit
+    /* 5️⃣ Complete service day */
     await client.query(
-      `INSERT INTO provider_ledger
-       (serviceproviderid, engagement_id, amount, direction, reason, reference_type, reference_id)
-       VALUES ($1,$2,$3,'CREDIT','DAILY_EARNED','SERVICE_DAY',$4)`,
-      [sd.serviceproviderid, sd.engagement_id, dailyRate, id]
+      `
+      UPDATE service_days
+      SET status = 'COMPLETED',
+          completed_at = NOW(),
+          otp_verified = true
+      WHERE service_day_id = $1
+      `,
+      [serviceDayId]
+    );
+
+    /* 6️⃣ Insert provider ledger (CREDIT) */
+    await client.query(
+      `
+      INSERT INTO provider_ledger
+      (serviceproviderid, engagement_id, amount, direction, reason, reference_type, reference_id, created_at)
+      VALUES ($1,$2,$3,'CREDIT','DAILY_EARNED','SERVICE_DAY',$4,NOW())
+      `,
+      [
+        sd.serviceproviderid,
+        sd.engagement_id,
+        dailyEarning,
+        serviceDayId,
+      ]
+    );
+
+    /* 7️⃣ Ensure provider wallet exists */
+    await client.query(
+      `
+      INSERT INTO provider_wallets (serviceproviderid, balance, created_at)
+      VALUES ($1, 0, NOW())
+      ON CONFLICT (serviceproviderid) DO NOTHING
+      `,
+      [sd.serviceproviderid]
+    );
+
+    /* 8️⃣ Credit provider wallet */
+    await client.query(
+      `
+      UPDATE provider_wallets
+      SET balance = balance + $1
+      WHERE serviceproviderid = $2
+      `,
+      [dailyEarning, sd.serviceproviderid]
     );
 
     await client.query("COMMIT");
-    res.json({ message: "Service completed & earnings credited", dailyRate });
+
+    return res.json({
+      success: true,
+      message: "Service completed & earnings credited",
+      earning: Number(dailyEarning.toFixed(2)),
+    });
   } catch (err) {
     await client.query("ROLLBACK");
-    res.status(500).json({ error: err.message });
+    console.error("Service day completion error:", err);
+    res.status(500).json({ error: "Internal server error" });
   } finally {
     client.release();
   }
 });
+
+
 
 
 router.get(

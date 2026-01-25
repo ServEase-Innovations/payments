@@ -1220,6 +1220,103 @@ paths:
         "500":
           description: Internal server error
 
+  /service-providers/{providerId}/withdraw:
+    post:
+      summary: Provider wallet withdrawal
+      description: >
+        Allows a service provider to withdraw available wallet balance.
+        Creates a payout record, deducts wallet balance, and reflects in admin ledger.
+      tags:
+        - Provider Wallet
+      parameters:
+        - in: path
+          name: providerId
+          required: true
+          schema:
+            type: integer
+          example: 3403
+          description: Service Provider ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amount
+              properties:
+                amount:
+                  type: number
+                  format: float
+                  example: 2500
+                  description: Amount to withdraw
+                payout_mode:
+                  type: string
+                  enum: [BANK, UPI]
+                  example: BANK
+                  description: Mode of payout
+      responses:
+        "200":
+          description: Withdrawal successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Withdrawal successful
+                  remaining_balance:
+                    type: number
+                    example: 3649
+                  payout:
+                    type: object
+                    properties:
+                      payout_id:
+                        type: integer
+                        example: 101
+                      serviceproviderid:
+                        type: integer
+                        example: 3403
+                      gross_amount:
+                        type: number
+                        example: 2500
+                      provider_fee:
+                        type: number
+                        example: 0
+                      tds_amount:
+                        type: number
+                        example: 25
+                      net_amount:
+                        type: number
+                        example: 2475
+                      payout_mode:
+                        type: string
+                        example: BANK
+                      status:
+                        type: string
+                        example: SUCCESS
+                      created_at:
+                        type: string
+                        format: date-time
+        "400":
+          description: Invalid request or insufficient balance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Insufficient balance
+        "404":
+          description: Provider wallet not found
+        "500":
+          description: Internal server error
+
 
   
 

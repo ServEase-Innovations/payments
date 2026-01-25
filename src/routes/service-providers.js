@@ -50,7 +50,22 @@ router.get("/:providerId/payouts", async (req, res) => {
 
     const provider = providerRes.rows[0];
 
-    // 2️⃣ Build optional month filter
+    // 2️⃣ Wallet = SOURCE OF TRUTH
+    const walletRes = await pool.query(
+      `
+      SELECT balance
+      FROM provider_wallets
+      WHERE serviceproviderid = $1
+      `,
+      [providerId]
+    );
+
+    const walletBalance =
+      walletRes.rows.length > 0
+        ? Number(walletRes.rows[0].balance)
+        : 0;
+
+    // 3️⃣ Optional month filter
     let monthFilter = "";
     const params = [providerId];
 
@@ -61,25 +76,25 @@ router.get("/:providerId/payouts", async (req, res) => {
           error: "Invalid month format. Use YYYY-MM",
         });
       }
-      monthFilter = "AND TO_CHAR(created_at, 'YYYY-MM') = $2";
+      monthFilter = `AND TO_CHAR(created_at, 'YYYY-MM') = $2`;
       params.push(month);
     }
 
-    // 3️⃣ Fetch EARNINGS from provider_ledger
+    // 4️⃣ Provider ledger (CREDIT + DEBIT)
     const ledgerRes = await pool.query(
       `
       SELECT
         ledger_id,
         engagement_id,
         amount,
+        direction,
         reason,
         reference_type,
         reference_id,
         created_at
       FROM provider_ledger
       WHERE serviceproviderid = $1
-        AND direction = 'CREDIT'
-        ${monthFilter}
+      ${monthFilter}
       ORDER BY created_at ASC
       `,
       params
@@ -87,47 +102,27 @@ router.get("/:providerId/payouts", async (req, res) => {
 
     const ledger = ledgerRes.rows;
 
-    // 4️⃣ Fetch WITHDRAWALS from payouts
-    const payoutsRes = await pool.query(
-      `
-      SELECT
-        payout_id,
-        net_amount,
-        status,
-        created_at
-      FROM payouts
-      WHERE serviceproviderid = $1
-        AND status = 'SUCCESS'
-      `,
-      [providerId]
-    );
+    // 5️⃣ Totals
+    const totalEarned = ledger
+      .filter(l => l.direction === "CREDIT")
+      .reduce((sum, l) => sum + Number(l.amount || 0), 0);
 
-    const payouts = payoutsRes.rows;
-
-    // 5️⃣ Calculate totals
-    const totalEarned = ledger.reduce(
-      (sum, l) => sum + Number(l.amount || 0),
-      0
-    );
-
-    const totalWithdrawn = payouts.reduce(
-      (sum, p) => sum + Number(p.net_amount || 0),
-      0
-    );
-
-    const availableToWithdraw = totalEarned - totalWithdrawn;
+    const totalWithdrawn = ledger
+      .filter(l => l.direction === "DEBIT" && l.reason === "WITHDRAWAL")
+      .reduce((sum, l) => sum + Number(l.amount || 0), 0);
 
     const securityDepositPaid =
       Number(provider.security_deposit_collected || 0) >= 5000;
 
-    // 6️⃣ Prepare response
+    // 6️⃣ Response
     const response = {
       success: true,
       serviceproviderid: providerId,
       summary: {
         total_earned: Number(totalEarned.toFixed(2)),
         total_withdrawn: Number(totalWithdrawn.toFixed(2)),
-        available_to_withdraw: Number(availableToWithdraw.toFixed(2)),
+        available_to_withdraw: Number(walletBalance.toFixed(2)), // ✅ CORRECT
+        wallet_balance: Number(walletBalance.toFixed(2)),
         security_deposit_paid: securityDepositPaid,
         security_deposit_amount: Number(
           provider.security_deposit_collected || 0
@@ -141,9 +136,10 @@ router.get("/:providerId/payouts", async (req, res) => {
         ledger_id: l.ledger_id,
         engagement_id: l.engagement_id,
         amount: Number(l.amount),
-        reason: l.reason, // DAILY_EARNED
-        reference_type: l.reference_type, // SERVICE_DAY
-        reference_id: l.reference_id, // service_day_id
+        direction: l.direction,
+        reason: l.reason,
+        reference_type: l.reference_type,
+        reference_id: l.reference_id,
         created_at: l.created_at,
       }));
     }
@@ -157,6 +153,9 @@ router.get("/:providerId/payouts", async (req, res) => {
     });
   }
 });
+
+
+
 
 
 /* -------------------------------------------------------------------------- */
@@ -387,5 +386,128 @@ router.get("/:providerId/calendar", async (req, res) => {
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
+
+
+router.post("/:providerId/withdraw", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { providerId } = req.params;
+    const { amount, payout_mode = "BANK" } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid withdrawal amount" });
+    }
+
+    await client.query("BEGIN");
+
+    // 1️⃣ Validate provider
+    const providerRes = await client.query(
+      `SELECT serviceproviderid FROM serviceprovider WHERE serviceproviderid=$1`,
+      [providerId]
+    );
+    if (providerRes.rows.length === 0) {
+      throw new Error("Provider not found");
+    }
+
+    // 2️⃣ Lock wallet (auto-create if missing)
+    let walletRes = await client.query(
+      `SELECT * FROM provider_wallets WHERE serviceproviderid=$1 FOR UPDATE`,
+      [providerId]
+    );
+
+    if (walletRes.rows.length === 0) {
+      await client.query(
+        `INSERT INTO provider_wallets (serviceproviderid, balance, created_at)
+         VALUES ($1, 0, NOW())`,
+        [providerId]
+      );
+
+      walletRes = await client.query(
+        `SELECT * FROM provider_wallets WHERE serviceproviderid=$1 FOR UPDATE`,
+        [providerId]
+      );
+    }
+
+    const balance = Number(walletRes.rows[0].balance);
+
+    if (balance < amount) {
+      throw new Error("Insufficient balance");
+    }
+
+    // 3️⃣ Charges (customize later)
+    const provider_fee = 0;
+    const tds_amount = Number((amount * 0.01).toFixed(2));
+    const net_amount = amount - provider_fee - tds_amount;
+
+    // 4️⃣ Create payout (PENDING, not SUCCESS)
+    const payoutRes = await client.query(
+      `
+      INSERT INTO payouts (
+        serviceproviderid,
+        gross_amount,
+        provider_fee,
+        tds_amount,
+        net_amount,
+        payout_mode,
+        status,
+        created_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,'PENDING',NOW())
+      RETURNING *
+      `,
+      [
+        providerId,
+        amount,
+        provider_fee,
+        tds_amount,
+        net_amount,
+        payout_mode
+      ]
+    );
+
+    const payout = payoutRes.rows[0];
+
+    // 5️⃣ Insert ledger entry (DEBIT)
+    await client.query(
+      `
+      INSERT INTO provider_ledger
+      (serviceproviderid, amount, direction, reason, reference_type, reference_id, created_at)
+      VALUES ($1,$2,'DEBIT','WITHDRAWAL','PAYOUT',$3,NOW())
+      `,
+      [providerId, amount, payout.payout_id]
+    );
+
+    // 6️⃣ Deduct wallet balance
+    await client.query(
+      `
+      UPDATE provider_wallets
+      SET balance = balance - $1
+      WHERE serviceproviderid = $2
+      `,
+      [amount, providerId]
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message: "Withdrawal request created",
+      payout_id: payout.payout_id,
+      requested_amount: amount,
+      net_amount,
+      remaining_balance: balance - amount
+    });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Withdraw error:", err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+
 
 export default router;
