@@ -263,48 +263,79 @@ router.get("/:providerId/engagements", async (req, res) => {
       });
     }
 
-    // ---- Group engagements ----
-    const today = dayjs().tz("Asia/Kolkata").startOf("day");
-    const current = [];
-    const upcoming = [];
-    const past = [];
+   // ---- Group engagements ----
+const now = dayjs().tz("Asia/Kolkata").unix();
+const todayDate = dayjs().tz("Asia/Kolkata").startOf("day");
 
-    result.rows.forEach(row => {
-      row.startDate = normalizeDate(row.start_date);
-      row.endDate = normalizeDate(row.end_date);
-      row.startTime = epochToTime(row.start_epoch);
-      row.endTime = epochToTime(row.end_epoch);
+const current = [];
+const upcoming = [];
+const past = [];
 
-      const engagementStart = dayjs(row.start_date).startOf("day");
-      const engagementEnd = dayjs(row.end_date).endOf("day");
+result.rows.forEach(row => {
+  row.startDate = normalizeDate(row.start_date);
+  row.endDate = normalizeDate(row.end_date);
+  row.startTime = epochToTime(row.start_epoch);
+  row.endTime = epochToTime(row.end_epoch);
 
-      const todayService = todayServiceByEng[row.engagement_id] || null;
+  const startEpoch = parseInt(row.start_epoch, 10);
+  const endEpoch = parseInt(row.end_epoch, 10);
 
-      let today_service = null;
-      if (todayService) {
-        today_service = {
-          service_day_id: todayService.service_day_id,
-          status: todayService.status,
-          can_start: todayService.status === "SCHEDULED",
-          can_generate_otp: todayService.status === "IN_PROGRESS",
-          can_complete: todayService.status === "IN_PROGRESS",
-          otp_active: !!otpByServiceDay[todayService.service_day_id]
-        };
-      }
+  const todayService = todayServiceByEng[row.engagement_id] || null;
 
-      const enriched = {
-        ...row,
-        today_service
-      };
+  // ---- today_service (daily execution state) ----
+  let today_service = null;
+  if (todayService) {
+    const inProgressToday = now >= startEpoch && now < endEpoch;
 
-      if (today.isBefore(engagementStart)) {
-        upcoming.push(enriched);
-      } else if (today.isAfter(engagementEnd)) {
-        past.push(enriched);
-      } else {
-        current.push(enriched);
-      }
-    });
+    today_service = {
+      service_day_id: todayService.service_day_id,
+      status: inProgressToday ? "IN_PROGRESS" : todayService.status,
+      can_start: now < startEpoch,
+      can_generate_otp: inProgressToday,
+      can_complete: inProgressToday,
+      otp_active: !!otpByServiceDay[todayService.service_day_id]
+    };
+  }
+
+  const enriched = {
+    ...row,
+    today_service
+  };
+
+  // ---- Engagement lifecycle bucket (IMPORTANT) ----
+  let bucket;
+
+  if (row.booking_type === "ON_DEMAND") {
+    // Time-based
+    if (now < startEpoch) {
+      bucket = "upcoming";
+    } else if (now >= endEpoch) {
+      bucket = "past";
+    } else {
+      bucket = "current";
+    }
+  } else if (row.booking_type === "SHORT_TERM" || row.booking_type === "MONTHLY") {
+    // Date-based
+    const engagementStart = dayjs(row.start_date).startOf("day");
+    const engagementEnd = dayjs(row.end_date).endOf("day");
+
+    if (todayDate.isBefore(engagementStart)) {
+      bucket = "upcoming";
+    } else if (todayDate.isAfter(engagementEnd)) {
+      bucket = "past";
+    } else {
+      bucket = "current";
+    }
+  } else {
+    // Safety fallback
+    bucket = "past";
+  }
+
+  if (bucket === "current") current.push(enriched);
+  if (bucket === "upcoming") upcoming.push(enriched);
+  if (bucket === "past") past.push(enriched);
+});
+
 
     return res.json({
       success: true,
