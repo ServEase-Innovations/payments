@@ -620,6 +620,52 @@ CREATE TABLE IF NOT EXISTS public.vendor
     CONSTRAINT uksua06yf2eer2f31e8k904rosj UNIQUE (registrationid)
 );
 
+CREATE TABLE IF NOT EXISTS public.provider_reviews (
+  review_id BIGSERIAL PRIMARY KEY,
+
+  customerid BIGINT NOT NULL,
+  serviceproviderid BIGINT NOT NULL,
+
+  -- ON_DEMAND
+  serviceprovider_engagement_id BIGINT UNIQUE,
+
+  -- SHORT_TERM / MONTHLY
+  engagement_id BIGINT UNIQUE,
+
+  service_type VARCHAR(50) NOT NULL
+    CHECK (service_type IN ('ON_DEMAND', 'SHORT_TERM', 'MONTHLY')),
+
+  rating INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  review TEXT,
+
+  created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now(),
+
+  -- FKs
+  CONSTRAINT fk_review_customer
+    FOREIGN KEY (customerid)
+    REFERENCES customer(customerid),
+
+  CONSTRAINT fk_review_serviceprovider
+    FOREIGN KEY (serviceproviderid)
+    REFERENCES serviceprovider(serviceproviderid),
+
+  CONSTRAINT fk_review_on_demand
+    FOREIGN KEY (serviceprovider_engagement_id)
+    REFERENCES serviceprovider_engagement(id),
+
+  CONSTRAINT fk_review_engagement
+    FOREIGN KEY (engagement_id)
+    REFERENCES engagements(engagement_id),
+
+  -- exactly one experience per review
+  CONSTRAINT one_experience_only
+    CHECK (
+      (serviceprovider_engagement_id IS NOT NULL AND engagement_id IS NULL)
+      OR
+      (serviceprovider_engagement_id IS NULL AND engagement_id IS NOT NULL)
+    )
+);
+
 CREATE TABLE IF NOT EXISTS public.wallet_transaction
 (
     transaction_id bigint NOT NULL DEFAULT nextval('wallet_transactions_transaction_id_seq'::regclass),
@@ -634,6 +680,8 @@ CREATE TABLE IF NOT EXISTS public.wallet_transaction
     reason text COLLATE pg_catalog."default",
     CONSTRAINT wallet_transactions_pkey PRIMARY KEY (transaction_id)
 );
+
+
 
 CREATE TABLE IF NOT EXISTS public.wallet_transactions
 (
