@@ -79,6 +79,10 @@ function computeDailyRate(baseAmount, startDate, endDate) {
   return Number(baseAmount) / totalDays;
 }
 
+
+
+
+
 // ----------------- CREATE Engagement -----------------
 
 router.post("/", async (req, res) => {

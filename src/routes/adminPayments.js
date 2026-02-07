@@ -273,6 +273,158 @@ router.get("/ledger", async (req, res) => {
 });
 
 
+router.get("/engagements", async (req, res) => {
+  try {
+    const {
+      booking_type,
+      service_type,
+      assignment_status,
+      active,
+      from,
+      to,
+      limit = 20,
+      offset = 0,
+    } = req.query;
+
+    const params = [];
+    let where = "WHERE 1=1";
+
+    // Filters
+    if (booking_type) {
+      params.push(booking_type);
+      where += ` AND e.booking_type = $${params.length}`;
+    }
+
+    if (service_type) {
+      params.push(service_type);
+      where += ` AND e.service_type = $${params.length}`;
+    }
+
+    if (assignment_status) {
+      params.push(assignment_status);
+      where += ` AND e.assignment_status = $${params.length}`;
+    }
+
+    if (active !== undefined) {
+      params.push(active === "true");
+      where += ` AND e.active = $${params.length}`;
+    }
+
+    if (from) {
+      params.push(from);
+      where += ` AND e.start_date >= $${params.length}`;
+    }
+
+    if (to) {
+      params.push(to);
+      where += ` AND e.end_date <= $${params.length}`;
+    }
+
+    // Main query
+    const query = `
+      SELECT
+        e.engagement_id,
+        e.booking_type,
+        e.service_type,
+        e.assignment_status,
+        e.task_status,
+        e.start_date,
+        e.end_date,
+        e.start_epoch,
+        e.end_epoch,
+        e.base_amount,
+        e.active,
+        e.created_at,
+
+        -- Customer
+        c.customerid,
+        c.firstname AS customer_firstname,
+        c.lastname AS customer_lastname,
+        c.mobileno AS customer_mobile,
+
+        -- Provider
+        sp.serviceproviderid,
+        sp.firstname AS provider_firstname,
+        sp.lastname AS provider_lastname,
+
+        -- Payment
+        p.status AS payment_status,
+        p.total_amount,
+        p.payment_mode
+
+      FROM engagements e
+      JOIN customer c ON c.customerid = e.customerid
+      LEFT JOIN serviceprovider sp ON sp.serviceproviderid = e.serviceproviderid
+      LEFT JOIN payments p ON p.engagement_id = e.engagement_id
+
+      ${where}
+      ORDER BY e.created_at DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `;
+
+    const { rows } = await pool.query(query, params);
+
+    // Count (for pagination)
+    const countRes = await pool.query(
+      `SELECT COUNT(*) FROM engagements e ${where}`,
+      params
+    );
+
+    return res.json({
+      success: true,
+      count: Number(countRes.rows[0].count),
+      engagements: rows.map((r) => ({
+        engagement_id: r.engagement_id,
+        booking_type: r.booking_type,
+        service_type: r.service_type,
+        assignment_status: r.assignment_status,
+        task_status: r.task_status,
+        active: r.active,
+        start_date: r.start_date,
+        end_date: r.end_date,
+        start_time: r.start_epoch
+          ? new Date(r.start_epoch * 1000).toISOString().slice(11, 16)
+          : null,
+        end_time: r.end_epoch
+          ? new Date(r.end_epoch * 1000).toISOString().slice(11, 16)
+          : null,
+        base_amount: Number(r.base_amount),
+
+        customer: {
+          customerid: r.customerid,
+          firstname: r.customer_firstname,
+          lastname: r.customer_lastname,
+          mobile: r.customer_mobile,
+        },
+
+        provider: r.serviceproviderid
+          ? {
+              serviceproviderid: r.serviceproviderid,
+              firstname: r.provider_firstname,
+              lastname: r.provider_lastname,
+            }
+          : null,
+
+        payment: r.payment_status
+          ? {
+              status: r.payment_status,
+              total_amount: Number(r.total_amount),
+              payment_mode: r.payment_mode,
+            }
+          : null,
+
+        created_at: r.created_at,
+      })),
+    });
+  } catch (err) {
+    console.error("Admin engagements error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
 
 
 

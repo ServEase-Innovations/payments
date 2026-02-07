@@ -96,6 +96,87 @@ router.get("/:providerId/payment-history", async (req, res) => {
   }
 });
 
+router.get("/:engagementId/resume", async (req, res) => {
+  try {
+    const { engagementId } = req.params;
+
+    const result = await pool.query(
+      `
+      SELECT
+        p.payment_id,
+        p.razorpay_order_id,
+        p.total_amount,
+        p.status,
+        p.created_at,
+
+        e.engagement_id,
+        e.booking_type,
+        e.service_type,
+
+        c.customerid,
+        c.firstname AS customer_firstname,
+        c.lastname AS customer_lastname,
+        c.mobileno AS customer_mobile,
+        c.emailid AS customer_emailid
+
+      FROM payments p
+      JOIN engagements e ON e.engagement_id = p.engagement_id
+      JOIN customer c ON c.customerid = e.customerid
+      WHERE p.engagement_id = $1
+      `,
+      [engagementId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Payment not found",
+      });
+    }
+
+    const payment = result.rows[0];
+
+    if (payment.status !== "PENDING") {
+      return res.status(400).json({
+        success: false,
+        error: "Payment already completed",
+      });
+    }
+
+    return res.json({
+      success: true,
+
+      // Razorpay essentials
+      razorpay_order_id: payment.razorpay_order_id,
+      amount: Number(payment.total_amount),
+      currency: "INR", // ✅ fixed
+
+      // Context
+      payment_id: payment.payment_id,
+      engagement_id: payment.engagement_id,
+      booking_type: payment.booking_type,
+      service_type: payment.service_type,
+      status: payment.status,
+      created_at: payment.created_at,
+
+      customer: {
+        customerid: payment.customerid,
+        firstname: payment.customer_firstname,
+        lastname: payment.customer_lastname,
+        mobile: payment.customer_mobile,
+        email: payment.customer_email,
+      },
+    });
+  } catch (err) {
+    console.error("Resume payment error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
+
+
 
 
 
