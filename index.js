@@ -1,5 +1,4 @@
 import express from "express";
-import swaggerUi from "swagger-ui-express";
 import YAML from "yamljs";
 import dotenv from "dotenv";
 import initDB from "./src/config/initDB.js";
@@ -14,9 +13,15 @@ import cors from "cors";
 import config from "./src/config/config.js";
 import engagementsServiceRouter from "./src/routes/engagementService.js";
 import adminPaymentsRouter from "./src/routes/adminPayments.js";
+import engagementsV2Router from "./src/routes/v2/engagementsV2.js";
+import createEngagementsRouter from "./src/routes/v2/createEngagements.js";
+import swaggerUi from "swagger-ui-express";
+import swaggerJsdoc from "swagger-jsdoc";
+import { create } from "domain";
 
 
 const app = express();
+
 
 app.use(cors());
 
@@ -50,9 +55,41 @@ app.use(express.urlencoded({ extended: true }));
 // ✅ Initialize DB
 initDB();
 
-// ✅ Load Swagger
+
+// ---------- V2 Swagger ----------
+const swaggerOptionsV2 = {
+  definition: {
+    openapi: "3.0.0",
+    info: {
+      title: "Serveaso Engagement V2 API",
+      version: "2.0.0",
+      description: "Production-grade engagement lifecycle APIs",
+    },
+    servers: [
+      { url: "http://localhost:5000/api" }
+    ]
+  },
+  apis: ["./src/routes/v2/**/*.js"],
+};
+
+const swaggerSpecV2 = swaggerJsdoc(swaggerOptionsV2);
+
+app.use(
+  "/v2/api-docs",
+  swaggerUi.serveFiles(swaggerSpecV2),
+  swaggerUi.setup(swaggerSpecV2)
+);
+
+
+// ---------- V1 Swagger ----------
 const swaggerDocument = YAML.load("./swagger/servease-api.yaml");
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+app.use(
+  "/v1/api-docs",
+  swaggerUi.serveFiles(swaggerDocument),
+  swaggerUi.setup(swaggerDocument)
+);
+
 app.use("/api/payments", paymentRoutes);
 
 // ✅ Engagement routes
@@ -63,6 +100,8 @@ app.use("/api/service-providers", serviceProviderRoutes);
 app.use("/api/customers", engagementsRouter);
 app.use("/api/engagement-service", engagementsServiceRouter);
 app.use("/api/admin", adminPaymentsRouter);
+app.use("/api/v2/engagements", engagementsV2Router);
+app.use("/api/v2/createEngagements", createEngagementsRouter);
 
 
 
