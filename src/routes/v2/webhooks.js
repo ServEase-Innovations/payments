@@ -1,7 +1,7 @@
 import express from "express";
 import { createHmac } from "crypto";
 import pool from "../../config/db.js";
-import { transitionEngagement } from "../engagementLifecycle.service.js";
+import { transitionEngagement } from "../../services/engagementLifecycle.js";
 
 const router = express.Router();
 
@@ -12,8 +12,7 @@ router.post("/webhook", async (req, res) => {
 
   try {
     // 🔐 1️⃣ Verify signature
-    const expectedSignature = crypto
-      .createHmac("sha256", webhookSecret)
+    const expectedSignature = createHmac("sha256", webhookSecret)
       .update(req.body)
       .digest("hex");
 
@@ -115,7 +114,7 @@ export default router;
 
 /**
  * @swagger
- * /api/v2/payments/webhook:
+ * /v2/payments/webhook:
  *   post:
  *     summary: Razorpay payment webhook
  *     description: >

@@ -418,7 +418,7 @@ export default router;
 
 /**
  * @swagger
- * /api/v2/createEngagements/verify:
+ * /v2/createEngagements/verify:
  *   post:
  *     summary: Verify Razorpay payment (Frontend callback)
  *     description: |
@@ -471,7 +471,7 @@ export default router;
 
 /**
  * @swagger
- * /api/v2/createEngagements/webhook:
+ * /v2/createEngagements/webhook:
  *   post:
  *     summary: Razorpay payment webhook
  *     description: |

@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../../config/db.js";
+import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import Razorpay from "razorpay";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
@@ -8,6 +9,15 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
 import { io } from "../../../index.js";
 import { createServiceDays } from "../serviceDays.service.js";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault("Asia/Kolkata");
+
+function epochToTimeHM(epochSeconds) {
+  if (!epochSeconds) return null;
+  return dayjs.unix(Number(epochSeconds)).tz("Asia/Kolkata").format("HH:mm");
+}
 
 const router = express.Router();
 
@@ -168,28 +178,70 @@ router.post("/:id/accept", async (req, res) => {
 
   try {
     const { id } = req.params;
-    const providerId = req.user.id;
+    const providerId =
+      req.body.providerId ??
+      req.body.serviceproviderid ??
+      req.user?.id;
+
+    if (!providerId) {
+      return res.status(400).json({ error: "Provider ID required" });
+    }
 
     await client.query("BEGIN");
 
-    // Lock row
     const engRes = await client.query(
-      `SELECT engagement_status
-       FROM engagements
-       WHERE engagement_id=$1
-       FOR UPDATE`,
+      `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
       [id]
     );
 
-    if (engRes.rows.length === 0)
-      throw new Error("Engagement not found");
-
-    const status = engRes.rows[0].engagement_status;
-
-    if (status !== "OPEN_FOR_ACCEPTANCE") {
-      throw new Error("Engagement no longer available");
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
     }
 
+    const e = engRes.rows[0];
+
+    // 🔥 Correct status check
+    if (e.engagement_status !== "UNASSIGNED") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Engagement no longer available",
+      });
+    }
+
+    if (e.serviceproviderid) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Already accepted",
+      });
+    }
+
+    if (!e.start_epoch || !e.end_epoch) {
+      await client.query("ROLLBACK");
+      throw new Error("Engagement timing missing");
+    }
+
+    // 🔎 Overlap check
+    const conflict = await client.query(
+      `
+      SELECT 1
+      FROM provider_availability
+      WHERE serviceproviderid=$1
+        AND $2 < slot_end_epoch
+        AND $3 > slot_start_epoch
+      LIMIT 1
+      `,
+      [providerId, e.start_epoch, e.end_epoch]
+    );
+
+    if (conflict.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        error: "Provider has time conflict",
+      });
+    }
+
+    // ✅ Assign provider
     await client.query(
       `UPDATE engagements
        SET serviceproviderid=$1,
@@ -198,26 +250,149 @@ router.post("/:id/accept", async (req, res) => {
       [providerId, id]
     );
 
+    // 🔁 Lifecycle transition
     await transitionEngagement(client, {
       engagementId: id,
       newStatus: "ASSIGNED",
       eventType: "PROVIDER_ACCEPTED",
       actorType: "PROVIDER",
-      actorId: providerId
+      actorId: providerId,
     });
 
     await client.query("COMMIT");
 
-    res.json({ success: true });
+    const updated = (
+      await pool.query(
+        `SELECT * FROM engagements WHERE engagement_id=$1`,
+        [id]
+      )
+    ).rows[0];
+
+    return res.json({
+      message: "Engagement accepted successfully",
+      engagement: updated,
+    });
 
   } catch (err) {
     await client.query("ROLLBACK");
-    res.status(400).json({ error: err.message });
+    console.error("Accept engagement error:", err);
+    return res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
 });
 
+
+router.post("/:id/accept", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const engagementId = req.params.id;
+    const { serviceproviderid } = req.body;
+
+    if (!serviceproviderid) {
+      return res.status(400).json({ error: "Provider ID required" });
+    }
+
+    await client.query("BEGIN");
+
+    // 🔒 Lock engagement row
+    const engagementRes = await client.query(
+      `SELECT * FROM engagements
+       WHERE engagement_id=$1
+       FOR UPDATE`,
+      [engagementId]
+    );
+
+    if (!engagementRes.rows.length) {
+      throw new Error("Engagement not found");
+    }
+
+    const engagement = engagementRes.rows[0];
+
+    // 🛑 Must be ON_DEMAND
+    if (engagement.booking_type !== "ON_DEMAND") {
+      throw new Error("Only ON_DEMAND can be accepted");
+    }
+
+    // 🛑 Already assigned?
+    if (engagement.serviceproviderid) {
+      throw new Error("Engagement already accepted");
+    }
+
+    // 🛑 Payment must be successful
+    if (engagement.engagement_status !== "PAYMENT_SUCCESS") {
+      throw new Error("Payment not completed");
+    }
+
+    // 🛑 Expired?
+    if (engagement.engagement_status === "EXPIRED") {
+      throw new Error("Engagement expired");
+    }
+
+    // 🔍 Overlap check
+    const overlap = await client.query(
+      `
+      SELECT 1
+      FROM provider_availability
+      WHERE serviceproviderid=$1
+        AND $2 < slot_end_epoch
+        AND $3 > slot_start_epoch
+      LIMIT 1
+      `,
+      [
+        serviceproviderid,
+        engagement.start_epoch,
+        engagement.end_epoch
+      ]
+    );
+
+    if (overlap.rows.length) {
+      throw new Error("Provider not available at this time");
+    }
+
+    // ✅ Assign provider
+    await client.query(
+      `
+      UPDATE engagements
+      SET serviceproviderid=$1,
+          assignment_status='ASSIGNED'
+      WHERE engagement_id=$2
+      `,
+      [serviceproviderid, engagementId]
+    );
+
+    // 🔁 Lifecycle → ASSIGNED (will block availability)
+    await transitionEngagement(client, {
+      engagementId,
+      newStatus: "ASSIGNED",
+      eventType: "PROVIDER_ACCEPTED",
+      actorType: "PROVIDER",
+      actorId: serviceproviderid,
+    });
+
+    await client.query("COMMIT");
+
+    // 🔔 Notify customer
+    req.io.to(`customer_${engagement.customerid}`)
+      .emit("engagement-accepted", {
+        engagement_id: engagementId,
+        serviceproviderid
+      });
+
+    return res.json({
+      success: true,
+      message: "Engagement accepted"
+    });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Accept error:", err);
+    return res.status(400).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 
 /**
@@ -364,7 +539,82 @@ router.post("/:id/accept", async (req, res) => {
  *                         format: date-time
  */
 
-
+/**
+ * @swagger
+ * /v2/engagements/{id}/accept:
+ *   post:
+ *     summary: Provider accepts an ON_DEMAND engagement
+ *     tags:
+ *       - Engagements V2
+ *     description: |
+ *       Allows a service provider to accept an ON_DEMAND engagement.
+ *       Only works if:
+ *       - Booking type is ON_DEMAND
+ *       - Engagement is not already assigned
+ *       - Payment is completed
+ *       - Provider has no overlapping bookings
+ *
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: Engagement ID
+ *         schema:
+ *           type: integer
+ *
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - serviceproviderid
+ *             properties:
+ *               serviceproviderid:
+ *                 type: integer
+ *                 example: 3403
+ *
+ *     responses:
+ *       200:
+ *         description: Engagement accepted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Engagement accepted
+ *
+ *       400:
+ *         description: Business validation error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   examples:
+ *                     alreadyAssigned:
+ *                       value: Engagement already accepted
+ *                     paymentIncomplete:
+ *                       value: Payment not completed
+ *                     notOnDemand:
+ *                       value: Only ON_DEMAND can be accepted
+ *                     overlap:
+ *                       value: Provider not available at this time
+ *
+ *       404:
+ *         description: Engagement not found
+ *
+ *       500:
+ *         description: Internal server error
+ */
 
 
 export default router;
