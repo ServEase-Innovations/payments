@@ -127,7 +127,7 @@ const effectiveEndDate =
 
     // 3️⃣ FK validation
     const cust = await client.query(
-      `SELECT customerid, firstname, lastname FROM customer WHERE customerid=$1`,
+      `SELECT customerid, firstName, lastName FROM customer WHERE customerid=$1`,
       [customerid]
     );
     if (cust.rows.length === 0) throw new Error("Customer not found");
@@ -407,9 +407,13 @@ router.get("/:customerId/engagements", async (req, res) => {
     // ---- Fetch provider details ----
     const providerIds = engagements.map(e => e.serviceproviderid).filter(Boolean);
     const providerRes = await pool.query(
-      `SELECT serviceproviderid, firstname, lastname, rating
-       FROM serviceprovider
-       WHERE serviceproviderid = ANY($1)`,
+      `SELECT
+  "serviceproviderid",
+  "firstName",
+  "lastName",
+  "rating"
+FROM "serviceprovider"
+WHERE "serviceproviderid" = ANY($1)`,
       [providerIds]
     );
 
