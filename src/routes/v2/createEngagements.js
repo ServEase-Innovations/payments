@@ -4,12 +4,21 @@ import Razorpay from "razorpay";
 import geolib from "geolib";
 import { createServiceDays } from "../serviceDays.service.js";
 import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
+import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { createHmac } from "crypto";
 
 
 
 const router = express.Router();
+
+// Configure dayjs with timezone support (same as legacy engagements route)
+dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault("Asia/Kolkata");
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY,
@@ -65,6 +74,34 @@ router.post("/", async (req, res) => {
 
     await client.query("BEGIN");
 
+    // Overlap check: ensure provider is not already booked at selected dates/time (MONTHLY/SHORT_TERM only)
+    if (!isOnDemand && serviceproviderid) {
+      const startD = new Date(start_date);
+      const endD = new Date(effectiveEndDate);
+      for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+        const day = d.toISOString().slice(0, 10);
+        const dayStartEpoch = toEpochSeconds(day, start_time);
+        const dayEndEpoch = dayStartEpoch + durationSec;
+        const overlap = await client.query(
+          `SELECT 1 FROM provider_availability
+           WHERE serviceproviderid = $1
+             AND status = 'BOOKED'
+             AND date = $2::date
+             AND $3 < slot_end_epoch
+             AND $4 > slot_start_epoch
+           LIMIT 1`,
+          [serviceproviderid, day, dayStartEpoch, dayEndEpoch]
+        );
+        if (overlap.rows.length) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            error: "Provider already has a booking at this time",
+            detail: `Service provider ${serviceproviderid} is booked on ${day} at the selected time slot (${start_time}).`,
+          });
+        }
+      }
+    }
+
     // Validate customer
     const cust = await client.query(
       `SELECT customerid FROM customer WHERE customerid=$1`,
@@ -94,11 +131,13 @@ router.post("/", async (req, res) => {
         duration_minutes,
         start_epoch,
         end_epoch,
+        latitude,
+        longitude,
         created_at
       )
       VALUES (
         $1,$2,$3::date,$4::date,$5,$6,$7,
-        'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,NOW()
+        'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,$14,$15,NOW()
       )
       RETURNING *
       `,
@@ -115,7 +154,9 @@ router.post("/", async (req, res) => {
         engagement_status,
         durationMinutes,
         startEpoch,
-        endEpoch
+        endEpoch,
+        latitude,
+        longitude
       ]
     );
 
@@ -237,6 +278,7 @@ router.post("/verify", async (req, res) => {
       engagementId,
       razorpay_order_id,
       razorpay_payment_id,
+      io: req.io, // Pass Socket.IO instance for real-time updates
     });
 
     res.json({ success: true });
