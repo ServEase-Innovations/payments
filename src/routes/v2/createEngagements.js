@@ -218,7 +218,7 @@ router.post("/", async (req, res) => {
 
         if (distance <= 5000) {
           req.io.to(`provider_${p.serviceproviderid}`)
-            .emit("new-engagement-request", {
+            .emit("new-engagement", {
               engagement_id: engagement.engagement_id,
               service_type,
               start_date,

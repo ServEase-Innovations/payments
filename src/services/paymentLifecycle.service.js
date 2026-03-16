@@ -128,24 +128,19 @@ console.log("========================");
         { latitude: p.latitude, longitude: p.longitude }
       );
 
-      socket.on("join", ({ providerId }) => {
-  socket.join(`provider_${providerId}`);
-  console.log(`Provider joined: provider_${providerId}`);
-});
-
       if (distance <= 5000) {
-        console.log("Broadcasting ON_DEMAND:", engagement.engagement_id);
-        io.to(room).emit(
-          "new-engagement",
-          {
-            engagement_id: engagement.engagement_id,
-            service_type: engagement.service_type,
-            start_date: engagement.start_date,
-            start_epoch: engagement.start_epoch,
-            duration_minutes: engagement.duration_minutes,
-            base_amount: engagement.base_amount,
-          }
-        );
+        const room = `provider_${p.serviceproviderid}`;
+        console.log(`Broadcasting ON_DEMAND engagement ${engagement.engagement_id} to room ${room}`);
+
+        io.to(room).emit("new-engagement", {
+          engagement_id: engagement.engagement_id,
+          service_type: engagement.service_type,
+          booking_type: engagement.booking_type,
+          start_date: engagement.start_date,
+          start_epoch: engagement.start_epoch,
+          duration_minutes: engagement.duration_minutes,
+          base_amount: engagement.base_amount,
+        });
       }
     }
   }
