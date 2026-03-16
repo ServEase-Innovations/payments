@@ -130,9 +130,16 @@ console.log("========================");
 
       if (distance <= 5000) {
         const room = `provider_${p.serviceproviderid}`;
-        console.log(`Broadcasting ON_DEMAND engagement ${engagement.engagement_id} to room ${room}`);
 
-        io.to(room).emit("new-engagement", {
+const clients = io.sockets.adapter.rooms.get(room);
+
+console.log(
+  `📡 Broadcasting engagement ${engagement.engagement_id} → ${room}`,
+  "| connections:",
+  clients ? clients.size : 0
+);
+
+        io.to(room).emit("new-engagement-request", {
           engagement_id: engagement.engagement_id,
           service_type: engagement.service_type,
           booking_type: engagement.booking_type,

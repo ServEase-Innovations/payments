@@ -281,29 +281,29 @@ const effectiveEndDate =
 
   console.log("Nearby providers found:", nearbyProviders.length);
 
-  for (const p of nearbyProviders) {
-    const room = `provider_${p.serviceproviderid}`;
+  // for (const p of nearbyProviders) {
+  //   const room = `provider_${p.serviceproviderid}`;
 
-    const sockets = await req.io.in(room).fetchSockets();
+  //   const sockets = await req.io.in(room).fetchSockets();
 
-    console.log(`📡 ${room} sockets:`, sockets.length);
+  //   console.log(`📡 ${room} sockets:`, sockets.length);
 
-    if (sockets.length > 0) {
-      req.io.to(room).emit("new-engagement", {
-        engagement: {
-          engagement_id: engagement.engagement_id,
-          service_type,
-          booking_type,
-          start_date,
-          end_date,
-          start_time,
-          base_amount,
-        },
-      });
+  //   if (sockets.length > 0) {
+  //     req.io.to(room).emit("new-engagement", {
+  //       engagement: {
+  //         engagement_id: engagement.engagement_id,
+  //         service_type,
+  //         booking_type,
+  //         start_date,
+  //         end_date,
+  //         start_time,
+  //         base_amount,
+  //       },
+  //     });
 
-      console.log(`🚀 Notification sent to ${room}`);
-    }
-  }
+  //     console.log(`🚀 Notification sent to ${room}`);
+  //   }
+  // }
 }
 
 
