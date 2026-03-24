@@ -1068,4 +1068,13 @@ ALTER TABLE IF EXISTS public.wallets
 CREATE INDEX IF NOT EXISTS wallets_customerid_key1
     ON public.wallets(customerid);
 
+ALTER TABLE IF EXISTS public.engagements
+    ADD COLUMN IF NOT EXISTS address character varying(500) COLLATE pg_catalog."default";
+
+ALTER TABLE IF EXISTS public.engagements
+    ADD COLUMN IF NOT EXISTS latitude double precision;
+
+ALTER TABLE IF EXISTS public.engagements
+    ADD COLUMN IF NOT EXISTS longitude double precision;
+
 END;

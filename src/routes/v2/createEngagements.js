@@ -46,6 +46,7 @@ router.post("/", async (req, res) => {
       booking_type,
       service_type,
       base_amount,
+      address,
       latitude,
       longitude,
       payment_mode = "razorpay",
@@ -131,13 +132,14 @@ router.post("/", async (req, res) => {
         duration_minutes,
         start_epoch,
         end_epoch,
+        address,
         latitude,
         longitude,
         created_at
       )
       VALUES (
         $1,$2,$3::date,$4::date,$5,$6,$7,
-        'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,$14,$15,NOW()
+        'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW()
       )
       RETURNING *
       `,
@@ -155,6 +157,7 @@ router.post("/", async (req, res) => {
         durationMinutes,
         startEpoch,
         endEpoch,
+        address || null,
         latitude,
         longitude
       ]

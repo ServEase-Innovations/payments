@@ -99,6 +99,7 @@ router.post("/", async (req, res) => {
       booking_type, // ON_DEMAND | MONTHLY
       service_type,
       base_amount,
+      address,
       latitude,
       longitude,
       payment_mode = "razorpay",
@@ -172,11 +173,14 @@ const effectiveEndDate =
     assignment_status,
     start_epoch,
     end_epoch,
+    address,
+    latitude,
+    longitude,
     created_at
   )
   VALUES (
     $1,$2,$3::date,$4::date,$5,$6,$7,
-    'NOT_STARTED',true,$8,$9,$10,$11,NOW()
+    'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,$14,NOW()
   )
   RETURNING *
   `,
@@ -192,6 +196,9 @@ const effectiveEndDate =
     assignment_status,
     startEpoch,
     endEpoch,
+    address || null,
+    latitude,
+    longitude,
   ]
 );
 
