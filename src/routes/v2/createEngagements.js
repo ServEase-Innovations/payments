@@ -211,12 +211,16 @@ router.post("/", async (req, res) => {
         SELECT serviceproviderid, latitude, longitude
         FROM serviceprovider
         WHERE isactive = true
+          AND latitude IS NOT NULL
+          AND longitude IS NOT NULL
       `);
 
       providers.rows.forEach((p) => {
+        if (p.latitude == null || p.longitude == null) return;
+
         const distance = geolib.getDistance(
-          { latitude, longitude },
-          { latitude: p.latitude, longitude: p.longitude }
+          { latitude: Number(latitude), longitude: Number(longitude) },
+          { latitude: Number(p.latitude), longitude: Number(p.longitude) }
         );
 
         if (distance <= 5000) {
