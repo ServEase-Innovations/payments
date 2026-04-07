@@ -9,6 +9,7 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
 import { io } from "../../../index.js";
 import { createServiceDays } from "../serviceDays.service.js";
+import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -170,6 +171,74 @@ router.get("/:id/history", async (req, res) => {
     success: true,
     history: events.rows
   });
+});
+
+/**
+ * Apply vacation for a MONTHLY / SHORT_TERM engagement.
+ * Credits the customer wallet with refund = dailyRate × vacation days (same rules as PUT /api/engagements/:id).
+ * Modifying an existing vacation applies a ₹400 penalty (debit) before crediting the new refund.
+ */
+router.post("/:id/vacation", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { id } = req.params;
+    const {
+      customerid,
+      vacation_start_date,
+      vacation_end_date,
+      leave_type,
+      modified_by_id,
+      modified_by_role,
+    } = req.body || {};
+
+    if (!customerid || !vacation_start_date || !vacation_end_date) {
+      return res.status(400).json({
+        success: false,
+        error: "customerid, vacation_start_date, and vacation_end_date are required",
+      });
+    }
+
+    await client.query("BEGIN");
+
+    const result = await applyVacationForEngagement(client, {
+      engagementId: Number(id),
+      customerId: customerid,
+      vacationStartDate: vacation_start_date,
+      vacationEndDate: vacation_end_date,
+      leaveType: leave_type || "VACATION",
+      modifiedById: modified_by_id != null ? modified_by_id : customerid,
+      modifiedByRole: modified_by_role || "CUSTOMER",
+    });
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message: "Vacation applied successfully",
+      engagement: result.engagement,
+      refund_amount: result.refund_amount,
+      penalty: result.penalty,
+      wallet_balance: result.wallet_balance,
+      audit: result.audit,
+    });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (e) {
+      /* ignore */
+    }
+    const code = err.statusCode || 500;
+    console.error("V2 vacation error:", err);
+    return res.status(code).json({
+      success: false,
+      error: err.message,
+      conflicts: err.conflicts,
+      conflict: err.conflict,
+    });
+  } finally {
+    client.release();
+  }
 });
 
 
@@ -404,7 +473,7 @@ router.post("/:id/accept", async (req, res) => {
 
 /**
  * @swagger
- * /api/v2/engagements/{id}/assign:
+ * /v2/engagements/{id}/assign:
  *   post:
  *     summary: Assign provider to engagement
  *     tags: [Engagement V2]
@@ -435,7 +504,7 @@ router.post("/:id/accept", async (req, res) => {
 
 /**
  * @swagger
- * /api/v2/engagements/{id}/start:
+ * /v2/engagements/{id}/start:
  *   post:
  *     summary: Start service
  *     tags: [Engagement V2]
@@ -452,7 +521,7 @@ router.post("/:id/accept", async (req, res) => {
 
 /**
  * @swagger
- * /api/v2/engagements/{id}/complete:
+ * /v2/engagements/{id}/complete:
  *   post:
  *     summary: Complete service
  *     tags: [Engagement V2]
@@ -469,7 +538,7 @@ router.post("/:id/accept", async (req, res) => {
 
 /**
  * @swagger
- * /api/v2/engagements/{id}/cancel:
+ * /v2/engagements/{id}/cancel:
  *   post:
  *     summary: Cancel engagement
  *     tags: [Engagement V2]
@@ -614,6 +683,92 @@ router.post("/:id/accept", async (req, res) => {
  *
  *       500:
  *         description: Internal server error
+ */
+
+/**
+ * @swagger
+ * /v2/engagements/{id}/vacation:
+ *   post:
+ *     summary: Apply vacation on an engagement (customer wallet credit)
+ *     description: |
+ *       For MONTHLY or SHORT_TERM engagements with an assigned provider.
+ *       Refund = daily rate × vacation days; credited to `customer_wallets` via `wallet_transaction`.
+ *       Updates engagement vacation fields, provider availability, provider wallet, and payouts.
+ *       If the engagement already had a vacation window, modifying it applies a ₹400 penalty (debit) before the new refund.
+ *     tags: [Engagement V2]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Engagement ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - customerid
+ *               - vacation_start_date
+ *               - vacation_end_date
+ *             properties:
+ *               customerid:
+ *                 type: integer
+ *                 description: Must match the engagement owner
+ *                 example: 54
+ *               vacation_start_date:
+ *                 type: string
+ *                 format: date
+ *                 example: "2026-04-01"
+ *               vacation_end_date:
+ *                 type: string
+ *                 format: date
+ *                 example: "2026-04-05"
+ *               leave_type:
+ *                 type: string
+ *                 example: VACATION
+ *               modified_by_id:
+ *                 type: integer
+ *                 description: Defaults to customerid
+ *               modified_by_role:
+ *                 type: string
+ *                 example: CUSTOMER
+ *     responses:
+ *       200:
+ *         description: Vacation applied successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                 refund_amount:
+ *                   type: number
+ *                 penalty:
+ *                   type: number
+ *                   description: Modification penalty (0 on first apply)
+ *                 wallet_balance:
+ *                   type: number
+ *                 engagement:
+ *                   type: object
+ *                 audit:
+ *                   type: object
+ *       400:
+ *         description: Validation error (wrong booking type, missing provider, dates outside engagement, etc.)
+ *       403:
+ *         description: customerid does not own this engagement
+ *       404:
+ *         description: Engagement not found
+ *       409:
+ *         description: Provider availability conflict on restored dates
+ *       500:
+ *         description: Server error
  */
 
 

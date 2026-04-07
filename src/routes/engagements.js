@@ -141,18 +141,28 @@ const effectiveEndDate =
       if (prov.rows.length === 0) throw new Error("Provider not found");
     }
 
-    // 4️⃣ Overlap check (ONLY for non-ON_DEMAND)
+    // 4️⃣ Overlap check (ONLY for non-ON_DEMAND) — clip DB slots to start_date’s IST calendar day
     if (providerId && booking_type !== "ON_DEMAND") {
-      const overlap = await client.query(
-        `SELECT 1 FROM provider_availability
-         WHERE serviceproviderid=$1
-           AND $2 < slot_end_epoch
-           AND $3 > slot_start_epoch
-         LIMIT 1`,
-        [providerId, startEpoch, endEpoch]
-      );
-      if (overlap.rows.length) {
-        throw new Error("Provider already has a booking at this time");
+      const day = typeof start_date === "string" ? start_date.slice(0, 10) : start_date;
+      const dayWindowStart = toEpochSeconds(day, "00:00");
+      const dayWindowEnd = dayWindowStart != null ? dayWindowStart + 86400 : null;
+      if (dayWindowStart != null && dayWindowEnd != null) {
+        const overlap = await client.query(
+          `SELECT 1 FROM provider_availability
+           WHERE serviceproviderid=$1
+             AND status = 'BOOKED'
+             AND date = $4::date
+             AND slot_start_epoch IS NOT NULL
+             AND slot_end_epoch IS NOT NULL
+             AND GREATEST(slot_start_epoch, $5::bigint) < LEAST(slot_end_epoch, $6::bigint)
+             AND $2::bigint < LEAST(slot_end_epoch, $6::bigint)
+             AND $3::bigint > GREATEST(slot_start_epoch, $5::bigint)
+           LIMIT 1`,
+          [providerId, startEpoch, endEpoch, day, dayWindowStart, dayWindowEnd]
+        );
+        if (overlap.rows.length) {
+          throw new Error("Provider already has a booking at this time");
+        }
       }
     }
 

@@ -15,6 +15,7 @@ import engagementsServiceRouter from "./src/routes/engagementService.js";
 import adminPaymentsRouter from "./src/routes/adminPayments.js";
 import engagementsV2Router from "./src/routes/v2/engagementsV2.js";
 import createEngagementsRouter from "./src/routes/v2/createEngagements.js";
+import serviceProvidersDiscoveryV2Router from "./src/routes/v2/serviceProvidersDiscoveryV2.js";
 import swaggerUi from "swagger-ui-express";
 import swaggerJsdoc from "swagger-jsdoc";
 import { create } from "domain";
@@ -66,7 +67,7 @@ const swaggerOptionsV2 = {
       description: "Production-grade engagement lifecycle APIs",
     },
     servers: [
-      { url: "http://localhost:5000/api" }
+      { url: "http://localhost:4000/api" }
     ]
   },
   apis: ["./src/routes/v2/**/*.js"],
@@ -102,6 +103,7 @@ app.use("/api/engagement-service", engagementsServiceRouter);
 app.use("/api/admin", adminPaymentsRouter);
 app.use("/api/v2/engagements", engagementsV2Router);
 app.use("/api/v2/createEngagements", createEngagementsRouter);
+app.use("/api/v2/service-providers", serviceProvidersDiscoveryV2Router);
 
 
 
@@ -124,8 +126,8 @@ io.on("connection", (socket) => {
 
 
 
-server.listen(5000, () =>
-  console.log("Server running on http://localhost:5000/api-docs")
+server.listen(4000, () =>
+  console.log("Server running on http://localhost:4000/api-docs")
 );
 
 export { io };

@@ -25,12 +25,163 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_SECRET,
 });
 
+/** One visit cannot exceed 24h; prevents bad payloads (e.g. minutes ≈ contract length) from breaking overlap logic. */
+const MAX_SERVICE_DURATION_MINUTES = 24 * 60;
+
 function toEpochSeconds(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
   const dt = dayjs.tz(`${dateStr} ${timeStr}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata");
   if (!dt.isValid()) return null;
   return dt.unix();
 }
+
+/**
+ * Same-calendar-day visit length from wall-clock times (IST). Used when `duration_minutes`
+ * looks like a contract length (e.g. 43260) so overlap checks use the real daily window.
+ */
+function visitDurationMinutesFromClock(dateStr, startTime, endTime) {
+  if (!dateStr || !startTime || !endTime) return null;
+  const a = toEpochSeconds(dateStr, startTime);
+  const b = toEpochSeconds(dateStr, endTime);
+  if (a == null || b == null || b <= a) return null;
+  const mins = (b - a) / 60;
+  if (!Number.isFinite(mins) || mins < 15) return null;
+  if (mins > MAX_SERVICE_DURATION_MINUTES) return null;
+  return Math.round(mins);
+}
+
+/**
+ * Read-only: inspect why create might block — lists provider_availability + engagements for a date.
+ * GET /api/v2/createEngagements/providers/:providerId/booking-debug?date=2026-04-09&start_time=07:00&duration_minutes=60
+ */
+router.get("/providers/:providerId/booking-debug", async (req, res) => {
+  try {
+    const providerId = parseInt(req.params.providerId, 10);
+    const { date, start_time = "07:00", duration_minutes } = req.query;
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+      return res.status(400).json({ error: "Query param `date` (YYYY-MM-DD) is required" });
+    }
+    if (!Number.isFinite(providerId)) {
+      return res.status(400).json({ error: "Invalid providerId" });
+    }
+
+    const rawDur =
+      duration_minutes != null && Number.isFinite(Number(duration_minutes))
+        ? Number(duration_minutes)
+        : 60;
+    const durationMinutes = Math.min(
+      Math.max(rawDur, 15),
+      MAX_SERVICE_DURATION_MINUTES
+    );
+    const durationSec = durationMinutes * 60;
+
+    const dayWindowStart = toEpochSeconds(String(date), "00:00");
+    const dayWindowEnd = dayWindowStart != null ? dayWindowStart + 86400 : null;
+    const reqStart = toEpochSeconds(String(date), String(start_time));
+    const reqEnd = reqStart != null ? reqStart + durationSec : null;
+
+    const paAll = await pool.query(
+      `
+      SELECT id, engagement_id, date, status,
+             slot_start_epoch, slot_end_epoch,
+             (slot_end_epoch - slot_start_epoch) / 60.0 AS span_minutes_raw
+      FROM provider_availability
+      WHERE serviceproviderid = $1 AND date = $2::date
+      ORDER BY id
+      `,
+      [providerId, date]
+    );
+
+    let conflictingRows = [];
+    if (
+      dayWindowStart != null &&
+      dayWindowEnd != null &&
+      reqStart != null &&
+      reqEnd != null
+    ) {
+      const clash = await pool.query(
+        `
+        SELECT id, engagement_id, date, status, slot_start_epoch, slot_end_epoch
+        FROM provider_availability
+        WHERE serviceproviderid = $1
+          AND status = 'BOOKED'
+          AND date = $2::date
+          AND slot_start_epoch IS NOT NULL
+          AND slot_end_epoch IS NOT NULL
+          AND GREATEST(slot_start_epoch, $5::bigint) < LEAST(slot_end_epoch, $6::bigint)
+          AND $3::bigint < LEAST(slot_end_epoch, $6::bigint)
+          AND $4::bigint > GREATEST(slot_start_epoch, $5::bigint)
+        `,
+        [providerId, date, reqStart, reqEnd, dayWindowStart, dayWindowEnd]
+      );
+      conflictingRows = clash.rows;
+    }
+
+    const engagements = await pool.query(
+      `
+      SELECT engagement_id, customerid, start_date, end_date, booking_type,
+             engagement_status, assignment_status, active, duration_minutes,
+             start_epoch, end_epoch
+      FROM engagements
+      WHERE serviceproviderid = $1
+        AND active = true
+        AND start_date <= $2::date
+        AND end_date >= $2::date
+      ORDER BY engagement_id
+      `,
+      [providerId, date]
+    );
+
+    const clipped = paAll.rows.map((r) => {
+      if (
+        r.slot_start_epoch == null ||
+        r.slot_end_epoch == null ||
+        dayWindowStart == null ||
+        dayWindowEnd == null
+      ) {
+        return { ...r, clipped_start_epoch: null, clipped_end_epoch: null };
+      }
+      const cs = Math.max(Number(r.slot_start_epoch), dayWindowStart);
+      const ce = Math.min(Number(r.slot_end_epoch), dayWindowEnd);
+      const overlapsRequest =
+        reqStart != null &&
+        reqEnd != null &&
+        cs < ce &&
+        reqStart < ce &&
+        reqEnd > cs;
+      return {
+        ...r,
+        clipped_start_epoch: cs < ce ? cs : null,
+        clipped_end_epoch: cs < ce ? ce : null,
+        overlaps_request_slot: overlapsRequest && r.status === "BOOKED",
+      };
+    });
+
+    return res.json({
+      provider_id: providerId,
+      date: String(date),
+      query: {
+        start_time: String(start_time),
+        duration_minutes_requested: rawDur,
+        duration_minutes_effective: durationMinutes,
+        note:
+          rawDur > MAX_SERVICE_DURATION_MINUTES
+            ? `duration_minutes was clamped to ${MAX_SERVICE_DURATION_MINUTES} (same as create)`
+            : null,
+      },
+      ist_day_window_epoch: { start: dayWindowStart, end: dayWindowEnd },
+      request_slot_epoch: { start: reqStart, end: reqEnd },
+      would_block_create: conflictingRows.length > 0,
+      conflicting_booked_rows: conflictingRows,
+      provider_availability_all_statuses: clipped,
+      engagements_covering_date: engagements.rows,
+    });
+  } catch (err) {
+    console.error("booking-debug error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 router.post("/", async (req, res) => {
   const client = await pool.connect();
@@ -42,6 +193,7 @@ router.post("/", async (req, res) => {
       start_date,
       end_date,
       start_time,
+      end_time,
       responsibilities,
       booking_type,
       service_type,
@@ -63,7 +215,24 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Service Provider required" });
     }
 
-    const durationMinutes = duration_minutes || 60;
+    const rawDur =
+      duration_minutes != null && Number.isFinite(Number(duration_minutes))
+        ? Number(duration_minutes)
+        : 60;
+    let durationMinutes = Math.min(
+      Math.max(rawDur, 15),
+      MAX_SERVICE_DURATION_MINUTES
+    );
+    if (rawDur > MAX_SERVICE_DURATION_MINUTES) {
+      const fromClock = visitDurationMinutesFromClock(
+        start_date,
+        start_time,
+        end_time
+      );
+      if (fromClock != null) {
+        durationMinutes = fromClock;
+      }
+    }
     const durationSec = durationMinutes * 60;
 
     const startEpoch = toEpochSeconds(start_date, start_time);
@@ -75,23 +244,38 @@ router.post("/", async (req, res) => {
 
     await client.query("BEGIN");
 
-    // Overlap check: ensure provider is not already booked at selected dates/time (MONTHLY/SHORT_TERM only)
+    // Overlap check: clip existing slots to this calendar day (IST). Rows sometimes store
+    // multi-day spans from bad duration_minutes; raw epoch overlap then falsely blocks bookings.
     if (!isOnDemand && serviceproviderid) {
       const startD = new Date(start_date);
       const endD = new Date(effectiveEndDate);
       for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
         const day = d.toISOString().slice(0, 10);
+        const dayWindowStart = toEpochSeconds(day, "00:00");
+        if (dayWindowStart == null) continue;
+        const dayWindowEnd = dayWindowStart + 86400;
         const dayStartEpoch = toEpochSeconds(day, start_time);
+        if (dayStartEpoch == null) continue;
         const dayEndEpoch = dayStartEpoch + durationSec;
         const overlap = await client.query(
           `SELECT 1 FROM provider_availability
            WHERE serviceproviderid = $1
              AND status = 'BOOKED'
              AND date = $2::date
-             AND $3 < slot_end_epoch
-             AND $4 > slot_start_epoch
+             AND slot_start_epoch IS NOT NULL
+             AND slot_end_epoch IS NOT NULL
+             AND GREATEST(slot_start_epoch, $5::bigint) < LEAST(slot_end_epoch, $6::bigint)
+             AND $3::bigint < LEAST(slot_end_epoch, $6::bigint)
+             AND $4::bigint > GREATEST(slot_start_epoch, $5::bigint)
            LIMIT 1`,
-          [serviceproviderid, day, dayStartEpoch, dayEndEpoch]
+          [
+            serviceproviderid,
+            day,
+            dayStartEpoch,
+            dayEndEpoch,
+            dayWindowStart,
+            dayWindowEnd,
+          ]
         );
         if (overlap.rows.length) {
           await client.query("ROLLBACK");

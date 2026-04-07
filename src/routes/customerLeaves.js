@@ -9,15 +9,34 @@ dayjs.extend(timezone);
 
 const router = express.Router();
 
+function computeDailyRate(baseAmount, startDate, endDate) {
+  const totalDays = (new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24) + 1;
+  return Number(baseAmount) / totalDays;
+}
+
+async function getCustomerWalletId(client, customerId) {
+  const walletRes = await client.query(`SELECT wallet_id, balance FROM customer_wallets WHERE customerid=$1`, [customerId]);
+  if (walletRes.rows.length === 0) {
+    const insertRes = await client.query(
+      `INSERT INTO customer_wallets (customerid, balance) VALUES ($1,0) RETURNING wallet_id, balance`,
+      [customerId]
+    );
+    return insertRes.rows[0];
+  }
+  return walletRes.rows[0];
+}
+
 /**
- * Apply vacation / leave for customer
+ * Apply vacation / leave for customer (V1).
+ * Prefer POST /api/v2/engagements/:id/vacation for full flow (provider availability + payouts).
  */
 router.post("/:customerId/leaves", async (req, res) => {
   const { customerId } = req.params;
   const { engagement_id, leave_start_date, leave_end_date, leave_type } = req.body;
 
+  const client = await pool.connect();
+
   try {
-    // 1️⃣ Validate dates
     if (!leave_start_date || !leave_end_date) {
       return res.status(400).json({ error: "leave_start_date and leave_end_date are required" });
     }
@@ -31,8 +50,7 @@ router.post("/:customerId/leaves", async (req, res) => {
 
     const totalDays = end.diff(start, "day") + 1;
 
-    // 2️⃣ Fetch engagement
-    const engagementRes = await pool.query(
+    const engagementRes = await client.query(
       `SELECT * FROM engagements WHERE engagement_id = $1 AND customerid = $2`,
       [engagement_id, customerId]
     );
@@ -41,87 +59,88 @@ router.post("/:customerId/leaves", async (req, res) => {
     }
     const engagement = engagementRes.rows[0];
 
-    // Vacation only allowed for SHORT_TERM or MONTHLY
     if (!["SHORT_TERM", "MONTHLY"].includes(engagement.booking_type)) {
       return res.status(400).json({
         error: "Vacation only applies to SHORT_TERM or MONTHLY bookings",
       });
     }
 
-    // 3️⃣ Calculate refund
-    const serviceDays = 30;
-    const perDayCost = engagement.base_amount / serviceDays;
-    const vacationAmount = perDayCost * totalDays;
-    const walletCredit = Math.round(vacationAmount * 0.75);
-    const serveaseCut = vacationAmount - walletCredit;
+    const dailyRate = computeDailyRate(engagement.base_amount, engagement.start_date, engagement.end_date);
+    const refundAmount = Number((dailyRate * totalDays).toFixed(2));
 
-    // 4️⃣ Insert into customer_leaves
-    const leaveRes = await pool.query(
+    await client.query("BEGIN");
+
+    const leaveRes = await client.query(
       `INSERT INTO customer_leaves
         (customerid, engagement_id, leave_start_date, leave_end_date, leave_type, total_days, refund_amount, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'APPROVED')
+       VALUES ($1,$2,$3::date,$4::date,$5,$6,$7,'APPROVED')
        RETURNING *`,
-      [customerId, engagement_id, start.toDate(), end.toDate(), leave_type, totalDays, vacationAmount]
+      [customerId, engagement_id, start.format("YYYY-MM-DD"), end.format("YYYY-MM-DD"), leave_type || "VACATION", totalDays, refundAmount]
     );
 
-    // 5️⃣ Ensure wallet exists
-    let walletRes = await pool.query(`SELECT * FROM wallets WHERE customerid = $1`, [customerId]);
-    let wallet;
-    if (walletRes.rows.length === 0) {
-      const newWallet = await pool.query(
-        `INSERT INTO wallets (customerid, balance) VALUES ($1,0) RETURNING *`,
-        [customerId]
-      );
-      wallet = newWallet.rows[0];
-    } else {
-      wallet = walletRes.rows[0];
-    }
+    const walletRow = await getCustomerWalletId(client, customerId);
+    const walletId = walletRow.wallet_id;
 
-    // 6️⃣ Update wallet balance
-    const newBalance = parseFloat(wallet.balance) + walletCredit;
-    await pool.query(`UPDATE wallets SET balance = $1, updated_at = NOW() WHERE wallet_id = $2`, [
-      newBalance,
-      wallet.wallet_id,
+    await client.query(`UPDATE customer_wallets SET balance = balance + $1, updated_at = NOW() WHERE wallet_id = $2`, [
+      refundAmount,
+      walletId,
     ]);
 
-    // 7️⃣ Insert wallet transaction
-    const txnRes = await pool.query(
-      `INSERT INTO wallet_transactions
-        (wallet_id, engagement_id, amount, transaction_type, description, balance_after)
-       VALUES ($1,$2,$3,'CREDIT',$4,$5)
-       RETURNING *`,
-      [wallet.wallet_id, engagement_id, walletCredit, `Vacation refund for ${totalDays} days`, newBalance]
-    );
+    const balRes = await client.query(`SELECT balance FROM customer_wallets WHERE wallet_id = $1`, [walletId]);
+    const newBalance = balRes.rows[0].balance;
 
-    // 8️⃣ Insert into engagement_modifications
-    await pool.query(
-      `INSERT INTO engagement_modifications
-         (engagement_id, modified_at, modified_by, modified_by_role, modified_type, modified_data)
-       VALUES ($1, NOW(), $2, $3, 'VACATION', $4)`,
+    const txnRes = await client.query(
+      `INSERT INTO wallet_transaction
+        (wallet_id, customerid, engagement_id, amount, transaction_type, description, balance_after)
+       VALUES ($1,$2,$3,$4,'CREDIT',$5,$6)
+       RETURNING *`,
       [
-        engagement_id,
+        walletId,
         customerId,
-        "CUSTOMER",
-        JSON.stringify({
-          leave_start_date: start.toISOString(),
-          leave_end_date: end.toISOString(),
-          leave_type,
-          total_days: totalDays,
-          refund_amount: vacationAmount,
-        }),
+        engagement_id,
+        refundAmount,
+        `Vacation refund for ${totalDays} day(s)`,
+        newBalance,
       ]
     );
 
-    res.status(200).json({
+    await client.query(
+      `INSERT INTO engagement_modifications (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at)
+       VALUES ($1,$2::jsonb,$3,$4,NOW())`,
+      [
+        engagement_id,
+        JSON.stringify({
+          modification_type: "VACATION_ADDED",
+          source: "customer_leaves_v1",
+          leave_start_date: start.format("YYYY-MM-DD"),
+          leave_end_date: end.format("YYYY-MM-DD"),
+          total_days: totalDays,
+          refund_amount: refundAmount,
+        }),
+        customerId,
+        "CUSTOMER",
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
       message: "Vacation applied successfully",
       leave: leaveRes.rows[0],
-      refund: { wallet_credit: walletCredit, servease_cut: serveaseCut, vacation_amount: vacationAmount },
-      wallet: { wallet_id: wallet.wallet_id, balance: newBalance },
+      refund: { wallet_credit: refundAmount, daily_rate: dailyRate, vacation_amount: refundAmount },
+      wallet: { wallet_id: walletId, balance: newBalance },
       transaction: txnRes.rows[0],
     });
   } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (e) {
+      /* ignore */
+    }
     console.error("Error applying vacation:", err);
-    res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  } finally {
+    client.release();
   }
 });
 
