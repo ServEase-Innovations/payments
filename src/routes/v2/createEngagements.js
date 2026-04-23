@@ -8,9 +8,24 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
+import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
 
-
+/**
+ * V2 SP-backed engagement → calendar booking
+ *
+ * 1. **POST** `/api/v2/createEngagements` creates an `engagements` row (MONTHLY/SHORT_TERM with `serviceproviderid`) in **PAYMENT_PENDING**
+ *    plus a PENDING payment and Razorpay order.
+ * 2. **Payment success** (`POST /verify` or `/webhook` → `handlePaymentSuccess`) marks payment SUCCESS and calls
+ *    **`transitionEngagement`** to **ASSIGNED** (non–ON_DEMAND).
+ * 3. **`transitionEngagement`** (`engagementLifecycle.js`): when new status is **ASSIGNED** and a SP is set,
+ *    inserts **`provider_availability`** rows — one per calendar day from `start_date` … `end_date`, each
+ *    **BOOKED** with `slot_start_epoch` / `slot_end_epoch` derived from `start_epoch` wall time + `duration_minutes`.
+ *
+ * **Vacation** (`POST /:engagementId/vacation` → `applyVacationForEngagement`): frees PA rows for the vacation
+ * date range (**FREE**, null epochs), updates `engagements` vacation fields, and credits the customer wallet
+ * (daily rate × leave days; modification penalty may apply).
+ */
 
 const router = express.Router();
 
@@ -437,7 +452,77 @@ router.post("/", async (req, res) => {
   }
 });
 
+/**
+ * Apply vacation for a MONTHLY / SHORT_TERM engagement (same rules as PUT `/api/engagements/:id` vacation).
+ * Frees SP time in `provider_availability` and credits customer wallet.
+ *
+ * POST /api/v2/createEngagements/:engagementId/vacation
+ */
+router.post("/:engagementId/vacation", async (req, res) => {
+  const client = await pool.connect();
 
+  try {
+    const engagementId = Number(req.params.engagementId);
+    const {
+      customerid,
+      vacation_start_date,
+      vacation_end_date,
+      leave_type,
+      modified_by_id,
+      modified_by_role,
+    } = req.body || {};
+
+    if (!Number.isFinite(engagementId) || engagementId < 1) {
+      return res.status(400).json({ success: false, error: "Invalid engagementId" });
+    }
+    if (!customerid || !vacation_start_date || !vacation_end_date) {
+      return res.status(400).json({
+        success: false,
+        error: "customerid, vacation_start_date, and vacation_end_date are required",
+      });
+    }
+
+    await client.query("BEGIN");
+
+    const result = await applyVacationForEngagement(client, {
+      engagementId,
+      customerId: customerid,
+      vacationStartDate: vacation_start_date,
+      vacationEndDate: vacation_end_date,
+      leaveType: leave_type || "VACATION",
+      modifiedById: modified_by_id != null ? modified_by_id : customerid,
+      modifiedByRole: modified_by_role || "CUSTOMER",
+    });
+
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      message: "Vacation applied successfully",
+      engagement: result.engagement,
+      refund_amount: result.refund_amount,
+      penalty: result.penalty,
+      wallet_balance: result.wallet_balance,
+      audit: result.audit,
+    });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
+    const code = err.statusCode || 500;
+    console.error("V2 createEngagements vacation error:", err);
+    return res.status(code).json({
+      success: false,
+      error: err.message,
+      conflicts: err.conflicts,
+      conflict: err.conflict,
+    });
+  } finally {
+    client.release();
+  }
+});
 
 import { handlePaymentSuccess } from "../../services/paymentLifecycle.service.js";
 
@@ -745,5 +830,51 @@ export default router;
  *       400:
  *         description: Invalid webhook signature
  *       500:
+ *         description: Server error
+ */
+
+/**
+ * @swagger
+ * /v2/createEngagements/{engagementId}/vacation:
+ *   post:
+ *     summary: Apply vacation (V2 under create-engagements path)
+ *     description: |
+ *       MONTHLY or SHORT_TERM with assigned SP only.
+ *       Sets `provider_availability` to FREE for each vacation day, updates engagement vacation columns,
+ *       credits `customer_wallets` (daily rate × days; ₹400 penalty when modifying an existing vacation).
+ *     tags:
+ *       - Engagement V2
+ *     parameters:
+ *       - in: path
+ *         name: engagementId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - customerid
+ *               - vacation_start_date
+ *               - vacation_end_date
+ *             properties:
+ *               customerid: { type: integer }
+ *               vacation_start_date: { type: string, format: date }
+ *               vacation_end_date: { type: string, format: date }
+ *               leave_type: { type: string, example: VACATION }
+ *               modified_by_id: { type: integer }
+ *               modified_by_role: { type: string, example: CUSTOMER }
+ *     responses:
+ *       "200":
+ *         description: Vacation applied; wallet credit in response
+ *       "400":
+ *         description: Validation error
+ *       "403":
+ *         description: Engagement does not belong to customer
+ *       "409":
+ *         description: Restore/conflict with another booking
+ *       "500":
  *         description: Server error
  */

@@ -21,12 +21,20 @@ function epochToTimeHM(epochSeconds) {
 }
 
 function enumerateDates(start, end) {
+  const startStr =
+    typeof start === "string"
+      ? start.slice(0, 10)
+      : dayjs(start).format("YYYY-MM-DD");
+  const endStr =
+    typeof end === "string"
+      ? end.slice(0, 10)
+      : dayjs(end).format("YYYY-MM-DD");
   const res = [];
-  const cur = new Date(start);
-  const endD = new Date(end);
-  while (cur <= endD) {
-    res.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
+  let cur = dayjs.tz(startStr, "YYYY-MM-DD", "Asia/Kolkata").startOf("day");
+  const endD = dayjs.tz(endStr, "YYYY-MM-DD", "Asia/Kolkata").startOf("day");
+  while (!cur.isAfter(endD, "day")) {
+    res.push(cur.format("YYYY-MM-DD"));
+    cur = cur.add(1, "day");
   }
   return res;
 }

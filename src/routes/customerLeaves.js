@@ -28,7 +28,7 @@ async function getCustomerWalletId(client, customerId) {
 
 /**
  * Apply vacation / leave for customer (V1).
- * Prefer POST /api/v2/engagements/:id/vacation for full flow (provider availability + payouts).
+ * Prefer POST /api/v2/createEngagements/:engagementId/vacation for full flow (provider availability + payouts).
  */
 router.post("/:customerId/leaves", async (req, res) => {
   const { customerId } = req.params;
