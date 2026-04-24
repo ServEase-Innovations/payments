@@ -20,15 +20,19 @@ function epochToTimeHM(epochSeconds) {
   return dayjs.unix(Number(epochSeconds)).tz("Asia/Kolkata").format("HH:mm");
 }
 
+/** Calendar YYYY-MM-DD in Asia/Kolkata (matches PA rows and business dates; avoids `new Date('YYYY-MM-DD')` UTC drift). */
+function toIstYmd(value) {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const s = value.trim().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  }
+  return dayjs(value).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
 function enumerateDates(start, end) {
-  const startStr =
-    typeof start === "string"
-      ? start.slice(0, 10)
-      : dayjs(start).format("YYYY-MM-DD");
-  const endStr =
-    typeof end === "string"
-      ? end.slice(0, 10)
-      : dayjs(end).format("YYYY-MM-DD");
+  const startStr = toIstYmd(start);
+  const endStr = toIstYmd(end);
   const res = [];
   let cur = dayjs.tz(startStr, "YYYY-MM-DD", "Asia/Kolkata").startOf("day");
   const endD = dayjs.tz(endStr, "YYYY-MM-DD", "Asia/Kolkata").startOf("day");
@@ -110,27 +114,28 @@ export async function applyVacationForEngagement(client, {
   const customerWalletId = await getCustomerWalletId(client, customerId);
   await ensureProviderWallet(client, providerBefore);
 
-  const prevVacStart = oldEng.vacation_start_date ? new Date(oldEng.vacation_start_date) : null;
-  const prevVacEnd = oldEng.vacation_end_date ? new Date(oldEng.vacation_end_date) : null;
-  const prevDates = prevVacStart && prevVacEnd ? enumerateDates(prevVacStart, prevVacEnd) : [];
+  const prevVacStartYmd = oldEng.vacation_start_date ? toIstYmd(oldEng.vacation_start_date) : null;
+  const prevVacEndYmd = oldEng.vacation_end_date ? toIstYmd(oldEng.vacation_end_date) : null;
+  const prevDates =
+    prevVacStartYmd && prevVacEndYmd ? enumerateDates(prevVacStartYmd, prevVacEndYmd) : [];
 
-  const vacStart = new Date(vacationStartDate);
-  const vacEnd = new Date(vacationEndDate);
-  if (vacStart > vacEnd) {
+  const vacStartYmd = toIstYmd(vacationStartDate);
+  const vacEndYmd = toIstYmd(vacationEndDate);
+  if (vacStartYmd > vacEndYmd) {
     const err = new Error("vacation_start_date must be <= vacation_end_date");
     err.statusCode = 400;
     throw err;
   }
 
-  const engStart = new Date(oldEng.start_date);
-  const engEnd = new Date(oldEng.end_date);
-  if (vacStart < engStart || vacEnd > engEnd) {
+  const engStartYmd = toIstYmd(oldEng.start_date);
+  const engEndYmd = toIstYmd(oldEng.end_date);
+  if (vacStartYmd < engStartYmd || vacEndYmd > engEndYmd) {
     const err = new Error("Vacation dates must fall within engagement start/end dates");
     err.statusCode = 400;
     throw err;
   }
 
-  const newDates = enumerateDates(vacStart, vacEnd);
+  const newDates = enumerateDates(vacStartYmd, vacEndYmd);
   const restoredDates = prevDates.filter((d) => !newDates.includes(d));
   const freedDates = newDates.filter((d) => !prevDates.includes(d));
 
@@ -234,8 +239,9 @@ export async function applyVacationForEngagement(client, {
       );
     }
   }
-  if (freedDates.length > 0) {
-    for (const day of freedDates) {
+  /* Full vacation window: always FREE (not only net-new days). Re-applying the same window must still clear BOOKED rows. */
+  if (newDates.length > 0) {
+    for (const day of newDates) {
       await client.query(
         `UPDATE provider_availability SET status='FREE', slot_start_epoch=NULL, slot_end_epoch=NULL WHERE engagement_id=$1 AND date=$2::date`,
         [engagementId, day]
@@ -253,8 +259,8 @@ export async function applyVacationForEngagement(client, {
     previous:
       prevDates.length > 0
         ? {
-            vacation_start_date: prevVacStart ? prevVacStart.toISOString().slice(0, 10) : null,
-            vacation_end_date: prevVacEnd ? prevVacEnd.toISOString().slice(0, 10) : null,
+            vacation_start_date: prevVacStartYmd,
+            vacation_end_date: prevVacEndYmd,
             leave_days: prevDates.length,
           }
         : null,

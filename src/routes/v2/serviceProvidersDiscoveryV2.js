@@ -30,6 +30,26 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
 
+/** YYYY-MM-DD in Asia/Kolkata for DB dates / API strings (aligns with vacation + PA). */
+function calendarYmdKolkata(value) {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const s = value.trim().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  }
+  return dayjs(value).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
+/** True if `dateYmd` falls in [vacation_start_date, vacation_end_date] inclusive (IST calendar). */
+function isDateInEngagementVacation(dateYmd, vacationStart, vacationEnd) {
+  if (vacationStart == null || vacationEnd == null) return false;
+  const d = calendarYmdKolkata(dateYmd);
+  const a = calendarYmdKolkata(vacationStart);
+  const b = calendarYmdKolkata(vacationEnd);
+  if (!d || !a || !b) return false;
+  return d >= a && d <= b;
+}
+
 /**
  * Daily busy intervals from this customer's existing engagement with this provider,
  * intersected with the search range. Ensures overlap checks match the booked wall-clock
@@ -227,7 +247,9 @@ function getAge(dobString) {
  *     summary: Monthly nearby provider discovery (V2)
  *     description: >
  *       Returns providers within radius ranked by full monthly availability for a date range
- *       and preferred daily start time. Same behavior as the legacy providers service nearby-monthly.
+ *       and preferred daily start time. Bookings use `provider_availability` (BOOKED) plus
+ *       MONTHLY/SHORT_TERM engagements; days inside `engagements.vacation_start_date`…`vacation_end_date`
+ *       are excluded from that engagement-derived busy grid so vacation shows as available.
  *     tags:
  *       - Service providers V2
  *     parameters:
@@ -545,7 +567,9 @@ router.post("/nearby-monthly", async (req, res) => {
         e.end_date,
         e.start_epoch,
         e.end_epoch,
-        e.duration_minutes
+        e.duration_minutes,
+        e.vacation_start_date,
+        e.vacation_end_date
       FROM engagements e
       WHERE
         e.serviceproviderid = ANY($1)
@@ -610,23 +634,42 @@ router.post("/nearby-monthly", async (req, res) => {
           ? e.duration_minutes
           : 60;
       const durationSec = durMin * 60;
-      const engStart = new Date(e.start_date);
-      const engEnd = new Date(e.end_date);
-      const rangeStart = new Date(startDate);
-      const rangeEnd = new Date(endDate);
-      const fromDate = engStart > rangeStart ? engStart : rangeStart;
-      const toDate = engEnd < rangeEnd ? engEnd : rangeEnd;
 
-      for (let d = new Date(fromDate); d <= toDate; d.setDate(d.getDate() + 1)) {
-        const dateStr = d.toISOString().slice(0, 10);
-        const slotStart = epochInIST(dateStr, timeStr);
-        const slotEnd = slotStart + durationSec;
+      const engStartDay = dayjs
+        .tz(calendarYmdKolkata(e.start_date), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+      const engEndDay = dayjs
+        .tz(calendarYmdKolkata(e.end_date), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+      const rangeStartDay = dayjs
+        .tz(calendarYmdKolkata(startDate), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+      const rangeEndDay = dayjs
+        .tz(calendarYmdKolkata(endDate), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
 
-        bookingsByProvider[spid] ??= [];
-        bookingsByProvider[spid].push({
-          slot_start_epoch: slotStart,
-          slot_end_epoch: slotEnd
-        });
+      const fromDay = engStartDay.isAfter(rangeStartDay) ? engStartDay : rangeStartDay;
+      const toDay = engEndDay.isBefore(rangeEndDay) ? engEndDay : rangeEndDay;
+
+      bookingsByProvider[spid] ??= [];
+      let dayCursor = fromDay.clone();
+      while (!dayCursor.isAfter(toDay, "day")) {
+        const dateStr = dayCursor.format("YYYY-MM-DD");
+        if (
+          !isDateInEngagementVacation(
+            dateStr,
+            e.vacation_start_date,
+            e.vacation_end_date
+          )
+        ) {
+          const slotStart = epochInIST(dateStr, timeStr);
+          const slotEnd = slotStart + durationSec;
+          bookingsByProvider[spid].push({
+            slot_start_epoch: slotStart,
+            slot_end_epoch: slotEnd
+          });
+        }
+        dayCursor = dayCursor.add(1, "day");
       }
     }
 

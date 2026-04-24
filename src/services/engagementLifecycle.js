@@ -1,9 +1,21 @@
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
+import customParseFormat from "dayjs/plugin/customParseFormat.js";
 
+dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+/** YYYY-MM-DD calendar day in Asia/Kolkata (same convention as vacationApply / API date strings). */
+function engagementCalendarYmd(value) {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const s = value.trim().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  }
+  return dayjs(value).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
 
 export async function transitionEngagement(client, {
   engagementId,
@@ -68,16 +80,21 @@ export async function transitionEngagement(client, {
 
     const durationSec = (engagement.duration_minutes || 60) * 60;
 
-    let currentDate = dayjs(engagement.start_date);
-    const endDate = dayjs(engagement.end_date);
+    let currentDate = dayjs
+      .tz(engagementCalendarYmd(engagement.start_date), "YYYY-MM-DD", "Asia/Kolkata")
+      .startOf("day");
+    const endDate = dayjs
+      .tz(engagementCalendarYmd(engagement.end_date), "YYYY-MM-DD", "Asia/Kolkata")
+      .startOf("day");
 
-    while (currentDate.isBefore(endDate) || currentDate.isSame(endDate)) {
+    while (!currentDate.isAfter(endDate, "day")) {
+      const dayStr = currentDate.format("YYYY-MM-DD");
 
-      const dayStart = dayjs(currentDate.format("YYYY-MM-DD"))
+      const dayStart = dayjs
+        .tz(dayStr, "YYYY-MM-DD", "Asia/Kolkata")
         .hour(baseStart.hour())
         .minute(baseStart.minute())
         .second(0)
-        .tz("Asia/Kolkata")
         .unix();
 
       const dayEnd = dayStart + durationSec;
@@ -95,7 +112,7 @@ export async function transitionEngagement(client, {
         [
           engagement.serviceproviderid,
           engagement.engagement_id,
-          currentDate.format("YYYY-MM-DD"),
+          dayStr,
           dayStart,
           dayEnd
         ]
