@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: payments-app
+    metrics_path: /metrics
+    static_configs:
+      # API on host (adjust port: 4000 default, 4100 when using monorepo root `npm run dev`)
+      - targets: ["host.docker.internal:4000"]

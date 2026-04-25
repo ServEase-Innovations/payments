@@ -1,0 +1,15 @@
+# Copy to prometheus.yml and set targets to your payments API host:port.
+# Default app port is often 4000; monorepo root may use PORT=4100.
+#
+# Prometheus in Docker on Mac/Windows scraping a host-run API:
+#   targets: ["host.docker.internal:4100"]
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "payments-app"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:4000"]

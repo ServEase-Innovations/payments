@@ -1,0 +1,58 @@
+# Prometheus + Grafana + Loki + Promtail for the Payments API.
+# Host ports chosen to avoid clashing with coupons (9090/3001) or providers (3000).
+#
+# 1. Start the API (e.g. npm run dev) on port 4000, or set prometheus target to 4100.
+# 2. docker compose -f docker-compose.monitoring.yml up -d
+# 3. Prometheus: http://localhost:9202/targets  (job payments-app should be UP)
+# 4. Grafana:    http://localhost:3202  (admin/admin)
+# 5. Logs: Grafana → Explore → Loki → {job="payments-app"}
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: payments-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9202:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: payments-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3122:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: payments-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./monitoring/promtail/config.yml:/etc/promtail/config.yml:ro
+      - ./logs:/var/log/payments:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: payments-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3202:3000"
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped

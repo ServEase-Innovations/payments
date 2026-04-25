@@ -18,13 +18,19 @@ import createEngagementsRouter from "./src/routes/v2/createEngagements.js";
 import serviceProvidersDiscoveryV2Router from "./src/routes/v2/serviceProvidersDiscoveryV2.js";
 import swaggerUi from "swagger-ui-express";
 import swaggerJsdoc from "swagger-jsdoc";
-import { create } from "domain";
-
+import requestMetrics from "./src/middleware/requestMetrics.js";
+import {
+  getMetrics,
+  metricsContentType,
+  socketIoConnectionsTotal,
+  socketIoDisconnectsTotal,
+} from "./src/monitoring/prometheus.js";
+import { logger } from "./src/utils/logger.js";
 
 const app = express();
 
-
 app.use(cors());
+app.use(requestMetrics);
 
 dotenv.config();
 
@@ -56,6 +62,14 @@ app.use(express.urlencoded({ extended: true }));
 // ✅ Initialize DB
 initDB();
 
+app.get("/metrics", async (req, res, next) => {
+  try {
+    res.set("Content-Type", metricsContentType);
+    res.end(await getMetrics());
+  } catch (err) {
+    next(err);
+  }
+});
 
 // ---------- V2 Swagger ----------
 const swaggerOptionsV2 = {
@@ -108,6 +122,7 @@ app.use("/api/v2/service-providers", serviceProvidersDiscoveryV2Router);
 
 
 io.on("connection", (socket) => {
+  socketIoConnectionsTotal.inc();
   console.log("🔌 Client connected");
 
   socket.on("join", ({ providerId }) => {
@@ -118,6 +133,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    socketIoDisconnectsTotal.inc();
     console.log("❌ Client disconnected");
   });
 });
@@ -126,8 +142,14 @@ io.on("connection", (socket) => {
 
 
 
-server.listen(4000, () =>
-  console.log("Server running on http://localhost:4000/api-docs")
-);
+server.listen(4000, () => {
+  logger.info("payments_api_started", {
+    port: 4000,
+    docsV1: "/v1/api-docs",
+    docsV2: "/v2/api-docs",
+    metrics: "/metrics",
+  });
+  console.log("Server running on http://localhost:4000/v1/api-docs");
+});
 
 export { io };
