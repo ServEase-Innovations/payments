@@ -98,6 +98,11 @@ function previousEngagementBusyIntervals(
   let cursor = from.clone();
   while (!cursor.isAfter(to, "day")) {
     const dateStr = cursor.format("YYYY-MM-DD");
+    // Match PA + engagement fallback: vacation days are not busy for the SP.
+    if (isDateInEngagementVacation(dateStr, prev.vacationStartDate, prev.vacationEndDate)) {
+      cursor = cursor.add(1, "day");
+      continue;
+    }
     const blockStart = epochInIST(dateStr, timeStr);
     const blockEnd = blockStart + blockDurSec;
     out.push({
@@ -293,6 +298,8 @@ function getAge(dobString) {
  */
 router.post("/nearby-monthly", async (req, res) => {
   try {
+    const b = req.body || {};
+    const q = req.query || {};
     const {
       lat,
       lng,
@@ -301,12 +308,12 @@ router.post("/nearby-monthly", async (req, res) => {
       startDate,
       endDate,
       preferredStartTime,
-      serviceDurationMinutes,
-      customerID,
-      customerId
-    } = req.body;
+      serviceDurationMinutes
+    } = b;
+    const customerID = b.customerID ?? q.customerID;
+    const customerId = b.customerId ?? q.customerId;
 
-    const { page, limit } = parseNearbyMonthlyPagination(req.query, req.body);
+    const { page, limit } = parseNearbyMonthlyPagination(q, b);
 
     if (
       !lat ||
@@ -456,6 +463,8 @@ router.post("/nearby-monthly", async (req, res) => {
           e."end_date" AS "endDate",
           e."start_epoch" AS "startEpoch",
           e."duration_minutes" AS "durationMinutes",
+          e."vacation_start_date" AS "vacationStartDate",
+          e."vacation_end_date" AS "vacationEndDate",
           e."engagement_status" AS "engagementStatus",
           e."assignment_status" AS "assignmentStatus",
           e."task_status" AS "taskStatus",
@@ -483,6 +492,8 @@ router.post("/nearby-monthly", async (req, res) => {
           startEpoch: row.startEpoch != null ? Number(row.startEpoch) : null,
           durationMinutes:
             row.durationMinutes != null ? Number(row.durationMinutes) : null,
+          vacationStartDate: row.vacationStartDate,
+          vacationEndDate: row.vacationEndDate,
           engagementStatus: row.engagementStatus,
           assignmentStatus: row.assignmentStatus,
           taskStatus: row.taskStatus,
@@ -557,10 +568,10 @@ router.post("/nearby-monthly", async (req, res) => {
       [providerIds, startDate, endDate]
     );
 
-    /* ---------- Fallback: Engagements (in case provider_availability not populated) ---------- */
     const engagementsRes = await pool.query(
       `
       SELECT
+        e.engagement_id,
         e.serviceproviderid,
         e.booking_type,
         e.start_date,
@@ -586,6 +597,69 @@ router.post("/nearby-monthly", async (req, res) => {
       `,
       [providerIds, startDate, endDate, roleSearchNorm]
     );
+
+    /** (sp, YYYY-MM-DD) in Asia/Kolkata — contract vacation from engagements (source of truth for "no visit" days) */
+    const engagementVacationBySpAndDate = new Set();
+    {
+      const rStart = dayjs
+        .tz(calendarYmdKolkata(startDate), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+      const rEnd = dayjs
+        .tz(calendarYmdKolkata(endDate), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+      for (const e of engagementsRes.rows) {
+        if (e.booking_type === "ON_DEMAND") continue;
+        const spid = String(e.serviceproviderid);
+        for (
+          let c = rStart.clone();
+          !c.isAfter(rEnd, "day");
+          c = c.add(1, "day")
+        ) {
+          const ds = c.format("YYYY-MM-DD");
+          if (isDateInEngagementVacation(ds, e.vacation_start_date, e.vacation_end_date)) {
+            engagementVacationBySpAndDate.add(`${spid}:${ds}`);
+          }
+        }
+      }
+    }
+
+    /** If PA is FREE (e.g. vacation) for (sp, engagement, day), we must not add a synthetic block from the engagement. */
+    const paFreeRes = await pool.query(
+      `
+      SELECT
+        pa.serviceproviderid,
+        pa.engagement_id,
+        pa.date::text AS "dateStr"
+      FROM provider_availability pa
+      WHERE
+        pa.serviceproviderid = ANY($1)
+        AND LOWER(TRIM(COALESCE(pa.status::text, ''))) = 'free'
+        AND pa.date BETWEEN $2::date AND $3::date
+        AND pa.engagement_id IS NOT NULL
+      `,
+      [providerIds, startDate, endDate]
+    );
+    /** (sp, engagement, date) — skip synthetic busy for that day */
+    const paFreeEngagementDay = new Set();
+    /** (sp, date) — that calendar day the SP is not on a paid visit in PA (vacation / freed); never treat as "BOOKED" at the visit window */
+    const paFreeBySpAndCalendarDate = new Set();
+    for (const f of paFreeRes.rows) {
+      const d = f.dateStr.trim().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+      const spK = String(f.serviceproviderid);
+      paFreeEngagementDay.add(`${spK}:${String(f.engagement_id)}:${d}`);
+      paFreeBySpAndCalendarDate.add(`${spK}:${d}`);
+    }
+
+    const spDayClearedForVisit = new Set();
+    for (const k of paFreeBySpAndCalendarDate) {
+      spDayClearedForVisit.add(k);
+    }
+    for (const k of engagementVacationBySpAndDate) {
+      spDayClearedForVisit.add(k);
+    }
+
+    /* Synthetic MONTHLY/SHORT uses engagementsRes + PA (already loaded) */
 
     const bookingsByProvider = {};
     const paBookedCountBySp = {};
@@ -652,23 +726,33 @@ router.post("/nearby-monthly", async (req, res) => {
       const toDay = engEndDay.isBefore(rangeEndDay) ? engEndDay : rangeEndDay;
 
       bookingsByProvider[spid] ??= [];
+      const engIdStr = e.engagement_id != null ? String(e.engagement_id) : "";
       let dayCursor = fromDay.clone();
       while (!dayCursor.isAfter(toDay, "day")) {
         const dateStr = dayCursor.format("YYYY-MM-DD");
+        const isPaFreeThisDay =
+          engIdStr &&
+          paFreeEngagementDay.has(`${spid}:${engIdStr}:${dateStr}`);
+        if (isPaFreeThisDay) {
+          dayCursor = dayCursor.add(1, "day");
+          continue;
+        }
         if (
-          !isDateInEngagementVacation(
+          isDateInEngagementVacation(
             dateStr,
             e.vacation_start_date,
             e.vacation_end_date
           )
         ) {
-          const slotStart = epochInIST(dateStr, timeStr);
-          const slotEnd = slotStart + durationSec;
-          bookingsByProvider[spid].push({
-            slot_start_epoch: slotStart,
-            slot_end_epoch: slotEnd
-          });
+          dayCursor = dayCursor.add(1, "day");
+          continue;
         }
+        const slotStart = epochInIST(dateStr, timeStr);
+        const slotEnd = slotStart + durationSec;
+        bookingsByProvider[spid].push({
+          slot_start_epoch: slotStart,
+          slot_end_epoch: slotEnd
+        });
         dayCursor = dayCursor.add(1, "day");
       }
     }
@@ -692,7 +776,15 @@ router.post("/nearby-monthly", async (req, res) => {
         roleSearchNorm,
         durationSec
       );
-      const providerBookingsMerged = [...baseBookings, ...fromPrevEngagement];
+      let providerBookingsMerged = [...baseBookings, ...fromPrevEngagement];
+      if (spDayClearedForVisit.size) {
+        providerBookingsMerged = providerBookingsMerged.filter((b) => {
+          const t = Number(b.slot_start_epoch);
+          if (!Number.isFinite(t)) return true;
+          const dKey = dayjs.unix(t).tz("Asia/Kolkata").format("YYYY-MM-DD");
+          return !spDayClearedForVisit.has(`${pidKey}:${dKey}`);
+        });
+      }
 
       let totalDays = 0;
       let daysAtPreferredTime = 0;
@@ -700,15 +792,33 @@ router.post("/nearby-monthly", async (req, res) => {
       let unavailableDays = 0;
       const exceptions = [];
 
+      const rangeEvalStart = dayjs
+        .tz(calendarYmdKolkata(startDate), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+      const rangeEvalEnd = dayjs
+        .tz(calendarYmdKolkata(endDate), "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("day");
+
+      let clearedContractVisitDaysInRange = 0;
       for (
-        let d = new Date(startDate);
-        d <= new Date(endDate);
-        d.setDate(d.getDate() + 1)
+        let c0 = rangeEvalStart.clone();
+        !c0.isAfter(rangeEvalEnd, "day");
+        c0 = c0.add(1, "day")
+      ) {
+        if (spDayClearedForVisit.has(`${pidKey}:${c0.format("YYYY-MM-DD")}`)) {
+          clearedContractVisitDaysInRange++;
+        }
+      }
+
+      for (
+        let evDay = rangeEvalStart.clone();
+        !evDay.isAfter(rangeEvalEnd, "day");
+        evDay = evDay.add(1, "day")
       ) {
         totalDays++;
 
-        const dateStr = d.toISOString().slice(0, 10);
-        const dow = d.getDay();
+        const dateStr = evDay.format("YYYY-MM-DD");
+        const dow = evDay.day();
 
         const todaysSlots = providerWeeklySlots.filter(
           s => s.day_of_week === dow
@@ -721,6 +831,30 @@ router.post("/nearby-monthly", async (req, res) => {
             reason: "NO_WEEKLY_SLOT_DEFINED",
             suggestedTime: null
           });
+          continue;
+        }
+
+        /* Contract not running this calendar day (vacation / PA FREE) — do not require working-hours or booking checks */
+        if (spDayClearedForVisit.has(`${pidKey}:${dateStr}`)) {
+          const preferredEpochEarly = epochInIST(dateStr, preferredStartTime);
+          const isInside = todaysSlots.some((slot) => {
+            const s0 = epochInIST(dateStr, slot.slot_start);
+            const s1 = epochInIST(dateStr, slot.slot_end);
+            return (
+              preferredEpochEarly >= s0 &&
+              preferredEpochEarly + durationSec <= s1
+            );
+          });
+          if (isInside) {
+            daysAtPreferredTime++;
+          } else {
+            daysWithDifferentTime++;
+            exceptions.push({
+              date: dateStr,
+              reason: "OUTSIDE_WORKING_HOURS",
+              suggestedTime: todaysSlots[0].slot_start
+            });
+          }
           continue;
         }
 
@@ -908,8 +1042,12 @@ router.post("/nearby-monthly", async (req, res) => {
             engMonthlyShortTermBySp[pidKey] || 0,
           engagementsOnDemandInRange:
             engOnDemandBySp[pidKey] || 0,
-          mergedBookedIntervalsUsedForOverlapCheck: providerBookingsMerged.length
-        }
+          mergedBookedIntervalsUsedForOverlapCheck: providerBookingsMerged.length,
+          /** Search-window days where no contract visit applies (engagement vacation + PA FREE). Expect 22 for 126 on 5/1–5/22 when `engagements` has vacation. */
+          clearedContractVisitDaysInRange
+        },
+        previouslyBooked: false,
+        previousBookingDetails: null
       };
 
       if (hasCustomerID) {
@@ -923,8 +1061,6 @@ router.post("/nearby-monthly", async (req, res) => {
             ...prevForApi
           } = prev;
           providerRow.previousBookingDetails = prevForApi;
-        } else {
-          providerRow.previousBookingDetails = null;
         }
       }
 
