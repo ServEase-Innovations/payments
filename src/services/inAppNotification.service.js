@@ -201,3 +201,23 @@ export const InAppTypes = {
   SERVICE_DAY_STARTED: "SERVICE_DAY_STARTED",
   SERVICE_DAY_COMPLETED: "SERVICE_DAY_COMPLETED",
 };
+
+/**
+ * When one provider accepts an on-demand request, all other providers should not keep an unread
+ * "new booking" row for the same engagement.
+ */
+export async function dismissNewBookingInAppByEngagementId(engagementId) {
+  const eid = Number(engagementId);
+  if (!Number.isFinite(eid) || eid < 1) return { updated: 0 };
+  const r = await pool.query(
+    `
+    UPDATE in_app_notifications
+    SET read_at = COALESCE(read_at, NOW())
+    WHERE engagement_id = $1
+      AND recipient_type = 'provider'
+      AND type IN ($2, $3)
+    `,
+    [eid, InAppTypes.NEW_BOOKING_OPPORTUNITY, InAppTypes.NEW_BOOKING_REQUEST]
+  );
+  return { updated: r.rowCount ?? 0 };
+}

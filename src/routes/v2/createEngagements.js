@@ -404,8 +404,17 @@ router.post("/", async (req, res) => {
 
     await client.query("COMMIT");
 
-    // Notify nearby providers (ON_DEMAND only)
+    // Notify nearby providers (ON_DEMAND only) — each SP gets distance from *their* coords to the job.
     if (isOnDemand && latitude && longitude) {
+      const endWall = dayjs
+        .tz(
+          `${start_date} ${start_time}`,
+          "YYYY-MM-DD HH:mm",
+          "Asia/Kolkata"
+        )
+        .add(durationMinutes, "minute");
+      const end_time_display = endWall.format("HH:mm");
+
       const providers = await pool.query(`
         SELECT serviceproviderid, latitude, longitude
         FROM serviceprovider
@@ -426,10 +435,14 @@ router.post("/", async (req, res) => {
           req.io.to(`provider_${p.serviceproviderid}`).emit("new-engagement", {
             engagement_id: engagement.engagement_id,
             service_type,
+            booking_type,
             start_date,
             start_time,
+            end_time: end_time_display,
             duration_minutes: durationMinutes,
             base_amount,
+            address: address || null,
+            distance_meters: Math.round(distance),
           });
         }
       }

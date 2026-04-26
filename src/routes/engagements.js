@@ -8,7 +8,11 @@ import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
 import { createServiceDays } from "../routes/serviceDays.service.js";
-import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
+import {
+  createInAppNotification,
+  InAppTypes,
+  dismissNewBookingInAppByEngagementId,
+} from "../services/inAppNotification.service.js";
 import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
 
 
@@ -1109,6 +1113,12 @@ router.post("/:id/accept", async (req, res) => {
       });
     } catch (eNotif) {
       console.error("in-app (V1 /api/engagements/:id/accept) failed", eNotif);
+    }
+
+    try {
+      await dismissNewBookingInAppByEngagementId(id);
+    } catch (eDismiss) {
+      console.error("dismiss new-booking in-app (V1 accept) failed", eDismiss);
     }
 
     // 6️⃣ Return normalized response

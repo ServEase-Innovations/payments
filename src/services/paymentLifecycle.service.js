@@ -1,8 +1,14 @@
 import pool from "../config/db.js";
 import geolib from "geolib";
+import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
 import { transitionEngagement } from "./engagementLifecycle.js";
 import { createInAppNotification, InAppTypes } from "./inAppNotification.service.js";
 import { getSocketServer } from "../utils/socketIoRef.js";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 export async function handlePaymentSuccess({
   engagementId,
@@ -142,6 +148,14 @@ console.log("========================");
           clients ? clients.size : 0
         );
 
+        const distanceKm = Math.round((distance / 1000) * 10) / 10;
+        const startTimeLabel = engagement.start_epoch
+          ? dayjs.unix(Number(engagement.start_epoch)).tz("Asia/Kolkata").format("D MMM YYYY, h:mm a")
+          : engagement.start_date
+            ? String(engagement.start_date)
+            : "";
+        const addressLine = engagement.address ? String(engagement.address).trim() : "";
+
         socketServer.to(room).emit("new-engagement-request", {
           engagement_id: engagement.engagement_id,
           service_type: engagement.service_type,
@@ -152,19 +166,37 @@ console.log("========================");
           base_amount: engagement.base_amount,
         });
         /* eslint-disable no-await-in-loop */
+        const amountLabel =
+          engagement.base_amount != null && engagement.base_amount !== ""
+            ? `₹${engagement.base_amount}`
+            : null;
+        const summaryParts = [
+          engagement.service_type,
+          startTimeLabel ? `Starts ${startTimeLabel}` : null,
+          `~${distanceKm} km from you`,
+          amountLabel,
+        ].filter(Boolean);
+        const bodyText = summaryParts.join(" · ");
         try {
           await createInAppNotification({
             io: socketServer,
             recipientType: "provider",
             recipientId: p.serviceproviderid,
             type: InAppTypes.NEW_BOOKING_OPPORTUNITY,
-            title: "New booking request nearby",
-            body: `${engagement.service_type} — start ${engagement.start_date} · ₹${engagement.base_amount}`,
+            title: "New paid booking nearby — tap to review",
+            body: bodyText,
             engagementId: engagement.engagement_id,
             metadata: {
               service_type: engagement.service_type,
+              booking_type: engagement.booking_type,
               start_date: engagement.start_date,
+              start_epoch: engagement.start_epoch,
+              start_time_label: startTimeLabel,
+              duration_minutes: engagement.duration_minutes,
               base_amount: engagement.base_amount,
+              distance_m: distance,
+              distance_km: distanceKm,
+              address: addressLine || null,
             },
           });
         } catch (e) {

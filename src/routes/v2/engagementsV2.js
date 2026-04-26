@@ -8,7 +8,11 @@ import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
 import { createServiceDays } from "../serviceDays.service.js";
-import { createInAppNotification, InAppTypes } from "../../services/inAppNotification.service.js";
+import {
+  createInAppNotification,
+  InAppTypes,
+  dismissNewBookingInAppByEngagementId,
+} from "../../services/inAppNotification.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -276,6 +280,12 @@ router.post("/:id/accept", async (req, res) => {
       console.error("in-app (accept) failed", eNotif);
     }
 
+    try {
+      await dismissNewBookingInAppByEngagementId(id);
+    } catch (eDismiss) {
+      console.error("dismiss new-booking in-app (v2 accept) failed", eDismiss);
+    }
+
     const updated = (
       await pool.query(
         `SELECT * FROM engagements WHERE engagement_id=$1`,
@@ -406,6 +416,12 @@ router.post("/:id/accept", async (req, res) => {
       });
     } catch (eNotif) {
       console.error("in-app (accept on-demand) failed", eNotif);
+    }
+
+    try {
+      await dismissNewBookingInAppByEngagementId(engagementId);
+    } catch (eDismiss) {
+      console.error("dismiss new-booking in-app (v2 on-demand accept) failed", eDismiss);
     }
 
     return res.json({
