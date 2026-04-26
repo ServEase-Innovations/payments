@@ -418,6 +418,62 @@ router.get("/:providerId/calendar", async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/*  Engagement modification log (all engagements for this provider)         */
+/* -------------------------------------------------------------------------- */
+
+router.get("/:providerId/modification-log", async (req, res) => {
+  const { providerId } = req.params;
+  const limitRaw = req.query.limit;
+  const limit = Math.min(Math.max(Number(limitRaw) || 200, 1), 500);
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        m.modification_id,
+        m.engagement_id,
+        m.modified_at,
+        m.created_at,
+        m.modified_fields,
+        m.modified_by_id,
+        m.modified_by_role,
+        m.modification_type,
+        m.modified_type,
+        m.old_start_date,
+        m.new_start_date,
+        e.start_date AS engagement_start,
+        e.end_date AS engagement_end,
+        e.service_type,
+        e.task_status,
+        e.booking_type
+      FROM engagement_modifications m
+      INNER JOIN engagements e ON e.engagement_id = m.engagement_id
+      WHERE e.serviceproviderid = $1
+      ORDER BY m.modified_at DESC
+      LIMIT $2
+    `,
+      [providerId, limit]
+    );
+    const log = result.rows.map((row) => ({
+      ...row,
+      modified_fields:
+        row.modified_fields == null
+          ? null
+          : typeof row.modified_fields === "string"
+            ? JSON.parse(row.modified_fields)
+            : row.modified_fields,
+      old_start_date: row.old_start_date ? normalizeDate(row.old_start_date) : null,
+      new_start_date: row.new_start_date ? normalizeDate(row.new_start_date) : null,
+      engagement_start: row.engagement_start ? normalizeDate(row.engagement_start) : null,
+      engagement_end: row.engagement_end ? normalizeDate(row.engagement_end) : null,
+    }));
+    return res.json({ success: true, serviceproviderid: providerId, count: log.length, log });
+  } catch (err) {
+    console.error("Error fetching provider modification log:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 
 router.post("/:providerId/withdraw", async (req, res) => {
   const client = await pool.connect();

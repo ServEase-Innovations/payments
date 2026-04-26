@@ -345,6 +345,47 @@ const effectiveEndDate =
   }
 });
 
+// GET modification history for one engagement (audit: who changed what, when)
+router.get("/:id/modifications", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id == null || String(id).trim() === "" || !/^\d+$/.test(String(id).trim())) {
+      return res.status(400).json({ error: "Invalid engagement id" });
+    }
+    const r = await pool.query(
+      `SELECT
+        modification_id,
+        engagement_id,
+        modified_at,
+        created_at,
+        modified_fields,
+        modified_by_id,
+        modified_by_role,
+        modification_type,
+        modified_type,
+        old_start_date,
+        new_start_date
+       FROM engagement_modifications
+       WHERE engagement_id = $1
+       ORDER BY modified_at DESC
+       LIMIT 200`,
+      [id]
+    );
+    const rows = r.rows.map((row) => ({
+      ...row,
+      modified_fields:
+        row.modified_fields == null
+          ? null
+          : typeof row.modified_fields === "string"
+            ? JSON.parse(row.modified_fields)
+            : row.modified_fields,
+    }));
+    return res.json({ success: true, engagement_id: id, modifications: rows });
+  } catch (err) {
+    console.error("engagement modifications list error:", err);
+    return res.status(500).json({ error: "Failed to list modifications" });
+  }
+});
 
 // GET all engagements for a customer (FULL VERSION)
 // Includes: provider details, payments, modifications, vacations, epoch times
