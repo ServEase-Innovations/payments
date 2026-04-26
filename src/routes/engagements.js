@@ -9,6 +9,7 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
 import { io } from "../../index.js";
 import { createServiceDays } from "../routes/serviceDays.service.js";
+import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
 
 
 dayjs.extend(customParseFormat);
@@ -479,50 +480,61 @@ WHERE "serviceproviderid" = ANY($1)`,
     });
 
     // ---- Group engagements ----
-    const now = dayjs().unix();
     const upcoming = [];
     const ongoing = [];
     const past = [];
 
     const today = dayjs().tz("Asia/Kolkata").startOf("day");
 
-    engagements.forEach(e => {
+    engagements.forEach((e) => {
       const engagementStart = dayjs(e.start_date).startOf("day");
       const engagementEnd = dayjs(e.end_date).endOf("day");
 
       const todayService = todayServiceByEng[e.engagement_id] || null;
 
-  let today_service = null;
-  if (todayService) {
-    today_service = {
-      service_day_id: todayService.service_day_id,
-      status: todayService.status,
-      can_start: todayService.status === "SCHEDULED",
-      can_generate_otp: todayService.status === "IN_PROGRESS",
-      can_complete: todayService.status === "IN_PROGRESS",
-      otp_active: !!otpByServiceDay[todayService.service_day_id]
-    };
-  }
+      let today_service = null;
+      if (todayService) {
+        today_service = {
+          service_day_id: todayService.service_day_id,
+          status: todayService.status,
+          can_start: todayService.status === "SCHEDULED",
+          can_generate_otp: todayService.status === "IN_PROGRESS",
+          can_complete: todayService.status === "IN_PROGRESS",
+          otp_active: !!otpByServiceDay[todayService.service_day_id]
+        };
+      }
 
-  const enriched = {
-    ...e,
-    start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
-    end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
-    provider: providerById[e.serviceproviderid] || null,
-    payment: paymentByEng[e.engagement_id] || null,
-    modifications: modsByEng[e.engagement_id] || [],
-    vacations: vacationsByEng[e.engagement_id] || [],
-    today_service
-  };
+      const bucket = today.isBefore(engagementStart)
+        ? "upcoming"
+        : today.isAfter(engagementEnd)
+          ? "past"
+          : "ongoing";
 
-  if (today.isBefore(engagementStart)) {
-    upcoming.push(enriched);
-  } else if (today.isAfter(engagementEnd)) {
-    past.push(enriched);
-  } else {
-    ongoing.push(enriched);
-  }
-});
+      const { task_status, work_summary } = deriveTaskStatusForCustomer(e, bucket, todayService);
+      const { task_status: taskStatusStored, ...engCore } = e;
+
+      const enriched = {
+        ...engCore,
+        task_status,
+        task_status_stored: taskStatusStored,
+        work_summary,
+        start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
+        end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
+        provider: providerById[e.serviceproviderid] || null,
+        payment: paymentByEng[e.engagement_id] || null,
+        modifications: modsByEng[e.engagement_id] || [],
+        vacations: vacationsByEng[e.engagement_id] || [],
+        today_service
+      };
+
+      if (bucket === "upcoming") {
+        upcoming.push(enriched);
+      } else if (bucket === "past") {
+        past.push(enriched);
+      } else {
+        ongoing.push(enriched);
+      }
+    });
 
     return res.json({ upcoming, ongoing, past });
 

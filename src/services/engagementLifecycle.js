@@ -42,13 +42,29 @@ export async function transitionEngagement(client, {
 
   if (currentStatus === newStatus) return;
 
-  // 1️⃣ Update status
-  await client.query(
-    `UPDATE engagements
-     SET engagement_status=$1
-     WHERE engagement_id=$2`,
-    [newStatus, engagementId]
-  );
+  // 1️⃣ Update status (+ sync task_status when the visit clearly starts / ends)
+  if (newStatus === "IN_PROGRESS") {
+    await client.query(
+      `UPDATE engagements
+       SET engagement_status=$1, task_status='IN_PROGRESS'
+       WHERE engagement_id=$2`,
+      [newStatus, engagementId]
+    );
+  } else if (newStatus === "COMPLETED") {
+    await client.query(
+      `UPDATE engagements
+       SET engagement_status=$1, task_status='COMPLETED'
+       WHERE engagement_id=$2`,
+      [newStatus, engagementId]
+    );
+  } else {
+    await client.query(
+      `UPDATE engagements
+       SET engagement_status=$1
+       WHERE engagement_id=$2`,
+      [newStatus, engagementId]
+    );
+  }
 
   // 2️⃣ Insert lifecycle event
   await client.query(

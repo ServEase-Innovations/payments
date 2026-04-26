@@ -1464,7 +1464,18 @@ components:
         start_time: { type: string, format: time, example: "10:00:00" }
         end_time: { type: string, format: time, example: "11:00:00" }
         base_amount: { type: number, format: float }
-        task_status: { type: string, enum: [NOT_STARTED, IN_PROGRESS, COMPLETED] }
+        task_status: { type: string, enum: [NOT_STARTED, IN_PROGRESS, COMPLETED], description: "Effective work status (derived for customer list — see work_summary)" }
+        task_status_stored: { type: string, description: "Value persisted on engagements row (may lag until a lifecycle / visit update runs)" }
+        work_summary:
+          type: object
+          description: Human context for task_status
+          properties:
+            phase: { type: string, enum: [upcoming, active, past] }
+            label: { type: string }
+            engagement_status: { type: string, nullable: true }
+            today_visit:
+              type: object
+              nullable: true
         active: { type: boolean }
         created_at: { type: string, format: date-time }
 
