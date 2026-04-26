@@ -26,8 +26,17 @@ import {
   socketIoDisconnectsTotal,
 } from "./src/monitoring/prometheus.js";
 import { logger } from "./src/utils/logger.js";
+import { getPaymentsOpenApiServerUrl } from "./src/utils/swaggerServerUrl.js";
 
 const app = express();
+
+if (
+  process.env.TRUST_PROXY === "true" ||
+  process.env.TRUST_PROXY === "1" ||
+  process.env.NODE_ENV === "production"
+) {
+  app.set("trust proxy", 1);
+}
 
 app.use(cors());
 app.use(requestMetrics);
@@ -71,7 +80,7 @@ app.get("/metrics", async (req, res, next) => {
   }
 });
 
-// ---------- V2 Swagger ----------
+// ---------- V2 Swagger (server URL from request or env) ----------
 const swaggerOptionsV2 = {
   definition: {
     openapi: "3.0.0",
@@ -80,29 +89,49 @@ const swaggerOptionsV2 = {
       version: "2.0.0",
       description: "Production-grade engagement lifecycle APIs",
     },
-    servers: [
-      { url: "http://localhost:4000/api" }
-    ]
   },
   apis: ["./src/routes/v2/**/*.js"],
 };
 
-const swaggerSpecV2 = swaggerJsdoc(swaggerOptionsV2);
+const swaggerSpecV2Static = swaggerJsdoc(swaggerOptionsV2);
+
+// ---------- V1 OpenAPI (YAML) — `servers` in file are examples; overridden at runtime ----------
+const v1OpenApiFromYaml = YAML.load("./swagger/servease-api.yaml");
+
+function buildV2SwaggerDoc(req) {
+  const spec = JSON.parse(JSON.stringify(swaggerSpecV2Static));
+  spec.servers = [{ url: getPaymentsOpenApiServerUrl(req) }];
+  return spec;
+}
+
+function buildV1SwaggerDoc(req) {
+  const spec = JSON.parse(JSON.stringify(v1OpenApiFromYaml));
+  spec.servers = [{ url: getPaymentsOpenApiServerUrl(req) }];
+  return spec;
+}
+
+function v2SwaggerWithDynamicServer(req, res, next) {
+  req.swaggerDoc = buildV2SwaggerDoc(req);
+  next();
+}
+
+function v1SwaggerWithDynamicServer(req, res, next) {
+  req.swaggerDoc = buildV1SwaggerDoc(req);
+  next();
+}
 
 app.use(
   "/v2/api-docs",
-  swaggerUi.serveFiles(swaggerSpecV2),
-  swaggerUi.setup(swaggerSpecV2)
+  v2SwaggerWithDynamicServer,
+  ...swaggerUi.serve,
+  swaggerUi.setup(undefined, { swaggerOptions: { persistAuthorization: true } })
 );
-
-
-// ---------- V1 Swagger ----------
-const swaggerDocument = YAML.load("./swagger/servease-api.yaml");
 
 app.use(
   "/v1/api-docs",
-  swaggerUi.serveFiles(swaggerDocument),
-  swaggerUi.setup(swaggerDocument)
+  v1SwaggerWithDynamicServer,
+  ...swaggerUi.serve,
+  swaggerUi.setup(undefined, { swaggerOptions: { persistAuthorization: true } })
 );
 
 app.use("/api/payments", paymentRoutes);
@@ -142,14 +171,15 @@ io.on("connection", (socket) => {
 
 
 
-server.listen(4000, () => {
+const httpPort = Number(process.env.PORT) || 4000;
+server.listen(httpPort, () => {
   logger.info("payments_api_started", {
-    port: 4000,
+    port: httpPort,
     docsV1: "/v1/api-docs",
     docsV2: "/v2/api-docs",
     metrics: "/metrics",
   });
-  console.log("Server running on http://localhost:4000/v1/api-docs");
+  console.log(`Server running on http://localhost:${httpPort}/v1/api-docs`);
 });
 
 export { io };

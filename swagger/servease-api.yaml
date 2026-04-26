@@ -1,3 +1,4 @@
+# `servers` below is replaced at runtime from the current request (or SWAGGER_SERVER_URL, etc.); see index.js
 openapi: 3.0.3
 info:
   title: Servease API
@@ -5,9 +6,7 @@ info:
   version: 1.0.3
 
 servers:
-  - url: http://localhost:5000/api
-  - url : https://payments-j5id.onrender.com/api
-  - url : http://98.130.60.70:5000/api
+  - url: http://localhost:4000/api
 
 tags:
   - name: customer

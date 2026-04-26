@@ -52,7 +52,7 @@ npm run qa
 npm run prod
 ```
 
-The process listens on **port 4000** by default (`index.js`). If you run this beside other Serveaso services (e.g. **providers** on 4000), set a different port by changing the listen call or running behind a reverse proxy.
+The process listens on **`PORT`** (default **4000**). If you run this beside other Serveaso services (e.g. **providers** on 4000), set **`PORT=4100`** for payments (see `index.js`).
 
 ## API documentation (Swagger)
 
@@ -61,7 +61,7 @@ The process listens on **port 4000** by default (`index.js`). If you run this be
 | **v1** | `http://localhost:4000/v1/api-docs` | `swagger/servease-api.yaml` |
 | **v2** | `http://localhost:4000/v2/api-docs` | JSDoc in `src/routes/v2/**/*.js` |
 
-The YAML `servers` entries may list other hosts/ports; your running instance is defined by where you host the app.
+**OpenAPI `servers` (Try it out):** Each time you open the UI, the spec is filled with a single server that matches the **host you used in the browser**, e.g. `https://albcorp.example:4100/api` when you visit `https://albcorp.example:4100/v1/api-docs`. This uses `Host` and `X-Forwarded-*` when the app is behind a proxy. To pin a public URL in every environment, set one of: **`SWAGGER_SERVER_URL`**, **`APP_URL`**, **`BASE_URL`**, or **`PUBLIC_URL`** (must end up as `…/api` — a trailing `/api` is added if missing). Enable **`app.set("trust proxy", 1)`** in production (already wired when `NODE_ENV=production` or `TRUST_PROXY=true/1`) so the correct scheme and host are taken from the load balancer.
 
 ## HTTP route map (mount paths)
 
@@ -74,7 +74,7 @@ All paths below are prefixed by your server origin (e.g. `http://localhost:4000`
 | `/api/customers` | same as engagements | Shared router instance |
 | `/api/customer` | `src/routes/customerLeaves.js` | Customer leave requests |
 | `/api` | `src/routes/walletRoutes.js` | e.g. `GET /wallets/:customerId` |
-| `/api/service-providers` | `src/routes/service-providers.js` | Payouts, engagements, calendar, withdraw |
+| `/api/service-providers` | `src/routes/service-providers.js` | Payouts, engagements, calendar, withdraw, **leaves** (`GET/POST/DELETE :providerId/leaves`), **availability day-blocks** (`GET/POST/DELETE` …/availability/blocks) |
 | `/api/engagement-service` | `src/routes/engagementService.js` | Service days start/OTP/complete, Twilio |
 | `/api/admin` | `src/routes/adminPayments.js` | Payment summaries, ledger, engagements |
 | `/api/v2/engagements` | `src/routes/v2/engagementsV2.js` | Lifecycle: assign, start, complete, cancel, history, vacation, accept |

@@ -424,9 +424,13 @@ router.post("/:providerId/withdraw", async (req, res) => {
 
   try {
     const { providerId } = req.params;
-    const { amount, payout_mode = "BANK" } = req.body;
+    const { amount: rawAmount, payout_mode = "BANK" } = req.body;
 
-    if (!amount || amount <= 0) {
+    const amount = Number(rawAmount);
+    if (rawAmount === undefined || rawAmount === null || rawAmount === "") {
+      return res.status(400).json({ error: "Invalid withdrawal amount" });
+    }
+    if (Number.isNaN(amount) || amount <= 0) {
       return res.status(400).json({ error: "Invalid withdrawal amount" });
     }
 
@@ -438,7 +442,8 @@ router.post("/:providerId/withdraw", async (req, res) => {
       [providerId]
     );
     if (providerRes.rows.length === 0) {
-      throw new Error("Provider not found");
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Provider not found" });
     }
 
     // 2️⃣ Lock wallet (auto-create if missing)
@@ -463,7 +468,10 @@ router.post("/:providerId/withdraw", async (req, res) => {
     const balance = Number(walletRes.rows[0].balance);
 
     if (balance < amount) {
-      throw new Error("Insufficient balance");
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ error: "Insufficient balance for this withdrawal" });
     }
 
     // 3️⃣ Charges (customize later)
@@ -531,14 +539,324 @@ router.post("/:providerId/withdraw", async (req, res) => {
     });
 
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore: no open transaction */
+    }
     console.error("Withdraw error:", err);
-    res.status(500).json({ error: err.message });
+    const msg = err && err.message ? String(err.message) : "Internal server error";
+    res.status(500).json({ error: msg });
   } finally {
     client.release();
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/*  Provider leave requests (provider_leaves)                                  */
+/* -------------------------------------------------------------------------- */
 
+router.get("/:providerId/leaves", async (req, res) => {
+  const { providerId } = req.params;
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        l.leave_id,
+        l.serviceproviderid,
+        l.engagement_id,
+        l.start_date,
+        l.end_date,
+        l.reason,
+        l.status,
+        l.created_at
+      FROM provider_leaves l
+      WHERE l.serviceproviderid = $1
+      ORDER BY l.start_date DESC, l.leave_id DESC
+      LIMIT 200
+      `,
+      [providerId]
+    );
+    return res.json({
+      success: true,
+      serviceproviderid: providerId,
+      leaves: result.rows.map((r) => ({
+        ...r,
+        start_date: normalizeDate(r.start_date),
+        end_date: normalizeDate(r.end_date),
+      })),
+    });
+  } catch (err) {
+    console.error("Error fetching provider leaves:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+router.post("/:providerId/leaves", async (req, res) => {
+  const { providerId } = req.params;
+  const { start_date, end_date, reason, engagement_id } = req.body || {};
+
+  if (!start_date || !end_date) {
+    return res
+      .status(400)
+      .json({ success: false, error: "start_date and end_date are required (YYYY-MM-DD)" });
+  }
+
+  const startD = dayjs.tz(String(start_date).trim().slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  const endD = dayjs.tz(String(end_date).trim().slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  if (!startD.isValid() || !endD.isValid()) {
+    return res.status(400).json({ success: false, error: "Invalid start_date or end_date" });
+  }
+  if (endD.isBefore(startD, "day")) {
+    return res.status(400).json({ success: false, error: "end_date must be on or after start_date" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const prov = await client.query(
+      "SELECT 1 FROM serviceprovider WHERE serviceproviderid = $1",
+      [providerId]
+    );
+    if (prov.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, error: "Provider not found" });
+    }
+
+    if (engagement_id) {
+      const en = await client.query(
+        "SELECT 1 FROM engagements WHERE engagement_id = $1 AND serviceproviderid = $2",
+        [engagement_id, providerId]
+      );
+      if (en.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ success: false, error: "engagement not found for this provider" });
+      }
+    }
+
+    const ins = await client.query(
+      `
+      INSERT INTO provider_leaves (serviceproviderid, engagement_id, start_date, end_date, reason, status, created_at)
+      VALUES ($1, $2, $3::date, $4::date, $5, 'PENDING', NOW())
+      RETURNING *
+      `,
+      [providerId, engagement_id || null, startD.format("YYYY-MM-DD"), endD.format("YYYY-MM-DD"), reason || null]
+    );
+    await client.query("COMMIT");
+    const row = ins.rows[0];
+    return res.status(201).json({
+      success: true,
+      leave: {
+        ...row,
+        start_date: normalizeDate(row.start_date),
+        end_date: normalizeDate(row.end_date),
+      },
+    });
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_r) {
+      // ignore
+    }
+    console.error("Error creating provider leave:", e);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete("/:providerId/leaves/:leaveId", async (req, res) => {
+  const { providerId, leaveId } = req.params;
+  try {
+    const del = await pool.query(
+      `
+      DELETE FROM provider_leaves
+      WHERE leave_id = $1 AND serviceproviderid = $2 AND status = 'PENDING'
+      RETURNING leave_id
+      `,
+      [leaveId, providerId]
+    );
+    if (del.rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Leave not found or not cancellable" });
+    }
+    return res.json({ success: true, deleted: leaveId });
+  } catch (err) {
+    console.error("Error deleting provider leave:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Ad-hoc day blocks (UNAVAILABLE) — no engagement                            */
+/* -------------------------------------------------------------------------- */
+
+function expandDateRangeYmd(startStr, endStr) {
+  const s = String(startStr).trim().slice(0, 10);
+  const e = String(endStr).trim().slice(0, 10);
+  const d = dayjs.tz(s, "YYYY-MM-DD", "Asia/Kolkata").startOf("day");
+  const endD = dayjs.tz(e, "YYYY-MM-DD", "Asia/Kolkata").startOf("day");
+  if (!d.isValid() || !endD.isValid() || endD.isBefore(d)) return [];
+  const out = [];
+  let cur = d;
+  while (!cur.isAfter(endD)) {
+    out.push(cur.format("YYYY-MM-DD"));
+    cur = cur.add(1, "day");
+  }
+  return out;
+}
+
+router.get("/:providerId/availability/blocks", async (req, res) => {
+  const { providerId } = req.params;
+  const { month } = req.query;
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ success: false, error: "Query month=YYYY-MM is required" });
+  }
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        serviceproviderid,
+        date,
+        status,
+        slot_start_epoch,
+        slot_end_epoch,
+        created_at
+      FROM provider_availability
+      WHERE serviceproviderid = $1
+        AND engagement_id IS NULL
+        AND UPPER(TRIM(COALESCE(status, ''))) = 'UNAVAILABLE'
+        AND TO_CHAR(date, 'YYYY-MM') = $2
+      ORDER BY date ASC, id ASC
+      `,
+      [providerId, month]
+    );
+    return res.json({
+      success: true,
+      blocks: result.rows.map((r) => ({
+        id: r.id,
+        serviceproviderid: r.serviceproviderid,
+        date: normalizeDate(r.date),
+        status: r.status,
+        start_time: epochToTime(r.slot_start_epoch),
+        end_time: epochToTime(r.slot_end_epoch),
+        created_at: r.created_at,
+      })),
+    });
+  } catch (err) {
+    console.error("Error listing availability blocks:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+router.post("/:providerId/availability/blocks", async (req, res) => {
+  const { providerId } = req.params;
+  const { start_date, end_date, dates } = req.body || {};
+  const client = await pool.connect();
+  let dateList = [];
+  if (Array.isArray(dates) && dates.length) {
+    dateList = dates.map((d) => String(d).trim().slice(0, 10)).filter(Boolean);
+  } else if (start_date && end_date) {
+    dateList = expandDateRangeYmd(start_date, end_date);
+  } else {
+    return res
+      .status(400)
+      .json({ success: false, error: "Send dates[] or { start_date, end_date }" });
+  }
+  if (dateList.length === 0) {
+    return res.status(400).json({ success: false, error: "No valid dates" });
+  }
+  if (dateList.length > 60) {
+    return res.status(400).json({ success: false, error: "Maximum 60 days at once" });
+  }
+
+  const created = [];
+  const errors = [];
+  const todayIst = dayjs().tz("Asia/Kolkata").format("YYYY-MM-DD");
+
+  try {
+    const prov = await client.query("SELECT 1 FROM serviceprovider WHERE serviceproviderid = $1", [
+      providerId,
+    ]);
+    if (prov.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "Provider not found" });
+    }
+
+    await client.query("BEGIN");
+    for (const dayStr of dateList) {
+      const dtest = dayjs.tz(dayStr, "YYYY-MM-DD", "Asia/Kolkata");
+      const todayStart = dayjs.tz(todayIst, "YYYY-MM-DD", "Asia/Kolkata");
+      if (!dtest.isValid() || dtest.isBefore(todayStart, "day")) {
+        errors.push({ date: dayStr, error: "PAST_OR_INVALID" });
+        continue;
+      }
+      const booked = await client.query(
+        `SELECT 1 AS x FROM provider_availability
+         WHERE serviceproviderid = $1 AND date = $2::date AND UPPER(TRIM(COALESCE(status,''))) = 'BOOKED' LIMIT 1`,
+        [providerId, dayStr]
+      );
+      if (booked.rows.length) {
+        errors.push({ date: dayStr, error: "DAY_HAS_BOOKING" });
+        continue;
+      }
+      await client.query(
+        `DELETE FROM provider_availability
+         WHERE serviceproviderid = $1 AND date = $2::date
+           AND engagement_id IS NULL
+           AND UPPER(TRIM(COALESCE(status,''))) = 'UNAVAILABLE'`,
+        [providerId, dayStr]
+      );
+      const dayStart = dtest.startOf("day").unix();
+      const dayEnd = dtest.endOf("day").unix();
+      const ins = await client.query(
+        `INSERT INTO provider_availability
+          (serviceproviderid, engagement_id, date, slot_start_epoch, slot_end_epoch, status, created_at, updated_at)
+         VALUES ($1, NULL, $2::date, $3, $4, 'UNAVAILABLE', NOW(), NOW())
+         RETURNING id, date`,
+        [providerId, dayStr, dayStart, dayEnd]
+      );
+      created.push({
+        id: ins.rows[0].id,
+        date: normalizeDate(ins.rows[0].date),
+      });
+    }
+    await client.query("COMMIT");
+    return res.status(201).json({ success: true, created, errors: errors.length ? errors : undefined });
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_e) {
+      // ignore
+    }
+    console.error("Error creating availability block:", e);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete("/:providerId/availability/blocks/:blockId", async (req, res) => {
+  const { providerId, blockId } = req.params;
+  try {
+    const del = await pool.query(
+      `DELETE FROM provider_availability
+       WHERE id = $1
+         AND serviceproviderid = $2
+         AND engagement_id IS NULL
+         AND UPPER(TRIM(COALESCE(status,''))) = 'UNAVAILABLE'
+       RETURNING id`,
+      [blockId, providerId]
+    );
+    if (del.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "Block not found" });
+    }
+    return res.json({ success: true, deleted: blockId });
+  } catch (err) {
+    console.error("Error deleting availability block:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
 
 export default router;
