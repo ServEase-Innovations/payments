@@ -27,6 +27,8 @@ import {
 } from "./src/monitoring/prometheus.js";
 import { logger } from "./src/utils/logger.js";
 import { getPaymentsOpenApiServerUrl } from "./src/utils/swaggerServerUrl.js";
+import inAppNotificationsRouter from "./src/routes/inAppNotifications.js";
+import { setSocketServer } from "./src/utils/socketIoRef.js";
 
 const app = express();
 
@@ -57,6 +59,7 @@ const io = new Server(server, {
     credentials: true
   }
 });
+setSocketServer(io);
 
 // Middleware: Make io available in routes
 app.use((req, res, next) => {
@@ -67,6 +70,9 @@ app.use((req, res, next) => {
 // ✅ Middleware to parse JSON requests
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// In-app notification REST (list / read) — use query: recipientType + recipientId
+app.use("/api", inAppNotificationsRouter);
 
 // ✅ Initialize DB
 initDB();
@@ -154,10 +160,20 @@ io.on("connection", (socket) => {
   socketIoConnectionsTotal.inc();
   console.log("🔌 Client connected");
 
-  socket.on("join", ({ providerId }) => {
-    if (providerId) {
-      socket.join(`provider_${providerId}`);
-      console.log(`✅ Provider ${providerId} joined provider_${providerId}`);
+  socket.on("join", ({ providerId, customerId }) => {
+    if (providerId != null && String(providerId).length > 0) {
+      const p = Number(providerId);
+      if (Number.isFinite(p)) {
+        socket.join(`provider_${p}`);
+        console.log(`✅ Provider ${p} joined provider_${p}`);
+      }
+    }
+    if (customerId != null && String(customerId).length > 0) {
+      const c = Number(customerId);
+      if (Number.isFinite(c)) {
+        socket.join(`customer_${c}`);
+        console.log(`✅ Customer ${c} joined customer_${c}`);
+      }
     }
   });
 

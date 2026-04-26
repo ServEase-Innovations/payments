@@ -2,6 +2,7 @@ import express from "express";
 const router = express.Router();
 import pool from "../config/db.js";
 import twilio from "twilio";
+import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
 
 const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
@@ -17,7 +18,11 @@ router.post("/service-days/:id/start", async (req, res) => {
     await client.query("BEGIN");
 
     const sd = await client.query(
-      `SELECT * FROM service_days WHERE service_day_id=$1 FOR UPDATE`,
+      `SELECT sd.*, e.customerid, e.engagement_id, e.service_type
+       FROM service_days sd
+       JOIN engagements e ON e.engagement_id = sd.engagement_id
+       WHERE sd.service_day_id = $1
+       FOR UPDATE OF sd`,
       [id]
     );
 
@@ -35,7 +40,27 @@ router.post("/service-days/:id/start", async (req, res) => {
     );
 
     await client.query("COMMIT");
-    res.json({ message: "Service started" });
+
+    const row0 = sd.rows[0];
+    try {
+      await createInAppNotification({
+        io: req.io,
+        recipientType: "customer",
+        recipientId: row0.customerid,
+        type: InAppTypes.SERVICE_DAY_STARTED,
+        title: "Today’s service has started",
+        body: `The provider has started the visit for engagement #${row0.engagement_id}.`,
+        engagementId: row0.engagement_id,
+        metadata: {
+          service_type: row0.service_type,
+          service_day_id: id,
+        },
+      });
+    } catch (eNotif) {
+      console.error("in-app (service day start) failed", eNotif);
+    }
+
+    return res.json({ message: "Service started" });
   } catch (err) {
     await client.query("ROLLBACK");
     res.status(500).json({ error: err.message });
@@ -169,7 +194,9 @@ router.post("/service-days/:id/complete", async (req, res) => {
         sd.service_day_id,
         sd.engagement_id,
         sd.status,
+        e.customerid,
         e.serviceproviderid,
+        e.service_type,
         e.base_amount,
         e.start_date,
         e.end_date
@@ -260,6 +287,21 @@ router.post("/service-days/:id/complete", async (req, res) => {
     );
 
     await client.query("COMMIT");
+
+    try {
+      await createInAppNotification({
+        io: req.io,
+        recipientType: "customer",
+        recipientId: sd.customerid,
+        type: InAppTypes.SERVICE_DAY_COMPLETED,
+        title: "Service visit completed",
+        body: `Your visit for engagement #${sd.engagement_id} is marked complete.`,
+        engagementId: sd.engagement_id,
+        metadata: { service_type: sd.service_type, service_day_id: serviceDayId },
+      });
+    } catch (eNotif) {
+      console.error("in-app (service day complete) failed", eNotif);
+    }
 
     return res.json({
       success: true,

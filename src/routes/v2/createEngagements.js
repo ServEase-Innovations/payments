@@ -10,6 +10,7 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
+import { createInAppNotification, InAppTypes } from "../../services/inAppNotification.service.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -414,8 +415,8 @@ router.post("/", async (req, res) => {
           AND longitude IS NOT NULL
       `);
 
-      providers.rows.forEach((p) => {
-        if (p.latitude == null || p.longitude == null) return;
+      for (const p of providers.rows) {
+        if (p.latitude == null || p.longitude == null) continue;
 
         const distance = geolib.getDistance(
           { latitude: Number(latitude), longitude: Number(longitude) },
@@ -423,17 +424,32 @@ router.post("/", async (req, res) => {
         );
 
         if (distance <= 5000) {
-          req.io.to(`provider_${p.serviceproviderid}`)
-            .emit("new-engagement", {
-              engagement_id: engagement.engagement_id,
-              service_type,
-              start_date,
-              start_time,
-              duration_minutes: durationMinutes,
-              base_amount,
+          req.io.to(`provider_${p.serviceproviderid}`).emit("new-engagement", {
+            engagement_id: engagement.engagement_id,
+            service_type,
+            start_date,
+            start_time,
+            duration_minutes: durationMinutes,
+            base_amount,
+          });
+          try {
+            /* eslint-disable no-await-in-loop */
+            await createInAppNotification({
+              io: req.io,
+              recipientType: "provider",
+              recipientId: p.serviceproviderid,
+              type: InAppTypes.NEW_BOOKING_REQUEST,
+              title: "New booking (awaiting payment)",
+              body: `${service_type} — ${start_date} ${start_time} · ₹${base_amount}`,
+              engagementId: engagement.engagement_id,
+              metadata: { service_type, start_date, start_time, base_amount },
             });
+            /* eslint-enable no-await-in-loop */
+          } catch (e) {
+            console.error("in-app notification (create engagement) failed", e);
+          }
         }
-      });
+      }
     }
 
     return res.status(201).json({

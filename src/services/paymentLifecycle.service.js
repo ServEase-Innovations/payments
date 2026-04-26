@@ -1,6 +1,8 @@
 import pool from "../config/db.js";
 import geolib from "geolib";
 import { transitionEngagement } from "./engagementLifecycle.js";
+import { createInAppNotification, InAppTypes } from "./inAppNotification.service.js";
+import { getSocketServer } from "../utils/socketIoRef.js";
 
 export async function handlePaymentSuccess({
   engagementId,
@@ -94,8 +96,9 @@ export async function handlePaymentSuccess({
   // AFTER COMMIT → Dispatch for ON_DEMAND
   // =================================================
 
+  const socketServer = io != null ? io : getSocketServer();
   console.log(`Payment successful for engagement ${engagementId}.` , io);
-  if (engagement.booking_type === "ON_DEMAND" && io) {
+  if (engagement.booking_type === "ON_DEMAND" && socketServer) {
 
 
     console.log("==== DISPATCH DEBUG ====");
@@ -131,15 +134,15 @@ console.log("========================");
       if (distance <= 5000) {
         const room = `provider_${p.serviceproviderid}`;
 
-const clients = io.sockets.adapter.rooms.get(room);
+        const clients = socketServer.sockets.adapter.rooms.get(room);
 
-console.log(
-  `📡 Broadcasting engagement ${engagement.engagement_id} → ${room}`,
-  "| connections:",
-  clients ? clients.size : 0
-);
+        console.log(
+          `📡 Broadcasting engagement ${engagement.engagement_id} → ${room}`,
+          "| connections:",
+          clients ? clients.size : 0
+        );
 
-        io.to(room).emit("new-engagement-request", {
+        socketServer.to(room).emit("new-engagement-request", {
           engagement_id: engagement.engagement_id,
           service_type: engagement.service_type,
           booking_type: engagement.booking_type,
@@ -148,6 +151,26 @@ console.log(
           duration_minutes: engagement.duration_minutes,
           base_amount: engagement.base_amount,
         });
+        /* eslint-disable no-await-in-loop */
+        try {
+          await createInAppNotification({
+            io: socketServer,
+            recipientType: "provider",
+            recipientId: p.serviceproviderid,
+            type: InAppTypes.NEW_BOOKING_OPPORTUNITY,
+            title: "New booking request nearby",
+            body: `${engagement.service_type} — start ${engagement.start_date} · ₹${engagement.base_amount}`,
+            engagementId: engagement.engagement_id,
+            metadata: {
+              service_type: engagement.service_type,
+              start_date: engagement.start_date,
+              base_amount: engagement.base_amount,
+            },
+          });
+        } catch (e) {
+          console.error("in-app notification (payment success) failed", e);
+        }
+        /* eslint-enable no-await-in-loop */
       }
     }
   }

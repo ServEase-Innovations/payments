@@ -7,8 +7,8 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
-import { io } from "../../../index.js";
 import { createServiceDays } from "../serviceDays.service.js";
+import { createInAppNotification, InAppTypes } from "../../services/inAppNotification.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -261,6 +261,21 @@ router.post("/:id/accept", async (req, res) => {
 
     await client.query("COMMIT");
 
+    try {
+      await createInAppNotification({
+        io: req.io,
+        recipientType: "customer",
+        recipientId: e.customerid,
+        type: InAppTypes.BOOKING_ACCEPTED,
+        title: "A provider accepted your booking",
+        body: `Engagement #${id} is confirmed for ${e.service_type || "your service"}.`,
+        engagementId: Number(id),
+        metadata: { service_type: e.service_type },
+      });
+    } catch (eNotif) {
+      console.error("in-app (accept) failed", eNotif);
+    }
+
     const updated = (
       await pool.query(
         `SELECT * FROM engagements WHERE engagement_id=$1`,
@@ -374,11 +389,24 @@ router.post("/:id/accept", async (req, res) => {
     await client.query("COMMIT");
 
     // 🔔 Notify customer
-    req.io.to(`customer_${engagement.customerid}`)
-      .emit("engagement-accepted", {
-        engagement_id: engagementId,
-        serviceproviderid
+    req.io.to(`customer_${engagement.customerid}`).emit("engagement-accepted", {
+      engagement_id: engagementId,
+      serviceproviderid
+    });
+    try {
+      await createInAppNotification({
+        io: req.io,
+        recipientType: "customer",
+        recipientId: engagement.customerid,
+        type: InAppTypes.BOOKING_ACCEPTED,
+        title: "A provider accepted your booking",
+        body: `Engagement #${engagementId} is confirmed for ${engagement.service_type || "your service"}.`,
+        engagementId: Number(engagementId),
+        metadata: { service_type: engagement.service_type, serviceproviderid },
       });
+    } catch (eNotif) {
+      console.error("in-app (accept on-demand) failed", eNotif);
+    }
 
     return res.json({
       success: true,
