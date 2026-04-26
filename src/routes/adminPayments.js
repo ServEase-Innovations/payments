@@ -51,8 +51,8 @@ router.get("/payments", async (req , res ) => {
         e.service_type,
         c.firstname AS customer_firstname,
         c.lastname AS customer_lastname,
-        sp.firstname AS provider_firstname,
-        sp.lastname AS provider_lastname
+        sp."firstName" AS provider_firstname,
+        sp."lastName" AS provider_lastname
       FROM payments p
       JOIN engagements e ON e.engagement_id = p.engagement_id
       JOIN customer c ON c.customerid = e.customerid
@@ -123,8 +123,8 @@ router.get("/payments/:paymentId", async (req, res) => {
         c.firstname AS customer_firstname,
         c.lastname AS customer_lastname,
         c.mobileno,
-        sp.firstname AS provider_firstname,
-        sp.lastname AS provider_lastname
+        sp."firstName" AS provider_firstname,
+        sp."lastName" AS provider_lastname
       FROM payments p
       JOIN engagements e ON e.engagement_id = p.engagement_id
       JOIN customer c ON c.customerid = e.customerid
@@ -279,15 +279,18 @@ router.get("/engagements", async (req, res) => {
       booking_type,
       service_type,
       assignment_status,
+      task_status,
       active,
       from,
       to,
-      limit = 20,
+      limit = 200,
       offset = 0,
     } = req.query;
 
     const params = [];
     let where = "WHERE 1=1";
+    const lim = Math.min(Math.max(Number.parseInt(String(limit), 10) || 200, 1), 2000);
+    const off = Math.max(Number.parseInt(String(offset), 10) || 0, 0);
 
     // Filters
     if (booking_type) {
@@ -305,6 +308,11 @@ router.get("/engagements", async (req, res) => {
       where += ` AND e.assignment_status = $${params.length}`;
     }
 
+    if (task_status) {
+      params.push(task_status);
+      where += ` AND e.task_status = $${params.length}`;
+    }
+
     if (active !== undefined) {
       params.push(active === "true");
       where += ` AND e.active = $${params.length}`;
@@ -320,7 +328,7 @@ router.get("/engagements", async (req, res) => {
       where += ` AND e.end_date <= $${params.length}`;
     }
 
-    // Main query
+    // Main query — one row per engagement (latest payment only, avoids duplicate joins)
     const query = `
       SELECT
         e.engagement_id,
@@ -342,12 +350,11 @@ router.get("/engagements", async (req, res) => {
         c.lastname AS customer_lastname,
         c.mobileno AS customer_mobile,
 
-        -- Provider
+        -- Provider (Sequelize column names; quoted in PostgreSQL)
         sp.serviceproviderid,
-        sp.firstname AS provider_firstname,
-        sp.lastname AS provider_lastname,
+        sp."firstName" AS provider_firstname,
+        sp."lastName" AS provider_lastname,
 
-        -- Payment
         p.status AS payment_status,
         p.total_amount,
         p.payment_mode
@@ -355,12 +362,21 @@ router.get("/engagements", async (req, res) => {
       FROM engagements e
       JOIN customer c ON c.customerid = e.customerid
       LEFT JOIN serviceprovider sp ON sp.serviceproviderid = e.serviceproviderid
-      LEFT JOIN payments p ON p.engagement_id = e.engagement_id
+      LEFT JOIN LATERAL (
+        SELECT
+          p2.status,
+          p2.total_amount,
+          p2.payment_mode
+        FROM payments p2
+        WHERE p2.engagement_id = e.engagement_id
+        ORDER BY p2.created_at DESC NULLS LAST
+        LIMIT 1
+      ) p ON true
 
       ${where}
       ORDER BY e.created_at DESC
-      LIMIT ${limit}
-      OFFSET ${offset}
+      LIMIT ${lim}
+      OFFSET ${off}
     `;
 
     const { rows } = await pool.query(query, params);
@@ -374,6 +390,8 @@ router.get("/engagements", async (req, res) => {
     return res.json({
       success: true,
       count: Number(countRes.rows[0].count),
+      limit: lim,
+      offset: off,
       engagements: rows.map((r) => ({
         engagement_id: r.engagement_id,
         booking_type: r.booking_type,
@@ -381,8 +399,10 @@ router.get("/engagements", async (req, res) => {
         assignment_status: r.assignment_status,
         task_status: r.task_status,
         active: r.active,
-        start_date: r.start_date,
-        end_date: r.end_date,
+        start_date: r.start_date
+          ? new Date(r.start_date).toISOString().slice(0, 10)
+          : null,
+        end_date: r.end_date ? new Date(r.end_date).toISOString().slice(0, 10) : null,
         start_time: r.start_epoch
           ? new Date(r.start_epoch * 1000).toISOString().slice(11, 16)
           : null,
