@@ -7,8 +7,8 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
-import { io } from "../../index.js";
 import { createServiceDays } from "../routes/serviceDays.service.js";
+import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
 import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
 
 
@@ -1088,6 +1088,28 @@ router.post("/:id/accept", async (req, res) => {
     );
 
     await client.query("COMMIT");
+
+    // Notify customer (V1 path — same as v2/engagements accept; UI uses /api/engagements/:id/accept)
+    try {
+      if (req.io) {
+        req.io.to(`customer_${e.customerid}`).emit("engagement-accepted", {
+          engagement_id: id,
+          serviceproviderid: Number(serviceproviderid),
+        });
+      }
+      await createInAppNotification({
+        io: req.io,
+        recipientType: "customer",
+        recipientId: e.customerid,
+        type: InAppTypes.BOOKING_ACCEPTED,
+        title: "A provider accepted your booking",
+        body: `Engagement #${id} is confirmed for ${e.service_type || "your service"}.`,
+        engagementId: Number(id),
+        metadata: { service_type: e.service_type, serviceproviderid },
+      });
+    } catch (eNotif) {
+      console.error("in-app (V1 /api/engagements/:id/accept) failed", eNotif);
+    }
 
     // 6️⃣ Return normalized response
     const updated = (

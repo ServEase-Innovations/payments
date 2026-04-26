@@ -1,0 +1,5 @@
+{
+  "ext": "js,json,sql,yml,yaml",
+  "ignore": ["node_modules", "logs", "coverage", "*.log"],
+  "delay": 200
+}

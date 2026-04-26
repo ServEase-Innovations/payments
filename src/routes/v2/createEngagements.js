@@ -10,7 +10,6 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
-import { createInAppNotification, InAppTypes } from "../../services/inAppNotification.service.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -432,22 +431,6 @@ router.post("/", async (req, res) => {
             duration_minutes: durationMinutes,
             base_amount,
           });
-          try {
-            /* eslint-disable no-await-in-loop */
-            await createInAppNotification({
-              io: req.io,
-              recipientType: "provider",
-              recipientId: p.serviceproviderid,
-              type: InAppTypes.NEW_BOOKING_REQUEST,
-              title: "New booking (awaiting payment)",
-              body: `${service_type} — ${start_date} ${start_time} · ₹${base_amount}`,
-              engagementId: engagement.engagement_id,
-              metadata: { service_type, start_date, start_time, base_amount },
-            });
-            /* eslint-enable no-await-in-loop */
-          } catch (e) {
-            console.error("in-app notification (create engagement) failed", e);
-          }
         }
       }
     }
