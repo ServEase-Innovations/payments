@@ -10,16 +10,6 @@ async function initDB() {
   // Correct path: src/db/schema.sql
   const schemaPath = path.join(__dirname, "db", "schema.sql");
 
-  try {
-    console.log("📁 Loading schema from:", schemaPath);
-    const schemaSQL = fs.readFileSync(schemaPath, "utf8");
-    console.log("⏳ Applying database schema...");
-    await pool.query(schemaSQL);
-    console.log("✅ Database schema applied successfully!");
-  } catch (err) {
-    console.error("❌ Error applying database schema:", err);
-  }
-
   // Some environments never pick up the tail of `schema.sql` (transaction/ordering).
   // This idempotent pass guarantees `in_app_notifications` exists when the app starts.
   try {
