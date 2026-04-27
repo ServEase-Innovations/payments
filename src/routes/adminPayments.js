@@ -13,18 +13,24 @@ router.get("/payments/summary", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT
-        COUNT(*) AS total_transactions,
-        SUM(total_amount) AS total_collected,
-        SUM(platform_fee) AS platform_fee,
-        SUM(gst) AS gst,
-        SUM(platform_fee - gst) AS net_revenue
+        COUNT(*) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS')::bigint AS success_count,
+        COUNT(*) FILTER (WHERE UPPER(COALESCE(status, '')) = 'FAILED')::bigint AS failed_count,
+        COUNT(*) FILTER (WHERE UPPER(COALESCE(status, '')) NOT IN ('SUCCESS', 'FAILED'))::bigint AS open_count,
+        COUNT(*)::bigint AS total_all,
+        COALESCE(SUM(total_amount) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'), 0) AS total_collected,
+        COALESCE(SUM(platform_fee) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'), 0) AS platform_fee,
+        COALESCE(SUM(gst) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'), 0) AS gst,
+        COALESCE(SUM((platform_fee - gst)) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'), 0) AS net_revenue
       FROM payments
-      WHERE status = 'SUCCESS'
     `);
+
+    const row = result.rows[0] || {};
+    // Backward-compatible alias: successful tx count (same as old "total_transactions" for SUCCESS-only list)
+    row.total_transactions = row.success_count;
 
     res.json({
       success: true,
-      summary: result.rows[0],
+      summary: row,
     });
   } catch (err) {
     console.error("Payment summary error:", err);
@@ -32,19 +38,54 @@ router.get("/payments/summary", async (req, res) => {
   }
 });
 
-router.get("/payments", async (req , res ) => {
-  try {
-    const {
-      status,
-      payment_mode,
-      from,
-      to,
-      engagement_id,
-      limit = 20,
-      offset = 0,
-    } = req.query;
+const paymentsListFrom = `
+  FROM payments p
+  JOIN engagements e ON e.engagement_id = p.engagement_id
+  JOIN customer c ON c.customerid = e.customerid
+  LEFT JOIN serviceprovider sp ON sp.serviceproviderid = e.serviceproviderid
+`;
 
-    let query = `
+function buildAdminPaymentsFilters(query, startIdx) {
+  const { status, payment_mode, from, to, engagement_id } = query;
+  let where = " WHERE 1=1";
+  const params = [];
+  let idx = startIdx;
+
+  if (status) {
+    where += ` AND p.status = $${idx++}`;
+    params.push(status);
+  }
+  if (payment_mode) {
+    where += ` AND p.payment_mode = $${idx++}`;
+    params.push(payment_mode);
+  }
+  if (engagement_id) {
+    where += ` AND p.engagement_id = $${idx++}`;
+    params.push(engagement_id);
+  }
+  if (from) {
+    where += ` AND p.created_at >= $${idx++}`;
+    params.push(from);
+  }
+  if (to) {
+    where += ` AND p.created_at <= $${idx++}`;
+    params.push(to);
+  }
+  return { where, params, nextIdx: idx };
+}
+
+router.get("/payments", async (req, res) => {
+  try {
+    const { limit = 20, offset = 0 } = req.query;
+    const lim = Math.min(Math.max(Number.parseInt(String(limit), 10) || 20, 1), 200);
+    const off = Math.max(Number.parseInt(String(offset), 10) || 0, 0);
+
+    const { where, params, nextIdx } = buildAdminPaymentsFilters(req.query, 1);
+    const countQ = `SELECT COUNT(*)::bigint AS total ${paymentsListFrom} ${where}`;
+    const countRes = await pool.query(countQ, params);
+    const total = Number(countRes.rows[0]?.total) || 0;
+
+    const listQ = `
       SELECT
         p.*,
         e.booking_type,
@@ -53,52 +94,20 @@ router.get("/payments", async (req , res ) => {
         c.lastname AS customer_lastname,
         sp."firstName" AS provider_firstname,
         sp."lastName" AS provider_lastname
-      FROM payments p
-      JOIN engagements e ON e.engagement_id = p.engagement_id
-      JOIN customer c ON c.customerid = e.customerid
-      LEFT JOIN serviceprovider sp ON sp.serviceproviderid = e.serviceproviderid
-      WHERE 1=1
-    `;
-
-    const params = [];
-    let idx = 1;
-
-    if (status) {
-      query += ` AND p.status = $${idx++}`;
-      params.push(status);
-    }
-
-    if (payment_mode) {
-      query += ` AND p.payment_mode = $${idx++}`;
-      params.push(payment_mode);
-    }
-
-    if (engagement_id) {
-      query += ` AND p.engagement_id = $${idx++}`;
-      params.push(engagement_id);
-    }
-
-    if (from) {
-      query += ` AND p.created_at >= $${idx++}`;
-      params.push(from);
-    }
-
-    if (to) {
-      query += ` AND p.created_at <= $${idx++}`;
-      params.push(to);
-    }
-
-    query += `
+      ${paymentsListFrom}
+      ${where}
       ORDER BY p.created_at DESC
-      LIMIT $${idx++} OFFSET $${idx}
+      LIMIT $${nextIdx} OFFSET $${nextIdx + 1}
     `;
-    params.push(limit, offset);
-
-    const result = await pool.query(query, params);
+    const listParams = [...params, lim, off];
+    const result = await pool.query(listQ, listParams);
 
     res.json({
       success: true,
+      total,
       count: result.rows.length,
+      limit: lim,
+      offset: off,
       payments: result.rows,
     });
   } catch (err) {
