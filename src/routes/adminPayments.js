@@ -222,6 +222,17 @@ router.get("/ledger", async (req, res) => {
     const ledgerParams = [...params, Number(limit), Number(offset)];
     const { rows } = await pool.query(ledgerQuery, ledgerParams);
 
+    // Total row count (same filter scope, for admin UI pagination)
+    const countQuery = `
+      SELECT COUNT(*)::bigint AS c FROM (
+        ${paymentsQuery}
+        UNION ALL
+        ${payoutsQuery}
+      ) t
+    `;
+    const { rows: countRows } = await pool.query(countQuery, params);
+    const total = Math.max(0, Number(countRows[0]?.c || 0));
+
     // ---- 4️⃣ Running balance (page-level) ----
     let balance = 0;
     const ledger = rows
@@ -273,6 +284,7 @@ router.get("/ledger", async (req, res) => {
       summary: summaryRes.rows[0],
       ledger,
       count: ledger.length,
+      total,
     });
 
   } catch (err) {
