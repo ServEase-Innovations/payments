@@ -99,22 +99,23 @@ export async function handlePaymentSuccess({
   }
 
   // =================================================
-  // AFTER COMMIT → Dispatch for ON_DEMAND
+  // AFTER COMMIT → realtime + in-app notifications
   // =================================================
 
   const socketServer = io != null ? io : getSocketServer();
-  console.log(`Payment successful for engagement ${engagementId}.` , io);
+  console.log(`Payment successful for engagement ${engagementId}.`, io);
+
   if (engagement.booking_type === "ON_DEMAND" && socketServer) {
-
-
     console.log("==== DISPATCH DEBUG ====");
-console.log("booking_type:", engagement.booking_type);
-console.log("io defined?", !!io);
-console.log("latitude:", engagement.latitude);
-console.log("longitude:", engagement.longitude);
-console.log("========================");
+    console.log("booking_type:", engagement.booking_type);
+    console.log("io defined?", !!io);
+    console.log("latitude:", engagement.latitude);
+    console.log("longitude:", engagement.longitude);
+    console.log("========================");
 
-    console.log(`Payment successful for ON_DEMAND engagement ${engagementId}. Checking for nearby providers...`);
+    console.log(
+      `Payment successful for ON_DEMAND engagement ${engagementId}. Checking for nearby providers...`
+    );
 
     if (!engagement.latitude || !engagement.longitude) {
       return { success: true };
@@ -128,8 +129,9 @@ console.log("========================");
         AND longitude IS NOT NULL
     `);
 
-
-    console.log(`Broadcasting new ON_DEMAND engagement ${engagement.engagement_id} to nearby providers...`);
+    console.log(
+      `Broadcasting new ON_DEMAND engagement ${engagement.engagement_id} to nearby providers...`
+    );
 
     for (const p of providers.rows) {
       const distance = geolib.getDistance(
@@ -150,11 +152,16 @@ console.log("========================");
 
         const distanceKm = Math.round((distance / 1000) * 10) / 10;
         const startTimeLabel = engagement.start_epoch
-          ? dayjs.unix(Number(engagement.start_epoch)).tz("Asia/Kolkata").format("D MMM YYYY, h:mm a")
+          ? dayjs
+              .unix(Number(engagement.start_epoch))
+              .tz("Asia/Kolkata")
+              .format("D MMM YYYY, h:mm a")
           : engagement.start_date
             ? String(engagement.start_date)
             : "";
-        const addressLine = engagement.address ? String(engagement.address).trim() : "";
+        const addressLine = engagement.address
+          ? String(engagement.address).trim()
+          : "";
 
         socketServer.to(room).emit("new-engagement-request", {
           engagement_id: engagement.engagement_id,
@@ -203,6 +210,85 @@ console.log("========================");
           console.error("in-app notification (payment success) failed", e);
         }
         /* eslint-enable no-await-in-loop */
+      }
+    }
+  } else if (
+    (engagement.booking_type === "SHORT_TERM" ||
+      engagement.booking_type === "MONTHLY") &&
+    engagement.serviceproviderid &&
+    socketServer
+  ) {
+    const spid = Number(engagement.serviceproviderid);
+    if (Number.isFinite(spid) && spid > 0) {
+      const room = `provider_${spid}`;
+      const startTimeLabel = engagement.start_epoch
+        ? dayjs
+            .unix(Number(engagement.start_epoch))
+            .tz("Asia/Kolkata")
+            .format("D MMM YYYY, h:mm a")
+        : engagement.start_date
+          ? String(engagement.start_date)
+          : "";
+      const endDateLabel = engagement.end_date
+        ? String(engagement.end_date)
+        : "";
+      const addressLine = engagement.address
+        ? String(engagement.address).trim()
+        : "";
+      const amountLabel =
+        engagement.base_amount != null && engagement.base_amount !== ""
+          ? `₹${engagement.base_amount}`
+          : null;
+      const summaryParts = [
+        engagement.service_type,
+        engagement.booking_type,
+        startTimeLabel ? `Starts ${startTimeLabel}` : null,
+        endDateLabel ? `Ends ${endDateLabel}` : null,
+        amountLabel,
+      ].filter(Boolean);
+      const bodyText = summaryParts.join(" · ");
+
+      socketServer.to(room).emit("new-engagement-request", {
+        engagement_id: engagement.engagement_id,
+        service_type: engagement.service_type,
+        booking_type: engagement.booking_type,
+        start_date: engagement.start_date,
+        end_date: engagement.end_date,
+        start_epoch: engagement.start_epoch,
+        end_epoch: engagement.end_epoch,
+        duration_minutes: engagement.duration_minutes,
+        base_amount: engagement.base_amount,
+        address: addressLine || null,
+        payment_completed: true,
+      });
+
+      try {
+        await createInAppNotification({
+          io: socketServer,
+          recipientType: "provider",
+          recipientId: spid,
+          type: InAppTypes.ASSIGNED_BOOKING_CONFIRMED,
+          title: "Booking confirmed — payment received",
+          body: bodyText,
+          engagementId: engagement.engagement_id,
+          metadata: {
+            service_type: engagement.service_type,
+            booking_type: engagement.booking_type,
+            start_date: engagement.start_date,
+            end_date: engagement.end_date,
+            start_epoch: engagement.start_epoch,
+            end_epoch: engagement.end_epoch,
+            start_time_label: startTimeLabel,
+            duration_minutes: engagement.duration_minutes,
+            base_amount: engagement.base_amount,
+            address: addressLine || null,
+          },
+        });
+      } catch (e) {
+        console.error(
+          "in-app notification (assigned booking payment success) failed",
+          e
+        );
       }
     }
   }

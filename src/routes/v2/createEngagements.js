@@ -446,6 +446,31 @@ router.post("/", async (req, res) => {
           });
         }
       }
+    } else if (!isOnDemand && serviceproviderid && req.io) {
+      const spid = Number(serviceproviderid);
+      if (Number.isFinite(spid) && spid > 0) {
+        const endWall = dayjs
+          .tz(
+            `${start_date} ${start_time}`,
+            "YYYY-MM-DD HH:mm",
+            "Asia/Kolkata"
+          )
+          .add(durationMinutes, "minute");
+        const end_time_display = endWall.format("HH:mm");
+        req.io.to(`provider_${spid}`).emit("new-engagement", {
+          engagement_id: engagement.engagement_id,
+          service_type,
+          booking_type,
+          start_date,
+          end_date: effectiveEndDate,
+          start_time,
+          end_time: end_time_display,
+          duration_minutes: durationMinutes,
+          base_amount,
+          address: address || null,
+          payment_pending: true,
+        });
+      }
     }
 
     return res.status(201).json({
