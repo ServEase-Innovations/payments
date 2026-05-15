@@ -17,7 +17,7 @@ import { createHmac } from "crypto";
  * 1. **POST** `/api/v2/createEngagements` creates an `engagements` row (MONTHLY/SHORT_TERM with `serviceproviderid`) in **PAYMENT_PENDING**
  *    plus a PENDING payment and Razorpay order.
  * 2. **Payment success** (`POST /verify` or `/webhook` → `handlePaymentSuccess`) marks payment SUCCESS and calls
- *    **`transitionEngagement`** to **ASSIGNED** (non–ON_DEMAND).
+ *    **`transitionEngagement`** to **ASSIGNED** (non–ON_DEMAND). Assigned providers get in-app + socket there, not at create.
  * 3. **`transitionEngagement`** (`engagementLifecycle.js`): when new status is **ASSIGNED** and a SP is set,
  *    inserts **`provider_availability`** rows — one per calendar day from `start_date` … `end_date`, each
  *    **BOOKED** with `slot_start_epoch` / `slot_end_epoch` derived from `start_epoch` wall time + `duration_minutes`.
@@ -431,7 +431,7 @@ router.post("/", async (req, res) => {
           { latitude: Number(p.latitude), longitude: Number(p.longitude) }
         );
 
-        if (distance <= 5000) {
+        if (distance <= 5000 && req.io) {
           req.io.to(`provider_${p.serviceproviderid}`).emit("new-engagement", {
             engagement_id: engagement.engagement_id,
             service_type,
@@ -445,31 +445,6 @@ router.post("/", async (req, res) => {
             distance_meters: Math.round(distance),
           });
         }
-      }
-    } else if (!isOnDemand && serviceproviderid && req.io) {
-      const spid = Number(serviceproviderid);
-      if (Number.isFinite(spid) && spid > 0) {
-        const endWall = dayjs
-          .tz(
-            `${start_date} ${start_time}`,
-            "YYYY-MM-DD HH:mm",
-            "Asia/Kolkata"
-          )
-          .add(durationMinutes, "minute");
-        const end_time_display = endWall.format("HH:mm");
-        req.io.to(`provider_${spid}`).emit("new-engagement", {
-          engagement_id: engagement.engagement_id,
-          service_type,
-          booking_type,
-          start_date,
-          end_date: effectiveEndDate,
-          start_time,
-          end_time: end_time_display,
-          duration_minutes: durationMinutes,
-          base_amount,
-          address: address || null,
-          payment_pending: true,
-        });
       }
     }
 

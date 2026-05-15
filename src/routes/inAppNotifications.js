@@ -9,10 +9,14 @@ import {
 const router = express.Router();
 
 function parseRecipient(req) {
+  const q = req.query && typeof req.query === "object" ? req.query : {};
+  const b =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  const merged = { ...q, ...b };
   const recipientType = String(
-    req.query.recipientType || req.query.recipient_type || ""
+    merged.recipientType || merged.recipient_type || ""
   ).toLowerCase();
-  const rawId = req.query.recipientId ?? req.query.recipient_id;
+  const rawId = merged.recipientId ?? merged.recipient_id;
   const recipientId = rawId != null && rawId !== "" ? Number(rawId) : NaN;
   if (recipientType !== "customer" && recipientType !== "provider") {
     return { error: { status: 400, message: "recipientType must be customer or provider" } };

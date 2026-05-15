@@ -25,6 +25,10 @@ export default {
     password: process.env.POSTGRES_PASSWORD,
     database: process.env.POSTGRES_DB,
     port: process.env.POSTGRES_PORT || 5432,
+    poolMax: Number(process.env.POSTGRES_POOL_MAX) || 10,
+    poolIdleTimeoutMs: Number(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS) || 60_000,
+    poolConnectionTimeoutMs:
+      Number(process.env.POSTGRES_POOL_CONNECTION_TIMEOUT_MS) || 10_000,
   },
   mongo: {
     uri: process.env.MONGO_URI,

@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../config/db.js";
+import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -21,6 +22,118 @@ function normalizeDate(dateVal) {
   if (!dateVal) return null;
   return new Date(dateVal).toISOString().slice(0, 10);
 }
+
+/* -------------------------------------------------------------------------- */
+/*              TODAY'S BOOKED VISITS (IST calendar day, by start time)       */
+/* -------------------------------------------------------------------------- */
+
+router.get("/:providerId/today-bookings", async (req, res) => {
+  const pid = Number(req.params.providerId);
+  if (!Number.isFinite(pid) || pid < 1) {
+    return res.status(400).json({ success: false, error: "Invalid provider id" });
+  }
+
+  try {
+    const prov = await pool.query(
+      `SELECT 1 FROM serviceprovider WHERE serviceproviderid = $1`,
+      [pid]
+    );
+    if (prov.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "Provider not found" });
+    }
+
+    const result = await pool.query(
+      `
+      WITH today_ist AS (
+        SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date AS d
+      )
+      SELECT
+        pa.id AS availability_id,
+        pa.engagement_id,
+        pa.date::text AS visit_date,
+        pa.slot_start_epoch,
+        pa.slot_end_epoch,
+        pa.status AS availability_status,
+        e.customerid,
+        e.booking_type,
+        e.service_type,
+        e.task_status,
+        e.engagement_status,
+        e.address,
+        e.base_amount,
+        e.duration_minutes,
+        c.firstname,
+        c.lastname,
+        c.mobileno,
+        sd.service_day_id,
+        sd.status AS service_day_status
+      FROM provider_availability pa
+      CROSS JOIN today_ist t
+      JOIN engagements e ON e.engagement_id = pa.engagement_id
+      JOIN customer c ON c.customerid = e.customerid
+      LEFT JOIN LATERAL (
+        SELECT s.service_day_id, s.status
+        FROM service_days s
+        WHERE s.engagement_id = e.engagement_id
+          AND s.service_date = pa.date
+        ORDER BY s.service_day_id
+        LIMIT 1
+      ) sd ON true
+      WHERE pa.serviceproviderid = $1
+        AND pa.date = t.d
+        AND pa.status = 'BOOKED'
+        AND pa.engagement_id IS NOT NULL
+      ORDER BY pa.slot_start_epoch ASC NULLS LAST, pa.id ASC
+      `,
+      [pid]
+    );
+
+    const rows = result.rows.map((row) => {
+      const startEp = row.slot_start_epoch != null ? Number(row.slot_start_epoch) : null;
+      const endEp = row.slot_end_epoch != null ? Number(row.slot_end_epoch) : null;
+      return {
+        availability_id: Number(row.availability_id),
+        engagement_id: Number(row.engagement_id),
+        visit_date: row.visit_date,
+        slot_start_epoch: startEp,
+        slot_end_epoch: endEp,
+        start_time_ist: startEp != null ? epochToTime(startEp) : null,
+        end_time_ist: endEp != null ? epochToTime(endEp) : null,
+        availability_status: row.availability_status,
+        customerid: row.customerid != null ? Number(row.customerid) : null,
+        booking_type: row.booking_type,
+        service_type: row.service_type,
+        task_status: row.task_status,
+        engagement_status: row.engagement_status,
+        address: row.address || null,
+        base_amount:
+          row.base_amount != null ? Number(Number(row.base_amount).toFixed(2)) : null,
+        duration_minutes:
+          row.duration_minutes != null ? Number(row.duration_minutes) : null,
+        customer_firstname: row.firstname || null,
+        customer_lastname: row.lastname || null,
+        mobileno: row.mobileno || null,
+        service_day_id:
+          row.service_day_id != null ? Number(row.service_day_id) : null,
+        service_day_status: row.service_day_status || null,
+      };
+    });
+
+    const istDay = dayjs().tz("Asia/Kolkata").format("YYYY-MM-DD");
+
+    return res.json({
+      success: true,
+      serviceproviderid: String(pid),
+      date: istDay,
+      timezone: "Asia/Kolkata",
+      count: rows.length,
+      bookings: rows,
+    });
+  } catch (err) {
+    console.error("Error fetching provider today-bookings:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
 
 /* -------------------------------------------------------------------------- */
 /*                            PROVIDER PAYOUT SUMMARY                          */
@@ -232,7 +345,7 @@ router.get("/:providerId/engagements", async (req, res) => {
       SELECT service_day_id, engagement_id, status
       FROM service_days
       WHERE engagement_id = ANY($1)
-        AND service_date = CURRENT_DATE
+        AND service_date = ${PG_IST_TODAY_DATE}
       `,
       [engagementIds]
     );

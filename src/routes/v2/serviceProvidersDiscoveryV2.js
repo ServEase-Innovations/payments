@@ -12,6 +12,17 @@ dayjs.tz.setDefault("Asia/Kolkata");
 
 const router = express.Router();
 
+function languageKnownToArray(value) {
+  if (value == null || value === "") return [];
+  if (Array.isArray(value)) {
+    return value.map((s) => String(s).trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return [String(value).trim()].filter(Boolean);
+}
+
 
 function epochInIST(dateStr, timeStr) {
   return dayjs
@@ -347,6 +358,17 @@ router.post("/nearby-monthly", async (req, res) => {
 
     const roleSearchNorm = String(role).trim();
 
+    let latNum = Number(lat);
+    let lngNum = Number(lng);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
+      return res.status(400).json({
+        message: "Invalid lat/lng. Send finite numbers (e.g. customer latitude/longitude).",
+      });
+    }
+    if (Math.abs(latNum) > 90 && Math.abs(lngNum) <= 90) {
+      [latNum, lngNum] = [lngNum, latNum];
+    }
+
     const customerIdInput = customerID ?? customerId;
     const customerIdRaw =
       customerIdInput != null && customerIdInput !== ""
@@ -422,7 +444,7 @@ router.post("/nearby-monthly", async (req, res) => {
         ) <= $4
       ORDER BY distance_km ASC
       `,
-      [lat, lng, roleSearchNorm, radius]
+      [latNum, lngNum, roleSearchNorm, radius]
     );
 
     if (!providersRes.rows.length) {
@@ -996,7 +1018,9 @@ router.post("/nearby-monthly", async (req, res) => {
         rating: p.rating,
         diet: p.diet,
         cookingSpeciality: p.cookingSpeciality,
-        languageknown: p.languageknown,
+        languageKnown: languageKnownToArray(p.languageknown),
+        /** @deprecated comma-separated from DB; prefer `languageKnown` array */
+        languageknown: p.languageknown ?? null,
         locality: p.locality,
         location: p.location,
         pincode: p.pincode,
@@ -1020,6 +1044,7 @@ router.post("/nearby-monthly", async (req, res) => {
           return p.housekeepingRole ? [String(p.housekeepingRole).trim()] : [];
         })(),
         distance_km: Number(p.distance_km.toFixed(2)),
+        distanceKm: Number(p.distance_km.toFixed(2)),
         bestMatch: false,
         monthlyAvailability: {
           preferredTime: preferredStartTime,

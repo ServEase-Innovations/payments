@@ -215,8 +215,7 @@ export async function handlePaymentSuccess({
   } else if (
     (engagement.booking_type === "SHORT_TERM" ||
       engagement.booking_type === "MONTHLY") &&
-    engagement.serviceproviderid &&
-    socketServer
+    engagement.serviceproviderid
   ) {
     const spid = Number(engagement.serviceproviderid);
     if (Number.isFinite(spid) && spid > 0) {
@@ -248,19 +247,21 @@ export async function handlePaymentSuccess({
       ].filter(Boolean);
       const bodyText = summaryParts.join(" · ");
 
-      socketServer.to(room).emit("new-engagement-request", {
-        engagement_id: engagement.engagement_id,
-        service_type: engagement.service_type,
-        booking_type: engagement.booking_type,
-        start_date: engagement.start_date,
-        end_date: engagement.end_date,
-        start_epoch: engagement.start_epoch,
-        end_epoch: engagement.end_epoch,
-        duration_minutes: engagement.duration_minutes,
-        base_amount: engagement.base_amount,
-        address: addressLine || null,
-        payment_completed: true,
-      });
+      if (socketServer) {
+        socketServer.to(room).emit("new-engagement-request", {
+          engagement_id: engagement.engagement_id,
+          service_type: engagement.service_type,
+          booking_type: engagement.booking_type,
+          start_date: engagement.start_date,
+          end_date: engagement.end_date,
+          start_epoch: engagement.start_epoch,
+          end_epoch: engagement.end_epoch,
+          duration_minutes: engagement.duration_minutes,
+          base_amount: engagement.base_amount,
+          address: addressLine || null,
+          payment_completed: true,
+        });
+      }
 
       try {
         await createInAppNotification({
@@ -268,7 +269,7 @@ export async function handlePaymentSuccess({
           recipientType: "provider",
           recipientId: spid,
           type: InAppTypes.ASSIGNED_BOOKING_CONFIRMED,
-          title: "Booking confirmed — payment received",
+          title: "Booking confirmed",
           body: bodyText,
           engagementId: engagement.engagement_id,
           metadata: {

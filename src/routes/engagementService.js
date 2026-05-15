@@ -1,6 +1,7 @@
 import express from "express";
 const router = express.Router();
 import pool from "../config/db.js";
+import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import twilio from "twilio";
 import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
 
@@ -366,18 +367,47 @@ router.get(
     const client = await pool.connect();
     try {
       const { engagementId } = req.params;
+      const eid = Number(engagementId);
+      if (!Number.isFinite(eid) || eid < 1) {
+        return res.status(400).json({ success: false, error: "Invalid engagement id" });
+      }
 
-      const result = await client.query(
-        `SELECT
-           service_day_id,
-           service_date,
-           status
-         FROM service_days
-         WHERE engagement_id = $1
-           AND service_date = CURRENT_DATE
-         LIMIT 1`,
-        [engagementId]
+      const eng = await client.query(
+        `SELECT 1 FROM engagements WHERE engagement_id = $1`,
+        [eid]
       );
+      if (eng.rows.length === 0) {
+        return res.status(404).json({ success: false, error: "Engagement not found" });
+      }
+
+      const selectToday = `
+        SELECT service_day_id, service_date, status
+        FROM service_days
+        WHERE engagement_id = $1
+          AND service_date = ${PG_IST_TODAY_DATE}
+        LIMIT 1
+      `;
+
+      let result = await client.query(selectToday, [eid]);
+
+      if (result.rows.length === 0) {
+        // v2 historically created provider_availability but not service_days; repair when a BOOKED visit exists today (IST).
+        await client.query(
+          `
+          INSERT INTO service_days (engagement_id, service_date, status)
+          SELECT $1, ${PG_IST_TODAY_DATE}, 'SCHEDULED'
+          WHERE EXISTS (
+            SELECT 1 FROM provider_availability pa
+            WHERE pa.engagement_id = $1
+              AND pa.date = ${PG_IST_TODAY_DATE}
+              AND pa.status = 'BOOKED'
+          )
+          ON CONFLICT (engagement_id, service_date) DO NOTHING
+          `,
+          [eid]
+        );
+        result = await client.query(selectToday, [eid]);
+      }
 
       if (result.rows.length === 0) {
         return res.status(404).json({

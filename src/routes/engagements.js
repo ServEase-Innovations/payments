@@ -1,6 +1,7 @@
 // routes/engagements.js  (Version A — Epoch Only, combined: PUT, vacation, cancellation, payouts)
 import express from "express";
 import pool from "../config/db.js";
+import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import Razorpay from "razorpay";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
@@ -133,7 +134,7 @@ const effectiveEndDate =
 
     // 3️⃣ FK validation
     const cust = await client.query(
-      `SELECT customerid, firstName, lastName FROM customer WHERE customerid=$1`,
+      `SELECT customerid, firstname, lastname FROM customer WHERE customerid=$1`,
       [customerid]
     );
     if (cust.rows.length === 0) throw new Error("Customer not found");
@@ -418,7 +419,7 @@ router.get("/:customerId/engagements", async (req, res) => {
         completed_at
       FROM service_days
       WHERE engagement_id = ANY($1)
-        AND service_date = CURRENT_DATE
+        AND service_date = ${PG_IST_TODAY_DATE}
       `,
       [engagementIds]
     );
@@ -471,12 +472,12 @@ router.get("/:customerId/engagements", async (req, res) => {
     const providerIds = engagements.map(e => e.serviceproviderid).filter(Boolean);
     const providerRes = await pool.query(
       `SELECT
-  "serviceproviderid",
-  "firstName",
-  "lastName",
-  "rating"
-FROM "serviceprovider"
-WHERE "serviceproviderid" = ANY($1)`,
+  sp.serviceproviderid,
+  sp.firstname AS "firstName",
+  sp.lastname AS "lastName",
+  sp.rating
+FROM serviceprovider sp
+WHERE sp.serviceproviderid = ANY($1)`,
       [providerIds]
     );
 

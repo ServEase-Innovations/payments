@@ -2,6 +2,7 @@ import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
+import { createServiceDays } from "../routes/serviceDays.service.js";
 
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
@@ -135,6 +136,15 @@ export async function transitionEngagement(client, {
       );
 
       currentDate = currentDate.add(1, "day");
+    }
+
+    // service_days rows (v2 previously only created PA; start/complete visit APIs need service_days)
+    if (engagement.booking_type && engagement.booking_type !== "ON_DEMAND") {
+      const sdStart = engagementCalendarYmd(engagement.start_date);
+      const sdEnd = engagementCalendarYmd(engagement.end_date);
+      if (sdStart && sdEnd) {
+        await createServiceDays(client, engagement.engagement_id, sdStart, sdEnd);
+      }
     }
   }
 
