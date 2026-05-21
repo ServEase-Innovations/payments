@@ -70,10 +70,10 @@ export async function handlePaymentSuccess({
       [razorpay_payment_id, razorpay_order_id]
     );
 
-    // 🎯 Decide next engagement state
+    // 🎯 Decide next engagement state (align with webhook: ON_DEMAND → OPEN_FOR_ACCEPTANCE)
     let nextStatus =
       engagement.booking_type === "ON_DEMAND"
-        ? "UNASSIGNED"
+        ? "OPEN_FOR_ACCEPTANCE"
         : "ASSIGNED";
 
     // 🔁 Lifecycle transition

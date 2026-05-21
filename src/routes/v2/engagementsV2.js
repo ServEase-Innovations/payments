@@ -177,6 +177,44 @@ router.get("/:id/history", async (req, res) => {
 });
 
 
+/** ON_DEMAND: open for provider accept after customer payment (webhook or verify). */
+const ON_DEMAND_ACCEPTABLE_ENGAGEMENT_STATUSES = new Set([
+  "OPEN_FOR_ACCEPTANCE",
+  "UNASSIGNED",
+]);
+
+function validateProviderCanAccept(e) {
+  if (e.serviceproviderid) {
+    return { ok: false, status: 409, error: "Already accepted" };
+  }
+
+  const life = String(e.engagement_status || "").toUpperCase();
+  const assignment = String(e.assignment_status || "").toUpperCase();
+  const bookingType = String(e.booking_type || "").toUpperCase();
+
+  if (["CANCELLED", "EXPIRED"].includes(life)) {
+    return { ok: false, status: 409, error: "Engagement no longer available" };
+  }
+
+  if (bookingType === "ON_DEMAND") {
+    if (["PAYMENT_PENDING", "PAYMENT_FAILED"].includes(life)) {
+      return { ok: false, status: 409, error: "Payment not completed" };
+    }
+    if (!ON_DEMAND_ACCEPTABLE_ENGAGEMENT_STATUSES.has(life)) {
+      return { ok: false, status: 409, error: "Engagement no longer available" };
+    }
+    if (assignment !== "UNASSIGNED") {
+      return { ok: false, status: 409, error: "Engagement no longer available" };
+    }
+    return { ok: true };
+  }
+
+  if (assignment !== "UNASSIGNED") {
+    return { ok: false, status: 409, error: "Engagement no longer available" };
+  }
+  return { ok: true };
+}
+
 router.post("/:id/accept", async (req, res) => {
   const client = await pool.connect();
 
@@ -205,19 +243,10 @@ router.post("/:id/accept", async (req, res) => {
 
     const e = engRes.rows[0];
 
-    // 🔥 Correct status check
-    if (e.engagement_status !== "UNASSIGNED") {
+    const acceptCheck = validateProviderCanAccept(e);
+    if (!acceptCheck.ok) {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        error: "Engagement no longer available",
-      });
-    }
-
-    if (e.serviceproviderid) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({
-        error: "Already accepted",
-      });
+      return res.status(acceptCheck.status).json({ error: acceptCheck.error });
     }
 
     if (!e.start_epoch || !e.end_epoch) {
@@ -293,6 +322,13 @@ router.post("/:id/accept", async (req, res) => {
       )
     ).rows[0];
 
+    if (req.io) {
+      req.io.to(`customer_${e.customerid}`).emit("engagement-accepted", {
+        engagement_id: id,
+        serviceproviderid: Number(providerId),
+      });
+    }
+
     return res.json({
       message: "Engagement accepted successfully",
       engagement: updated,
@@ -302,137 +338,6 @@ router.post("/:id/accept", async (req, res) => {
     await client.query("ROLLBACK");
     console.error("Accept engagement error:", err);
     return res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-
-router.post("/:id/accept", async (req, res) => {
-  const client = await pool.connect();
-
-  try {
-    const engagementId = req.params.id;
-    const { serviceproviderid } = req.body;
-
-    if (!serviceproviderid) {
-      return res.status(400).json({ error: "Provider ID required" });
-    }
-
-    await client.query("BEGIN");
-
-    // 🔒 Lock engagement row
-    const engagementRes = await client.query(
-      `SELECT * FROM engagements
-       WHERE engagement_id=$1
-       FOR UPDATE`,
-      [engagementId]
-    );
-
-    if (!engagementRes.rows.length) {
-      throw new Error("Engagement not found");
-    }
-
-    const engagement = engagementRes.rows[0];
-
-    // 🛑 Must be ON_DEMAND
-    if (engagement.booking_type !== "ON_DEMAND") {
-      throw new Error("Only ON_DEMAND can be accepted");
-    }
-
-    // 🛑 Already assigned?
-    if (engagement.serviceproviderid) {
-      throw new Error("Engagement already accepted");
-    }
-
-    // 🛑 Payment must be successful
-    if (engagement.engagement_status !== "PAYMENT_SUCCESS") {
-      throw new Error("Payment not completed");
-    }
-
-    // 🛑 Expired?
-    if (engagement.engagement_status === "EXPIRED") {
-      throw new Error("Engagement expired");
-    }
-
-    // 🔍 Overlap check
-    const overlap = await client.query(
-      `
-      SELECT 1
-      FROM provider_availability
-      WHERE serviceproviderid=$1
-        AND $2 < slot_end_epoch
-        AND $3 > slot_start_epoch
-      LIMIT 1
-      `,
-      [
-        serviceproviderid,
-        engagement.start_epoch,
-        engagement.end_epoch
-      ]
-    );
-
-    if (overlap.rows.length) {
-      throw new Error("Provider not available at this time");
-    }
-
-    // ✅ Assign provider
-    await client.query(
-      `
-      UPDATE engagements
-      SET serviceproviderid=$1,
-          assignment_status='ASSIGNED'
-      WHERE engagement_id=$2
-      `,
-      [serviceproviderid, engagementId]
-    );
-
-    // 🔁 Lifecycle → ASSIGNED (will block availability)
-    await transitionEngagement(client, {
-      engagementId,
-      newStatus: "ASSIGNED",
-      eventType: "PROVIDER_ACCEPTED",
-      actorType: "PROVIDER",
-      actorId: serviceproviderid,
-    });
-
-    await client.query("COMMIT");
-
-    // 🔔 Notify customer
-    req.io.to(`customer_${engagement.customerid}`).emit("engagement-accepted", {
-      engagement_id: engagementId,
-      serviceproviderid
-    });
-    try {
-      await createInAppNotification({
-        io: req.io,
-        recipientType: "customer",
-        recipientId: engagement.customerid,
-        type: InAppTypes.BOOKING_ACCEPTED,
-        title: "A provider accepted your booking",
-        body: `Engagement #${engagementId} is confirmed for ${engagement.service_type || "your service"}.`,
-        engagementId: Number(engagementId),
-        metadata: { service_type: engagement.service_type, serviceproviderid },
-      });
-    } catch (eNotif) {
-      console.error("in-app (accept on-demand) failed", eNotif);
-    }
-
-    try {
-      await dismissNewBookingInAppByEngagementId(engagementId);
-    } catch (eDismiss) {
-      console.error("dismiss new-booking in-app (v2 on-demand accept) failed", eDismiss);
-    }
-
-    return res.json({
-      success: true,
-      message: "Engagement accepted"
-    });
-
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("Accept error:", err);
-    return res.status(400).json({ error: err.message });
   } finally {
     client.release();
   }
