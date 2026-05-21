@@ -27,6 +27,17 @@ async function initDB() {
   } catch (err) {
     console.error("❌ in_app_notifications migration failed:", err);
   }
+
+  try {
+    const pricingPath = path.join(__dirname, "db", "migrations", "pricing_plans.sql");
+    if (fs.existsSync(pricingPath)) {
+      const sql = fs.readFileSync(pricingPath, "utf8");
+      await pool.query(sql);
+      console.log("✅ pricing_plan / pricing_rule tables ensured");
+    }
+  } catch (err) {
+    console.error("❌ pricing_plans migration failed:", err);
+  }
 }
 
 export default initDB;

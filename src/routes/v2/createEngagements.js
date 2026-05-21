@@ -10,6 +10,7 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
+import { resolvePricingForEngagement } from "../../services/pricing/engagementPricing.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -259,6 +260,15 @@ router.post("/", async (req, res) => {
 
     await client.query("BEGIN");
 
+    let responsibilitiesPayload = responsibilities;
+    try {
+      const priced = await resolvePricingForEngagement(req.body, client);
+      if (priced) responsibilitiesPayload = priced.responsibilities;
+    } catch (pricingErr) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: pricingErr.message });
+    }
+
     // Overlap check: clip existing slots to this calendar day (IST). Rows sometimes store
     // multi-day spans from bad duration_minutes; raw epoch overlap then falsely blocks bookings.
     if (!isOnDemand && serviceproviderid) {
@@ -347,7 +357,7 @@ router.post("/", async (req, res) => {
         isOnDemand ? null : serviceproviderid,
         start_date,
         effectiveEndDate,
-        responsibilities,
+        responsibilitiesPayload,
         booking_type,
         service_type,
         base_amount,

@@ -15,6 +15,7 @@ import {
   dismissNewBookingInAppByEngagementId,
 } from "../services/inAppNotification.service.js";
 import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
+import { resolvePricingForEngagement } from "../services/pricing/engagementPricing.js";
 
 
 dayjs.extend(customParseFormat);
@@ -132,6 +133,15 @@ const effectiveEndDate =
 
     await client.query("BEGIN");
 
+    let responsibilitiesPayload = responsibilities;
+    try {
+      const priced = await resolvePricingForEngagement(req.body, client);
+      if (priced) responsibilitiesPayload = priced.responsibilities;
+    } catch (pricingErr) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: pricingErr.message });
+    }
+
     // 3️⃣ FK validation
     const cust = await client.query(
       `SELECT customerid, firstname, lastname FROM customer WHERE customerid=$1`,
@@ -205,7 +215,7 @@ const effectiveEndDate =
     providerId,
     start_date,
     effectiveEndDate,   // ✅ IMPORTANT
-    responsibilities,
+    responsibilitiesPayload,
     booking_type,
     service_type,
     base_amount,
