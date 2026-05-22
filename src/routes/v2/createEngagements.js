@@ -432,6 +432,122 @@ router.post("/", async (req, res) => {
 });
 
 /**
+ * Resume Razorpay checkout for an engagement with PENDING payment (My Bookings → Pay now).
+ * POST /api/v2/createEngagements/resume-payment
+ * Body: { engagementId: number }
+ */
+router.post("/resume-payment", async (req, res) => {
+  try {
+    const engagementId = Number(
+      req.body?.engagementId ?? req.body?.engagement_id
+    );
+
+    if (!Number.isFinite(engagementId) || engagementId < 1) {
+      return res.status(400).json({
+        success: false,
+        error: "engagementId is required",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        p.payment_id,
+        p.razorpay_order_id,
+        p.total_amount,
+        p.status AS payment_status,
+        e.engagement_id,
+        e.customerid,
+        e.booking_type,
+        e.service_type,
+        e.engagement_status,
+        c.firstname,
+        c.lastname,
+        c.mobileno,
+        c.emailid
+      FROM payments p
+      JOIN engagements e ON e.engagement_id = p.engagement_id
+      JOIN customer c ON c.customerid = e.customerid
+      WHERE p.engagement_id = $1
+      `,
+      [engagementId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Payment not found for this booking",
+      });
+    }
+
+    const row = result.rows[0];
+
+    if (row.payment_status === "SUCCESS") {
+      return res.status(400).json({
+        success: false,
+        error: "Payment already completed",
+      });
+    }
+
+    let razorpay_order_id = row.razorpay_order_id;
+    const totalInr = Number(row.total_amount);
+    if (!Number.isFinite(totalInr) || totalInr <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid payment amount on record",
+      });
+    }
+
+    if (!razorpay_order_id) {
+      const razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(totalInr * 100),
+        currency: "INR",
+        receipt: `eng_resume_${engagementId}_${Date.now()}`,
+        notes: { engagementId: String(engagementId) },
+      });
+      razorpay_order_id = razorpayOrder.id;
+      await pool.query(
+        `
+        UPDATE payments
+        SET razorpay_order_id = $1, updated_at = NOW()
+        WHERE engagement_id = $2
+        `,
+        [razorpay_order_id, engagementId]
+      );
+    }
+
+    const amountPaise = Math.round(totalInr * 100);
+
+    return res.json({
+      success: true,
+      razorpay_order_id,
+      /** Amount in paise for Razorpay Checkout `options.amount` */
+      amount: amountPaise,
+      amount_inr: totalInr,
+      currency: "INR",
+      engagementId,
+      engagement_id: engagementId,
+      booking_type: row.booking_type,
+      service_type: row.service_type,
+      engagement_status: row.engagement_status,
+      customer: {
+        customerid: row.customerid,
+        firstname: row.firstname,
+        lastname: row.lastname,
+        contact: row.mobileno,
+        email: row.emailid,
+      },
+    });
+  } catch (err) {
+    console.error("V2 resume-payment error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Internal server error",
+    });
+  }
+});
+
+/**
  * Apply vacation for a MONTHLY / SHORT_TERM engagement (same rules as PUT `/api/engagements/:id` vacation).
  * Frees SP time in `provider_availability` and credits customer wallet.
  *

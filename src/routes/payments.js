@@ -143,17 +143,23 @@ router.get("/:engagementId/resume", async (req, res) => {
       });
     }
 
+    const totalInr = Number(payment.total_amount);
+    const amountPaise = Math.round(totalInr * 100);
+
     return res.json({
       success: true,
 
       // Razorpay essentials
       razorpay_order_id: payment.razorpay_order_id,
-      amount: Number(payment.total_amount),
-      currency: "INR", // ✅ fixed
+      /** Paise for Razorpay Checkout */
+      amount: amountPaise,
+      amount_inr: totalInr,
+      currency: "INR",
 
       // Context
       payment_id: payment.payment_id,
       engagement_id: payment.engagement_id,
+      engagementId: payment.engagement_id,
       booking_type: payment.booking_type,
       service_type: payment.service_type,
       status: payment.status,
@@ -163,8 +169,9 @@ router.get("/:engagementId/resume", async (req, res) => {
         customerid: payment.customerid,
         firstname: payment.customer_firstname,
         lastname: payment.customer_lastname,
+        contact: payment.customer_mobile,
         mobile: payment.customer_mobile,
-        email: payment.customer_email,
+        email: payment.customer_emailid,
       },
     });
   } catch (err) {
