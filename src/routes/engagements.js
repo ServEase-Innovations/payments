@@ -16,6 +16,7 @@ import {
 } from "../services/inAppNotification.service.js";
 import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
 import { resolvePricingForEngagement } from "../services/pricing/engagementPricing.js";
+import { findProviderBookedConflict } from "../services/providerAvailabilityOverlap.js";
 
 
 dayjs.extend(customParseFormat);
@@ -1081,28 +1082,23 @@ router.post("/:id/accept", async (req, res) => {
       return res.status(409).json({ error: "Engagement already assigned" });
     }
 
-    if (!e.start_epoch || !e.end_epoch) {
+    if (!e.start_epoch) {
       throw new Error("Engagement start/end time missing");
     }
 
-    const duration = Number(e.end_epoch) - Number(e.start_epoch);
-
-    // 2️⃣ Provider availability check (single slot)
-    const conflict = await client.query(
-      `
-      SELECT 1
-      FROM provider_availability
-      WHERE serviceproviderid=$1
-        AND $2 < slot_end_epoch
-        AND $3 > slot_start_epoch
-      LIMIT 1
-      `,
-      [serviceproviderid, e.start_epoch, e.end_epoch]
+    const conflictRow = await findProviderBookedConflict(
+      client,
+      serviceproviderid,
+      e,
+      id
     );
 
-    if (conflict.rows.length > 0) {
+    if (conflictRow) {
       await client.query("ROLLBACK");
-      return res.status(409).json({ error: "Provider has time conflict" });
+      return res.status(409).json({
+        error: "Provider has time conflict",
+        detail: `Conflicts with engagement #${conflictRow.engagement_id} on ${conflictRow.date}`,
+      });
     }
 
     // 3️⃣ Assign provider

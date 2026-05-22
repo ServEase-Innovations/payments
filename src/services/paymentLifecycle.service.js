@@ -4,7 +4,12 @@ import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import { transitionEngagement } from "./engagementLifecycle.js";
-import { createInAppNotification, InAppTypes } from "./inAppNotification.service.js";
+import {
+  upsertProviderNewBookingNotification,
+  dismissNewBookingInAppByEngagementId,
+  InAppTypes,
+  createInAppNotification,
+} from "./inAppNotification.service.js";
 import { getSocketServer } from "../utils/socketIoRef.js";
 
 dayjs.extend(utc);
@@ -102,10 +107,37 @@ export async function handlePaymentSuccess({
   // AFTER COMMIT → realtime + in-app notifications
   // =================================================
 
+  const freshEng = await pool.query(
+    `SELECT * FROM engagements WHERE engagement_id = $1`,
+    [engagementId]
+  );
+  if (freshEng.rows.length) {
+    engagement = freshEng.rows[0];
+  }
+
   const socketServer = io != null ? io : getSocketServer();
   console.log(`Payment successful for engagement ${engagementId}.`, io);
 
   if (engagement.booking_type === "ON_DEMAND" && socketServer) {
+    const life = String(engagement.engagement_status || "").toUpperCase();
+    const alreadyAssigned =
+      engagement.serviceproviderid != null &&
+      String(engagement.serviceproviderid).trim() !== "";
+    if (
+      alreadyAssigned ||
+      !["OPEN_FOR_ACCEPTANCE", "UNASSIGNED"].includes(life)
+    ) {
+      console.log(
+        `Skip ON_DEMAND provider notify for engagement ${engagementId} (status=${life}, assigned=${alreadyAssigned})`
+      );
+      return { success: true };
+    }
+
+    try {
+      await dismissNewBookingInAppByEngagementId(engagement.engagement_id);
+    } catch (eDismiss) {
+      console.error("dismiss pre-payment new-booking rows failed", eDismiss);
+    }
     console.log("==== DISPATCH DEBUG ====");
     console.log("booking_type:", engagement.booking_type);
     console.log("io defined?", !!io);
@@ -171,6 +203,9 @@ export async function handlePaymentSuccess({
           start_epoch: engagement.start_epoch,
           duration_minutes: engagement.duration_minutes,
           base_amount: engagement.base_amount,
+          address: addressLine || null,
+          distance_meters: distance,
+          payment_ready: true,
         });
         /* eslint-disable no-await-in-loop */
         const amountLabel =
@@ -185,14 +220,12 @@ export async function handlePaymentSuccess({
         ].filter(Boolean);
         const bodyText = summaryParts.join(" · ");
         try {
-          await createInAppNotification({
+          await upsertProviderNewBookingNotification({
             io: socketServer,
-            recipientType: "provider",
             recipientId: p.serviceproviderid,
-            type: InAppTypes.NEW_BOOKING_OPPORTUNITY,
+            engagementId: engagement.engagement_id,
             title: "New paid booking nearby — tap to review",
             body: bodyText,
-            engagementId: engagement.engagement_id,
             metadata: {
               service_type: engagement.service_type,
               booking_type: engagement.booking_type,
@@ -204,6 +237,7 @@ export async function handlePaymentSuccess({
               distance_m: distance,
               distance_km: distanceKm,
               address: addressLine || null,
+              payment_ready: true,
             },
           });
         } catch (e) {

@@ -3,6 +3,7 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { createServiceDays } from "../routes/serviceDays.service.js";
+import { visitWindowFromEngagement } from "./providerAvailabilityOverlap.js";
 
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
@@ -90,7 +91,28 @@ export async function transitionEngagement(client, {
 
   // 🔹 Block availability when ASSIGNED
   if (newStatus === "ASSIGNED" && engagement.serviceproviderid) {
+    const bookingType = String(engagement.booking_type || "").toUpperCase();
+    const visitWindow = visitWindowFromEngagement(engagement);
 
+    if (bookingType === "ON_DEMAND" && visitWindow) {
+      await client.query(
+        `
+        INSERT INTO provider_availability
+        (serviceproviderid, engagement_id, date,
+         slot_start_epoch, slot_end_epoch,
+         status, created_at, updated_at)
+        VALUES ($1,$2,$3::date,$4,$5,'BOOKED',NOW(),NOW())
+        ON CONFLICT DO NOTHING
+        `,
+        [
+          engagement.serviceproviderid,
+          engagement.engagement_id,
+          visitWindow.startDate,
+          visitWindow.startEpoch,
+          visitWindow.endEpoch,
+        ]
+      );
+    } else {
     const baseStart = dayjs
       .unix(engagement.start_epoch)
       .tz("Asia/Kolkata");
@@ -136,6 +158,7 @@ export async function transitionEngagement(client, {
       );
 
       currentDate = currentDate.add(1, "day");
+    }
     }
 
     // service_days rows (v2 previously only created PA; start/complete visit APIs need service_days)

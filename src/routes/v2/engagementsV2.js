@@ -12,7 +12,9 @@ import {
   createInAppNotification,
   InAppTypes,
   dismissNewBookingInAppByEngagementId,
+  emitBookingRequestClosed,
 } from "../../services/inAppNotification.service.js";
+import { findProviderBookedConflict } from "../../services/providerAvailabilityOverlap.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -183,6 +185,43 @@ const ON_DEMAND_ACCEPTABLE_ENGAGEMENT_STATUSES = new Set([
   "UNASSIGNED",
 ]);
 
+/**
+ * If verify/webhook failed to advance status but payment is SUCCESS, repair before accept.
+ */
+async function repairOnDemandEngagementIfPaid(client, engagement) {
+  const bookingType = String(engagement.booking_type || "").toUpperCase();
+  if (bookingType !== "ON_DEMAND") return engagement;
+
+  const life = String(engagement.engagement_status || "").toUpperCase();
+  if (ON_DEMAND_ACCEPTABLE_ENGAGEMENT_STATUSES.has(life)) return engagement;
+
+  const payRes = await client.query(
+    `SELECT status FROM payments
+     WHERE engagement_id = $1
+     ORDER BY payment_id DESC NULLS LAST, created_at DESC
+     LIMIT 1`,
+    [engagement.engagement_id]
+  );
+  if (payRes.rows[0]?.status !== "SUCCESS") return engagement;
+
+  if (["PAYMENT_PENDING", "CREATED", ""].includes(life) || !life) {
+    await transitionEngagement(client, {
+      engagementId: engagement.engagement_id,
+      newStatus: "OPEN_FOR_ACCEPTANCE",
+      eventType: "PAYMENT_COMPLETED",
+      actorType: "SYSTEM",
+      metadata: { source: "ACCEPT_REPAIR" },
+    });
+    const refreshed = await client.query(
+      `SELECT * FROM engagements WHERE engagement_id=$1`,
+      [engagement.engagement_id]
+    );
+    return refreshed.rows[0] || engagement;
+  }
+
+  return engagement;
+}
+
 function validateProviderCanAccept(e) {
   if (e.serviceproviderid) {
     return { ok: false, status: 409, error: "Already accepted" };
@@ -241,7 +280,8 @@ router.post("/:id/accept", async (req, res) => {
       return res.status(404).json({ error: "Engagement not found" });
     }
 
-    const e = engRes.rows[0];
+    let e = engRes.rows[0];
+    e = await repairOnDemandEngagementIfPaid(client, e);
 
     const acceptCheck = validateProviderCanAccept(e);
     if (!acceptCheck.ok) {
@@ -249,28 +289,24 @@ router.post("/:id/accept", async (req, res) => {
       return res.status(acceptCheck.status).json({ error: acceptCheck.error });
     }
 
-    if (!e.start_epoch || !e.end_epoch) {
+    if (!e.start_epoch) {
       await client.query("ROLLBACK");
       throw new Error("Engagement timing missing");
     }
 
-    // 🔎 Overlap check
-    const conflict = await client.query(
-      `
-      SELECT 1
-      FROM provider_availability
-      WHERE serviceproviderid=$1
-        AND $2 < slot_end_epoch
-        AND $3 > slot_start_epoch
-      LIMIT 1
-      `,
-      [providerId, e.start_epoch, e.end_epoch]
+    // 🔎 Overlap check — IST day-clipped BOOKED slots only; ignore this engagement's rows
+    const conflictRow = await findProviderBookedConflict(
+      client,
+      providerId,
+      e,
+      e.engagement_id
     );
 
-    if (conflict.rows.length > 0) {
+    if (conflictRow) {
       await client.query("ROLLBACK");
       return res.status(409).json({
         error: "Provider has time conflict",
+        detail: `Conflicts with engagement #${conflictRow.engagement_id} on ${conflictRow.date}`,
       });
     }
 
@@ -327,6 +363,7 @@ router.post("/:id/accept", async (req, res) => {
         engagement_id: id,
         serviceproviderid: Number(providerId),
       });
+      emitBookingRequestClosed(req.io, id, "accepted");
     }
 
     return res.json({

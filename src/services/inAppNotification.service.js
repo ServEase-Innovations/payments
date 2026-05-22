@@ -223,3 +223,58 @@ export async function dismissNewBookingInAppByEngagementId(engagementId) {
   );
   return { updated: r.rowCount ?? 0 };
 }
+
+const NEW_BOOKING_TYPES = [
+  InAppTypes.NEW_BOOKING_OPPORTUNITY,
+  InAppTypes.NEW_BOOKING_REQUEST,
+];
+
+/**
+ * One actionable "new booking" row per provider per engagement (replaces stale unread duplicates).
+ */
+export async function upsertProviderNewBookingNotification({
+  io = null,
+  recipientId,
+  engagementId,
+  title,
+  body = "",
+  metadata = null,
+}) {
+  const spid = Number(recipientId);
+  const eid = Number(engagementId);
+  if (!Number.isFinite(spid) || spid < 1 || !Number.isFinite(eid) || eid < 1) {
+    throw new Error("Invalid provider or engagement id");
+  }
+
+  await pool.query(
+    `
+    UPDATE in_app_notifications
+    SET read_at = COALESCE(read_at, NOW())
+    WHERE engagement_id = $1
+      AND recipient_type = 'provider'
+      AND recipient_id = $2
+      AND type = ANY($3::text[])
+      AND read_at IS NULL
+    `,
+    [eid, spid, NEW_BOOKING_TYPES]
+  );
+
+  return createInAppNotification({
+    io,
+    recipientType: "provider",
+    recipientId: spid,
+    type: InAppTypes.NEW_BOOKING_OPPORTUNITY,
+    title,
+    body,
+    engagementId: eid,
+    metadata,
+  });
+}
+
+/** Notify all connected provider clients to close booking-request UI for this engagement. */
+export function emitBookingRequestClosed(io, engagementId, reason = "accepted") {
+  if (!io) return;
+  const eid = Number(engagementId);
+  if (!Number.isFinite(eid) || eid < 1) return;
+  io.emit("booking-request-closed", { engagement_id: eid, reason });
+}

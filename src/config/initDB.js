@@ -38,6 +38,22 @@ async function initDB() {
   } catch (err) {
     console.error("❌ pricing_plans migration failed:", err);
   }
+
+  try {
+    const statusPath = path.join(
+      __dirname,
+      "db",
+      "migrations",
+      "engagement_status_check.sql"
+    );
+    if (fs.existsSync(statusPath)) {
+      const sql = fs.readFileSync(statusPath, "utf8");
+      await pool.query(sql);
+      console.log("✅ engagements_engagement_status_check updated for V2 statuses");
+    }
+  } catch (err) {
+    console.error("❌ engagement_status_check migration failed:", err);
+  }
 }
 
 export default initDB;
