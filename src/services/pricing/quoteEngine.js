@@ -203,47 +203,52 @@ export async function calculateQuote(input, client) {
     } else {
       const calc = calculateShortTermMultiDay(durationDays, st, ratePreference, visitHours);
       total = calc.total;
-      const rateBand = `₹${st.hourlyDiscMin}–₹${st.hourlyDiscMax}/hr`;
+      const pkgBand = `₹${st.sevenDayPkgMin}–₹${st.sevenDayPkgMax}`;
+      const desc =
+        durationDays === 7
+          ? `Short-term (7 days × 1h/d — ${pkgBand} package)`
+          : durationDays < 7
+            ? `Short-term (${durationDays}d × 1h/d — prorated from ${pkgBand} / 7 days)`
+            : `Short-term (${durationDays}d × ${calc.hoursPerVisit}h/d — ${pkgBand} for 7d + extra days)`;
       lineItems.push({
-        description:
-          durationDays === 7
-            ? `Maid short-term (7 days × ${calc.hoursPerVisit}h/d @ ${rateBand}, 20% band)`
-            : `Maid short-term (${durationDays}d × ${calc.hoursPerVisit}h/d @ ₹${calc.hourlyDisplay}/hr)`,
-        quantity: durationDays,
-        unit: "DAY",
-        unit_rate: calc.dailyRate,
+        description: desc,
+        quantity: 1,
+        unit: "PACKAGE",
+        unit_rate: calc.total,
         amount: calc.gross,
       });
       if (calc.hourDiscAmt > 0) {
         discounts.push({
-          label: `${calc.incrementalHourDiscountPct}% off extra hours (${calc.extraHours}h/visit × ${durationDays}d)`,
+          label: `${calc.incrementalHourDiscountPct}% off each hour above 1h (${calc.extraHours}h/visit × ${durationDays}d)`,
           amount: calc.hourDiscAmt,
         });
         appliedRules.push({
           rule_type: "INCREMENTAL_HOUR_DISCOUNT",
-          label: `${calc.incrementalHourDiscountPct}% off hours above ${st.visitHoursDefault}h/visit`,
+          label: `${calc.incrementalHourDiscountPct}% off hours above 1h per visit`,
         });
       }
       if (calc.discountAmt > 0) {
         discounts.push({
-          label: `${calc.percentOff}% off (${durationDays} days)`,
+          label: `${calc.percentOff}% off days after first 7 (${durationDays - 7} extra days)`,
           amount: calc.discountAmt,
         });
         appliedRules.push({
           rule_type: "PERCENT_OFF",
-          label: `${calc.percentOff}% duration discount`,
+          label: `${calc.percentOff}% on prorated extra days`,
         });
       } else if (durationDays === 7) {
         appliedRules.push({
-          rule_type: "SHORT_TERM_7D_BAND",
-          label: `7-day rate ${rateBand} (20% off base ₹${st.hourlyBaseMin}–₹${st.hourlyBaseMax})`,
+          rule_type: "SEVEN_DAY_PKG",
+          label: `7-day package ${pkgBand} (1h/day)`,
         });
       }
       shortTermHourlyDisplay = {
-        min: st.hourlyDiscMin,
-        max: st.hourlyDiscMax,
-        baseMin: st.hourlyBaseMin,
-        baseMax: st.hourlyBaseMax,
+        min: st.sevenDayPkgMin,
+        max: st.sevenDayPkgMax,
+        baseMin: st.sevenDayPkgMin,
+        baseMax: st.sevenDayPkgMax,
+        perDayFromPkg: calc.perDayFromPkg,
+        sevenDayPkg: calc.sevenDayPkg,
       };
       unitRate = calc.hourlyDisplay;
       pricingMode = "DAY";

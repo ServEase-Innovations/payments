@@ -4,11 +4,47 @@ import pool from "../config/db.js";
 import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import twilio from "twilio";
 import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
+import { transitionEngagement } from "../services/engagementLifecycle.js";
 
-const client = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+function getTwilioClient() {
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token) return null;
+  return twilio(sid, token);
+}
+
+/** Normalize Indian mobile to E.164 for Twilio (+91…). */
+function formatE164Indian(mobile) {
+  if (mobile == null || String(mobile).trim() === "") return null;
+  const digits = String(mobile).replace(/\D/g, "");
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
+  if (digits.length === 13 && digits.startsWith("91")) return `+${digits}`;
+  return null;
+}
+
+/** Best-effort SMS — must not block in-app OTP display for the customer. */
+async function sendOtpSmsOptional(mobile, otp) {
+  const twilioClient = getTwilioClient();
+  if (!twilioClient) {
+    return { sent: false, reason: "sms_not_configured" };
+  }
+  const to = formatE164Indian(mobile);
+  if (!to) {
+    return { sent: false, reason: "invalid_mobile" };
+  }
+  try {
+    await twilioClient.messages.create({
+      body: `Your Servease OTP is ${otp}. Valid for 2 hours.`,
+      from: process.env.TWILIO_FROM_NUMBER || "+15803243872",
+      to,
+    });
+    return { sent: true };
+  } catch (err) {
+    console.error("Twilio OTP SMS failed (non-fatal):", err?.message || err);
+    return { sent: false, reason: err?.message || "sms_failed" };
+  }
+}
 
 
 router.post("/service-days/:id/start", async (req, res) => {
@@ -74,11 +110,13 @@ router.post("/service-days/:id/otp", async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { id } = req.params;
+    const serviceDayId = Number(req.params.id);
+    if (!Number.isFinite(serviceDayId) || serviceDayId < 1) {
+      return res.status(400).json({ error: "Invalid service day id" });
+    }
 
     await client.query("BEGIN");
 
-    // 1️⃣ Validate service day & get customer mobile
     const sdRes = await client.query(
       `
       SELECT sd.status, c.mobileno
@@ -86,20 +124,26 @@ router.post("/service-days/:id/otp", async (req, res) => {
       JOIN engagements e ON e.engagement_id = sd.engagement_id
       JOIN customer c ON c.customerid = e.customerid
       WHERE sd.service_day_id = $1
-      FOR UPDATE
+      FOR UPDATE OF sd
       `,
-      [id]
+      [serviceDayId]
     );
 
-    if (sdRes.rows.length === 0)
+    if (sdRes.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Service day not found" });
+    }
 
-    if (sdRes.rows[0].status !== "IN_PROGRESS")
-      return res.status(400).json({ error: "OTP allowed only when service is in progress" });
+    const dayStatus = String(sdRes.rows[0].status || "").toUpperCase();
+    if (dayStatus !== "IN_PROGRESS" && dayStatus !== "STARTED") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: "OTP allowed only when service is in progress",
+      });
+    }
 
     const mobile = sdRes.rows[0].mobileno;
 
-    // 2️⃣ Check for existing valid OTP (reuse if found)
     const existingOtpRes = await client.query(
       `
       SELECT otp_code
@@ -110,44 +154,47 @@ router.post("/service-days/:id/otp", async (req, res) => {
       ORDER BY created_at DESC
       LIMIT 1
       `,
-      [id]
+      [serviceDayId]
     );
 
     let otp;
 
     if (existingOtpRes.rows.length > 0) {
-      otp = existingOtpRes.rows[0].otp_code; // 🔁 reuse OTP
+      otp = existingOtpRes.rows[0].otp_code;
     } else {
-      // 3️⃣ Generate new OTP (2-hour validity)
       otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000); // ⏱ 2 hours
+      const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
       await client.query(
         `
         INSERT INTO service_day_otps (service_day_id, otp_code, expires_at)
         VALUES ($1, $2, $3)
         `,
-        [id, otp, expiresAt]
+        [serviceDayId, otp, expiresAt]
       );
     }
 
-    // 4️⃣ Send OTP via Twilio
-    const twilioClient = twilio( process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN );
-
-    await twilioClient.messages.create({
-      body: `Your Servease OTP is ${otp}. Valid for 2 hours.`,
-      from: "+15803243872",
-      to: `+919654754455`,
-    });
-
     await client.query("COMMIT");
 
-    res.json({ otp: otp });
+    const sms = await sendOtpSmsOptional(mobile, otp);
 
+    res.json({
+      otp,
+      sms_sent: sms.sent === true,
+      message: sms.sent
+        ? "OTP generated and sent by SMS"
+        : "OTP generated — share it with your provider in the app",
+    });
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
     console.error("OTP generation error:", err);
-    res.status(500).json({ error: "Failed to send OTP" });
+    res.status(500).json({
+      error: err?.message || "Failed to generate OTP",
+    });
   } finally {
     client.release();
   }
@@ -198,6 +245,7 @@ router.post("/service-days/:id/complete", async (req, res) => {
         e.customerid,
         e.serviceproviderid,
         e.service_type,
+        e.booking_type,
         e.base_amount,
         e.start_date,
         e.end_date
@@ -287,7 +335,26 @@ router.post("/service-days/:id/complete", async (req, res) => {
       [dailyEarning, sd.serviceproviderid]
     );
 
+    const bookingType = String(sd.booking_type || "").toUpperCase();
+    if (bookingType === "ON_DEMAND") {
+      await transitionEngagement(client, {
+        engagementId: sd.engagement_id,
+        newStatus: "COMPLETED",
+        eventType: "SERVICE_DAY_COMPLETED",
+        actorType: "PROVIDER",
+        actorId: sd.serviceproviderid,
+        metadata: { service_day_id: serviceDayId },
+      });
+    }
+
     await client.query("COMMIT");
+
+    const earningLabel = Number(dailyEarning.toFixed(2));
+    const completeMeta = {
+      service_type: sd.service_type,
+      service_day_id: serviceDayId,
+      earning: earningLabel,
+    };
 
     try {
       await createInAppNotification({
@@ -298,10 +365,25 @@ router.post("/service-days/:id/complete", async (req, res) => {
         title: "Service visit completed",
         body: `Your visit for engagement #${sd.engagement_id} is marked complete.`,
         engagementId: sd.engagement_id,
-        metadata: { service_type: sd.service_type, service_day_id: serviceDayId },
+        metadata: completeMeta,
       });
     } catch (eNotif) {
-      console.error("in-app (service day complete) failed", eNotif);
+      console.error("in-app (service day complete, customer) failed", eNotif);
+    }
+
+    try {
+      await createInAppNotification({
+        io: req.io,
+        recipientType: "provider",
+        recipientId: sd.serviceproviderid,
+        type: InAppTypes.SERVICE_DAY_COMPLETED,
+        title: "Service visit completed",
+        body: `Visit for engagement #${sd.engagement_id} is complete. ₹${earningLabel} credited to your wallet.`,
+        engagementId: sd.engagement_id,
+        metadata: completeMeta,
+      });
+    } catch (eNotif) {
+      console.error("in-app (service day complete, provider) failed", eNotif);
     }
 
     return res.json({

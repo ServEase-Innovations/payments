@@ -1,26 +1,22 @@
 /**
- * Short-term maid pricing (business rules).
+ * Short-term maid/cook pricing.
  *
- * Base hourly: ₹1050–₹1400 → 20% off → ₹850–₹1150/hr (7-day band).
- * Multi-day: 7 days @ 20% off; 8–15 days @ 25% off (on gross daily × days).
- * 2h visit: package ₹1499–₹2099, adjusted by 15% of excess over hourly build-up.
- * 3h visit: 2h total + 3rd hour @ discounted rate with 5% off that hour.
+ * - ₹1050–₹1400 = **flat price for a 7-day booking at 1 hour/day** (not per hour per day).
+ * - Below 7 days: prorate that package (÷7 × days), no duration discount.
+ * - Exactly 7 days @ 1 hr/day: full 7-day package amount.
+ * - 8–15 days @ 1 hr/day: 7-day package + extra days prorated at (package÷7), 25% off extra days only.
+ * - Each hour above 1 per visit: 5% off (priced at package÷7 per hour).
  */
 
-export const ST_HOURLY_BASE_MIN = 1050;
-export const ST_HOURLY_BASE_MAX = 1400;
+export const ST_SEVEN_DAY_PKG_MIN = 1050;
+export const ST_SEVEN_DAY_PKG_MAX = 1400;
+/** @deprecated display only — was old discounted hourly band */
 export const ST_HOURLY_DISC_MIN = 850;
 export const ST_HOURLY_DISC_MAX = 1150;
-export const ST_TWO_HOUR_PKG_MIN = 1499;
-export const ST_TWO_HOUR_PKG_MAX = 2099;
-export const ST_DISC_7_DAYS_PCT = 20;
 export const ST_DISC_8_15_DAYS_PCT = 25;
-export const ST_SECOND_HOUR_PREMIUM_PCT = 15;
-export const ST_THIRD_HOUR_DISC_PCT = 5;
-/** 5% off each hour above visitHoursDefault (short-term multi-day & monthly add-ons). */
 export const ST_INCREMENTAL_HOUR_DISC_PCT = 5;
-/** Default visit length per day when times are not set (typical short-term slot). */
-export const ST_DEFAULT_VISIT_HOURS = 2;
+export const ST_INCREMENTAL_BASELINE_HOURS = 1;
+export const ST_DEFAULT_VISIT_HOURS = 1;
 export const MONTHLY_DEFAULT_VISIT_HOURS = 2;
 export const MONTHLY_DAYS_PER_MONTH = 26;
 
@@ -44,20 +40,26 @@ export function pickRate(min, max, preference = "mid") {
 
 export function shortTermConstraints(plan) {
   const c = plan?.constraints_json || {};
+  const pkgMin = positive(
+    c.sevenDayPkgMin ?? c.hourlyBaseMin,
+    ST_SEVEN_DAY_PKG_MIN
+  );
+  const pkgMax = positive(
+    c.sevenDayPkgMax ?? c.hourlyBaseMax,
+    ST_SEVEN_DAY_PKG_MAX
+  );
   return {
     hoursPerDay: positive(c.hoursPerDay, ST_DEFAULT_VISIT_HOURS),
     visitHoursDefault: positive(c.visitHoursDefault, ST_DEFAULT_VISIT_HOURS),
-    hourlyBaseMin: positive(c.hourlyBaseMin, ST_HOURLY_BASE_MIN),
-    hourlyBaseMax: positive(c.hourlyBaseMax, ST_HOURLY_BASE_MAX),
-    hourlyDiscMin: positive(c.hourlyDiscMin, ST_HOURLY_DISC_MIN),
-    hourlyDiscMax: positive(c.hourlyDiscMax, ST_HOURLY_DISC_MAX),
-    twoHourPkgMin: positive(c.twoHourPkgMin, ST_TWO_HOUR_PKG_MIN),
-    twoHourPkgMax: positive(c.twoHourPkgMax, ST_TWO_HOUR_PKG_MAX),
-    secondHourPremiumPct: positive(c.secondHourPremiumPct, ST_SECOND_HOUR_PREMIUM_PCT),
-    thirdHourDiscPct: positive(c.thirdHourDiscPct, ST_THIRD_HOUR_DISC_PCT),
-    disc7DaysPct: positive(c.disc7DaysPct, ST_DISC_7_DAYS_PCT),
+    sevenDayPkgMin: pkgMin,
+    sevenDayPkgMax: pkgMax,
+    hourlyBaseMin: pkgMin,
+    hourlyBaseMax: pkgMax,
     disc8to15DaysPct: positive(c.disc8to15DaysPct, ST_DISC_8_15_DAYS_PCT),
-    excessDiscountPct: positive(c.excessDiscountPct, ST_SECOND_HOUR_PREMIUM_PCT),
+    incrementalBaselineHours: positive(
+      c.incrementalBaselineHours,
+      ST_INCREMENTAL_BASELINE_HOURS
+    ),
     incrementalHourDiscountPct: positive(
       c.incrementalHourDiscountPct,
       ST_INCREMENTAL_HOUR_DISC_PCT
@@ -79,6 +81,19 @@ export function monthlyConstraints(plan) {
   };
 }
 
+export function sevenDayPackageRate(constraints, ratePreference = "mid") {
+  return pickRate(
+    constraints.sevenDayPkgMin,
+    constraints.sevenDayPkgMax,
+    ratePreference
+  );
+}
+
+/** Implied per-calendar-day rate when prorating the 7-day package. */
+export function dailyRateFrom7DayPackage(pkg7d) {
+  return Math.round((pkg7d / 7) * 100) / 100;
+}
+
 function incrementalHourDiscountAmount(
   hourlyRate,
   extraHours,
@@ -88,10 +103,12 @@ function incrementalHourDiscountAmount(
   if (extraHours <= 0 || multiplier <= 0) {
     return { extraNet: 0, discountAmt: 0, extraGross: 0 };
   }
-  const extraGross = Math.round(hourlyRate * extraHours * multiplier * 100) / 100;
+  const extraGross =
+    Math.round(hourlyRate * extraHours * multiplier * 100) / 100;
   const extraNet =
-    Math.round(hourlyRate * extraHours * multiplier * (1 - discountPct / 100) * 100) /
-    100;
+    Math.round(
+      hourlyRate * extraHours * multiplier * (1 - discountPct / 100) * 100
+    ) / 100;
   return {
     extraGross,
     extraNet,
@@ -99,17 +116,81 @@ function incrementalHourDiscountAmount(
   };
 }
 
+/**
+ * Core tenure charge for 1 hr/day visits from the 7-day package model.
+ */
+export function calculateShortTermTenureCharge(
+  durationDays,
+  constraints,
+  ratePreference
+) {
+  const pkg7d = sevenDayPackageRate(constraints, ratePreference);
+  const perDay = dailyRateFrom7DayPackage(pkg7d);
+  const pctExtra = constraints.disc8to15DaysPct;
+
+  if (durationDays < 7) {
+    const gross = Math.round(perDay * durationDays * 100) / 100;
+    return {
+      tenureGross: gross,
+      tenureTotal: gross,
+      durationDiscountAmt: 0,
+      percentOff: 0,
+      pkg7d,
+      perDay,
+      pricingMode: "PRORATE_7D_PKG",
+    };
+  }
+
+  if (durationDays === 7) {
+    return {
+      tenureGross: pkg7d,
+      tenureTotal: pkg7d,
+      durationDiscountAmt: 0,
+      percentOff: 0,
+      pkg7d,
+      perDay,
+      pricingMode: "SEVEN_DAY_PKG",
+    };
+  }
+
+  if (durationDays <= 15) {
+    const extraDays = durationDays - 7;
+    const extraGross = Math.round(perDay * extraDays * 100) / 100;
+    const extraNet =
+      Math.round(extraGross * (1 - pctExtra / 100) * 100) / 100;
+    const durationDiscountAmt =
+      Math.round((extraGross - extraNet) * 100) / 100;
+    const tenureTotal = Math.round((pkg7d + extraNet) * 100) / 100;
+    return {
+      tenureGross: Math.round((pkg7d + extraGross) * 100) / 100,
+      tenureTotal,
+      durationDiscountAmt,
+      percentOff: pctExtra,
+      pkg7d,
+      perDay,
+      extraDays,
+      pricingMode: "SEVEN_DAY_PKG_PLUS_EXTRA",
+    };
+  }
+
+  const gross = Math.round(perDay * durationDays * 100) / 100;
+  return {
+    tenureGross: gross,
+    tenureTotal: gross,
+    durationDiscountAmt: 0,
+    percentOff: 0,
+    pkg7d,
+    perDay,
+    pricingMode: "PRORATE_7D_PKG",
+  };
+}
+
+/** @deprecated use calculateShortTermTenureCharge */
 export function shortTermDurationPercentOff(durationDays, constraints) {
-  /** 7-day band uses ₹850–₹1150/hr (20% already applied vs base). */
-  if (durationDays === 7) return 0;
   if (durationDays >= 8 && durationDays <= 15) return constraints.disc8to15DaysPct;
   return 0;
 }
 
-/**
- * Multi-day short-term: discounted hourly (₹850–₹1150 for 7d band) × visit hours × days.
- * Optional extra % off for 8–15 day bookings only.
- */
 export function calculateShortTermMultiDay(
   durationDays,
   constraints,
@@ -120,199 +201,100 @@ export function calculateShortTermMultiDay(
     1,
     hoursPerVisit != null && hoursPerVisit > 0
       ? Number(hoursPerVisit)
-      : constraints.visitHoursDefault || constraints.hoursPerDay || ST_DEFAULT_VISIT_HOURS
+      : constraints.visitHoursDefault || ST_DEFAULT_VISIT_HOURS
   );
-  const baseline = constraints.visitHoursDefault || ST_DEFAULT_VISIT_HOURS;
-  const hourlyRate = pickRate(constraints.hourlyDiscMin, constraints.hourlyDiscMax, ratePreference);
+  const baseline = constraints.incrementalBaselineHours || ST_INCREMENTAL_BASELINE_HOURS;
   const pct = constraints.incrementalHourDiscountPct;
-  const baseHours = Math.min(visitHours, baseline);
-  const extraHours = Math.max(0, visitHours - baseline);
-  const basePortion = hourlyRate * baseHours * durationDays;
+
+  const tenure = calculateShortTermTenureCharge(
+    durationDays,
+    constraints,
+    ratePreference
+  );
+  const perDay = tenure.perDay;
+
+  const extraHoursPerVisit = Math.max(0, visitHours - baseline);
   const { extraNet, discountAmt: hourDiscAmt } = incrementalHourDiscountAmount(
-    hourlyRate,
-    extraHours,
+    perDay,
+    extraHoursPerVisit,
     durationDays,
     pct
   );
-  const gross = Math.round((basePortion + extraNet) * 100) / 100;
-  const percentOff = shortTermDurationPercentOff(durationDays, constraints);
-  const durationDiscountAmt = Math.round(gross * (percentOff / 100) * 100) / 100;
-  const total = Math.round((gross - durationDiscountAmt) * 100) / 100;
-  const dailyGross = Math.round((basePortion + extraNet) / durationDays * 100) / 100;
+
+  const gross = Math.round((tenure.tenureGross + extraNet) * 100) / 100;
+  const total = Math.round((tenure.tenureTotal + extraNet) * 100) / 100;
+  const dailyGross = Math.round(gross / durationDays * 100) / 100;
 
   return {
     total,
     gross,
-    discountAmt: durationDiscountAmt,
+    discountAmt: tenure.durationDiscountAmt,
     hourDiscAmt,
-    percentOff,
+    percentOff: tenure.percentOff,
     dailyGross,
     dailyRate: dailyGross,
-    hourlyDisplay: hourlyRate,
+    hourlyDisplay: perDay,
     hoursPerVisit: visitHours,
-    extraHours,
+    extraHours: extraHoursPerVisit,
     incrementalHourDiscountPct: pct,
-    hourlyBaseMin: constraints.hourlyBaseMin,
-    hourlyBaseMax: constraints.hourlyBaseMax,
+    sevenDayPkg: tenure.pkg7d,
+    perDayFromPkg: perDay,
+    pricingMode: tenure.pricingMode,
+    hourlyBaseMin: constraints.sevenDayPkgMin,
+    hourlyBaseMax: constraints.sevenDayPkgMax,
   };
 }
 
-/**
- * 2-hour visit: hourly build-up (h1 + h2 with 15% premium on h2) vs package band;
- * package − 15% × max(0, hourlyBuild − package).
- */
-export function calculateShortTermTwoHours(constraints, ratePreference) {
-  const hourRate = pickRate(constraints.hourlyDiscMin, constraints.hourlyDiscMax, ratePreference);
-  const hour2Rate =
-    Math.round(hourRate * (1 + constraints.secondHourPremiumPct / 100) * 100) / 100;
-  const hourlyBuild = Math.round((hourRate + hour2Rate) * 100) / 100;
-  const packageTotal = pickRate(constraints.twoHourPkgMin, constraints.twoHourPkgMax, ratePreference);
-  const excess = Math.max(0, hourlyBuild - packageTotal);
-  const excessDiscount =
-    Math.round(excess * (constraints.excessDiscountPct / 100) * 100) / 100;
-  const total = Math.round((packageTotal - excessDiscount) * 100) / 100;
-
-  return {
-    total,
-    hourRate,
-    hour2Rate,
-    hourlyBuild,
-    packageTotal,
-    excess,
-    excessDiscount,
-  };
-}
-
-/**
- * 3-hour visit: 2h total + 3rd hour @ discounted rate − 5% on 3rd hour.
- */
-export function calculateShortTermThreeHours(constraints, ratePreference) {
-  const two = calculateShortTermTwoHours(constraints, ratePreference);
-  const thirdHourRate = pickRate(constraints.hourlyDiscMin, constraints.hourlyDiscMax, ratePreference);
-  const thirdDisc = Math.round(thirdHourRate * (constraints.thirdHourDiscPct / 100) * 100) / 100;
-  const total = Math.round((two.total + thirdHourRate - thirdDisc) * 100) / 100;
-
-  return {
-    ...two,
-    total,
-    thirdHourRate,
-    thirdDisc,
-  };
-}
-
-/** Use per-visit hour packages only for short stints (< 7 days). */
+/** Single-calendar-day booking uses same package proration. */
 export function useShortTermHourPackage(durationDays, durationHours) {
-  if (durationHours == null || durationHours <= 0) return false;
-  return durationDays < 7;
+  return durationDays <= 1 && durationHours != null && durationHours > 0;
 }
 
-/**
- * Per-visit pricing for short stints (< 7 days): 1h, 2h pkg, 3h (+5% on 3rd), 4h+ (2h pkg + extra hrs @ 5% off).
- */
-export function calculateShortTermPerVisit(constraints, ratePreference, visitHours) {
+export function calculateShortTermPerVisit(
+  constraints,
+  ratePreference,
+  visitHours
+) {
   const h = Math.max(1, Number(visitHours) || 1);
+  const tenure = calculateShortTermTenureCharge(1, constraints, ratePreference);
+  const perDay = tenure.perDay;
   const pct = constraints.incrementalHourDiscountPct;
+  const baseline = constraints.incrementalBaselineHours || ST_INCREMENTAL_BASELINE_HOURS;
+  const extraHours = Math.max(0, h - baseline);
 
-  if (h < 2) {
-    const hourRate = pickRate(
-      constraints.hourlyDiscMin,
-      constraints.hourlyDiscMax,
-      ratePreference
-    );
-    return {
-      total: hourRate,
-      discounts: [],
-      appliedRules: [{ rule_type: "SHORT_TERM_1H", label: `1h @ ₹${hourRate}/hr` }],
-      description: `Maid short-term (1h @ ₹${hourRate}/hr)`,
-    };
-  }
-
-  if (h === 2) {
-    const calc = calculateShortTermTwoHours(constraints, ratePreference);
-    const discounts = [];
-    if (calc.excessDiscount > 0) {
-      discounts.push({
-        label: `${constraints.excessDiscountPct}% off excess above package (₹${calc.packageTotal})`,
-        amount: calc.excessDiscount,
-      });
-    }
-    return {
-      total: calc.total,
-      discounts,
-      appliedRules: [
-        {
-          rule_type: "SHORT_TERM_2H",
-          label: `2h package ₹${calc.packageTotal} (−${constraints.excessDiscountPct}% excess)`,
-        },
-      ],
-      description: `Maid short-term (2h: ₹${calc.hourRate} + ₹${calc.hour2Rate} hr2, pkg adj.)`,
-    };
-  }
-
-  if (h === 3) {
-    const calc = calculateShortTermThreeHours(constraints, ratePreference);
-    const discounts = [];
-    if (calc.thirdDisc > 0) {
-      discounts.push({
-        label: `${constraints.thirdHourDiscPct}% off 3rd hour (₹${calc.thirdHourRate}/hr)`,
-        amount: calc.thirdDisc,
-      });
-    }
-    return {
-      total: calc.total,
-      discounts,
-      appliedRules: [
-        {
-          rule_type: "SHORT_TERM_3H",
-          label: `3rd hour ${constraints.thirdHourDiscPct}% discount`,
-        },
-      ],
-      description: `Maid short-term (3h: 2h package + 3rd hr − ${constraints.thirdHourDiscPct}% on 3rd)`,
-    };
-  }
-
-  const two = calculateShortTermTwoHours(constraints, ratePreference);
-  const hourRate = pickRate(
-    constraints.hourlyDiscMin,
-    constraints.hourlyDiscMax,
-    ratePreference
-  );
-  const extraHours = h - 2;
-  const { extraNet, discountAmt } = incrementalHourDiscountAmount(
-    hourRate,
-    extraHours,
-    1,
-    pct
-  );
+  let total = tenure.tenureTotal;
   const discounts = [];
-  if (two.excessDiscount > 0) {
-    discounts.push({
-      label: `${constraints.excessDiscountPct}% off excess above package (₹${two.packageTotal})`,
-      amount: two.excessDiscount,
-    });
+  const appliedRules = [
+    {
+      rule_type: "SHORT_TERM_1D",
+      label: `1 day (prorated 7-day pkg ₹${tenure.pkg7d} → ₹${perDay}/day @ 1h)`,
+    },
+  ];
+
+  if (extraHours > 0) {
+    const { extraNet, discountAmt } = incrementalHourDiscountAmount(
+      perDay,
+      extraHours,
+      1,
+      pct
+    );
+    total = Math.round((total + extraNet) * 100) / 100;
+    if (discountAmt > 0) {
+      discounts.push({
+        label: `${pct}% off each hour above ${baseline}h (${extraHours}h)`,
+        amount: discountAmt,
+      });
+    }
   }
-  if (discountAmt > 0) {
-    discounts.push({
-      label: `${pct}% off extra hours (${extraHours}h above 2h)`,
-      amount: discountAmt,
-    });
-  }
+
   return {
-    total: Math.round((two.total + extraNet) * 100) / 100,
+    total,
     discounts,
-    appliedRules: [
-      {
-        rule_type: "INCREMENTAL_HOUR_DISCOUNT",
-        label: `${pct}% off hours above 2h (${extraHours} extra hr)`,
-      },
-    ],
-    description: `Maid short-term (${h}h: 2h package + ${extraHours}h @ ${pct}% off)`,
+    appliedRules,
+    description: `Short-term (1 day, ${h}h — 7-day package prorated)`,
   };
 }
 
-/**
- * Monthly: base contract (covers default hrs/day) + extra hours/day at hourly band − 5%.
- */
 export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
   const mc = monthlyConstraints(plan);
   const baseMonthly = pickRate(plan.base_rate_min, plan.base_rate_max, ratePreference);
@@ -320,10 +302,12 @@ export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
     hoursPerDay != null && hoursPerDay > 0
       ? Number(hoursPerDay)
       : mc.visitHoursDefault;
-  const extraHours = Math.max(0, h - mc.visitHoursDefault);
-  const hourlyRate = pickRate(mc.hourlyDiscMin, mc.hourlyDiscMax, ratePreference);
+  const baseline = mc.incrementalBaselineHours || ST_INCREMENTAL_BASELINE_HOURS;
+  const extraHours = Math.max(0, h - baseline);
+  const pkg7d = sevenDayPackageRate(mc, ratePreference);
+  const perDay = dailyRateFrom7DayPackage(pkg7d);
   const { extraNet, discountAmt } = incrementalHourDiscountAmount(
-    hourlyRate,
+    perDay,
     extraHours,
     mc.daysPerMonth,
     mc.incrementalHourDiscountPct
@@ -348,10 +332,10 @@ export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
         ? [
             {
               rule_type: "MONTHLY_EXTRA_HOURS",
-              label: `+${extraHours}h/day @ ${mc.incrementalHourDiscountPct}% off (₹${hourlyRate}/hr band)`,
+              label: `+${extraHours}h/day @ ${mc.incrementalHourDiscountPct}% off`,
             },
           ]
-        : [{ rule_type: "MONTHLY_BASE", label: "Monthly contract (standard hours)" }],
+        : [{ rule_type: "MONTHLY_BASE", label: "Monthly contract" }],
     description:
       extraHours > 0
         ? `Maid monthly (base + ${extraHours}h/day extra @ ${mc.incrementalHourDiscountPct}% off)`

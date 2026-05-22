@@ -16,6 +16,16 @@ const WORK_PHASE = {
  * @param {object|null} [todayServiceRow] - from service_days for service_date = today
  * @returns {{ task_status: string, work_summary: object }}
  */
+function isOnDemandEngagement(e) {
+  return String(e.booking_type || "").toUpperCase() === "ON_DEMAND";
+}
+
+function isSingleDayEngagement(e) {
+  const start = String(e.start_date ?? "").slice(0, 10);
+  const end = String(e.end_date ?? e.start_date ?? "").slice(0, 10);
+  return start && end && start === end;
+}
+
 export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
   const life = (e.engagement_status && String(e.engagement_status).toUpperCase()) || "";
   const dayStatus = todayServiceRow
@@ -42,6 +52,34 @@ export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
     label: "",
   };
 
+  // Today's visit state overrides calendar bucket (e.g. provider started before slot time)
+  if (dayStatus === "IN_PROGRESS" || dayStatus === "STARTED") {
+    work_summary.phase = WORK_PHASE.ACTIVE;
+    work_summary.label = "Visit in progress";
+    return { task_status: "IN_PROGRESS", work_summary };
+  }
+  if (
+    dayStatus === "COMPLETED" ||
+    dayStatus === "DONE" ||
+    dayStatus === "SKIPPED"
+  ) {
+    work_summary.phase = WORK_PHASE.ACTIVE;
+    work_summary.label = "Today's visit completed";
+    if (dayStatus === "SKIPPED") {
+      work_summary.label = "Today's visit skipped / not required";
+    }
+    if (life === "COMPLETED" || isOnDemandEngagement(e) || isSingleDayEngagement(e)) {
+      work_summary.label = "Service completed";
+      return { task_status: "COMPLETED", work_summary };
+    }
+    return { task_status: "IN_PROGRESS", work_summary };
+  }
+  if (dayStatus === "SCHEDULED" || dayStatus === "PENDING") {
+    work_summary.phase = WORK_PHASE.ACTIVE;
+    work_summary.label = "Today's visit not started";
+    // Fall through to bucket rules unless same-day visit is the only activity
+  }
+
   // --- PAST: booking over → treat work as done for this engagement
   if (bucket === "past") {
     work_summary.label = "Service period ended";
@@ -60,27 +98,9 @@ export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
     return { task_status: "NOT_STARTED", work_summary };
   }
 
-  // --- ONGOING
-  if (dayStatus) {
-    if (dayStatus === "IN_PROGRESS" || dayStatus === "STARTED") {
-      work_summary.label = "Visit in progress";
-      return { task_status: "IN_PROGRESS", work_summary };
-    }
-    if (dayStatus === "COMPLETED" || dayStatus === "DONE" || dayStatus === "SKIPPED") {
-      work_summary.label = "Today’s visit completed";
-      if (dayStatus === "SKIPPED") {
-        work_summary.label = "Today’s visit skipped / not required";
-      }
-      // Entire engagement still in window: overall task is still "in progress" until period ends
-      if (life === "COMPLETED") {
-        return { task_status: "COMPLETED", work_summary };
-      }
-      return { task_status: "IN_PROGRESS", work_summary };
-    }
-    if (dayStatus === "SCHEDULED" || dayStatus === "PENDING") {
-      work_summary.label = "Today’s visit not started";
-      return { task_status: "NOT_STARTED", work_summary };
-    }
+  // --- ONGOING (no today row, or scheduled for later today)
+  if (dayStatus === "SCHEDULED" || dayStatus === "PENDING") {
+    return { task_status: "NOT_STARTED", work_summary };
   }
 
   // No row for today but period is current — infer from engagement lifecycle

@@ -112,6 +112,15 @@ export async function transitionEngagement(client, {
           visitWindow.endEpoch,
         ]
       );
+
+      await client.query(
+        `
+        INSERT INTO service_days (engagement_id, service_date, status)
+        VALUES ($1, $2::date, 'SCHEDULED')
+        ON CONFLICT (engagement_id, service_date) DO NOTHING
+        `,
+        [engagement.engagement_id, visitWindow.startDate]
+      );
     } else {
     const baseStart = dayjs
       .unix(engagement.start_epoch)

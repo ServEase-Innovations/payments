@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../config/db.js";
 import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
+import { repairTodayServiceDays } from "./serviceDays.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -40,6 +41,22 @@ router.get("/:providerId/today-bookings", async (req, res) => {
     );
     if (prov.rows.length === 0) {
       return res.status(404).json({ success: false, error: "Provider not found" });
+    }
+
+    const paToday = await pool.query(
+      `
+      SELECT DISTINCT pa.engagement_id
+      FROM provider_availability pa
+      WHERE pa.serviceproviderid = $1
+        AND pa.date = ${PG_IST_TODAY_DATE}
+        AND pa.status = 'BOOKED'
+        AND pa.engagement_id IS NOT NULL
+      `,
+      [pid]
+    );
+    const todayEngIds = paToday.rows.map((r) => r.engagement_id);
+    if (todayEngIds.length > 0) {
+      await repairTodayServiceDays(pool, todayEngIds);
     }
 
     const result = await pool.query(
@@ -339,6 +356,8 @@ router.get("/:providerId/engagements", async (req, res) => {
 
     const engagementIds = result.rows.map(r => r.engagement_id);
 
+    await repairTodayServiceDays(pool, engagementIds);
+
     // ---- Fetch today's service days ----
     const todayServiceRes = await pool.query(
       `
@@ -399,11 +418,16 @@ result.rows.forEach(row => {
   let today_service = null;
   if (todayService) {
     const inProgressToday = now >= startEpoch && now < endEpoch;
+    const earlyStartSec = 15 * 60;
+    const canStartVisit =
+      todayService.status === "SCHEDULED" &&
+      now >= startEpoch - earlyStartSec &&
+      now < endEpoch;
 
     today_service = {
       service_day_id: todayService.service_day_id,
       status: inProgressToday ? "IN_PROGRESS" : todayService.status,
-      can_start: now < startEpoch,
+      can_start: canStartVisit,
       can_generate_otp: inProgressToday,
       can_complete: inProgressToday,
       otp_active: !!otpByServiceDay[todayService.service_day_id]

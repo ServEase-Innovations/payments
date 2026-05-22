@@ -8,7 +8,11 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import geolib from "geolib";
-import { createServiceDays } from "../routes/serviceDays.service.js";
+import {
+  createServiceDays,
+  repairTodayServiceDays,
+} from "../routes/serviceDays.service.js";
+import { calendarYmd } from "../services/providerAvailabilityOverlap.js";
 import {
   createInAppNotification,
   InAppTypes,
@@ -419,6 +423,8 @@ router.get("/:customerId/engagements", async (req, res) => {
     const engagements = engagementsRes.rows;
     const engagementIds = engagements.map(e => e.engagement_id);
 
+    await repairTodayServiceDays(pool, engagementIds);
+
     // ---- Fetch today's service days ----
     const todayServiceRes = await pool.query(
       `
@@ -561,11 +567,35 @@ WHERE sp.serviceproviderid = ANY($1)`,
         };
       }
 
-      const bucket = today.isBefore(engagementStart)
+      let bucket = today.isBefore(engagementStart)
         ? "upcoming"
         : today.isAfter(engagementEnd)
           ? "past"
           : "ongoing";
+
+      const bookingType = String(e.booking_type || "").toUpperCase();
+      const dayStatusUpper = todayService
+        ? String(todayService.status || "").toUpperCase()
+        : "";
+      if (bookingType === "ON_DEMAND") {
+        const nowUnix = dayjs().tz("Asia/Kolkata").unix();
+        const startEp = Number(e.start_epoch);
+        const endEp = Number(e.end_epoch);
+        if (
+          dayStatusUpper === "IN_PROGRESS" ||
+          dayStatusUpper === "STARTED"
+        ) {
+          bucket = "ongoing";
+        } else if (dayStatusUpper === "COMPLETED") {
+          bucket = "past";
+        } else if (Number.isFinite(endEp) && nowUnix >= endEp) {
+          bucket = "past";
+        } else if (Number.isFinite(startEp) && nowUnix < startEp) {
+          bucket = "upcoming";
+        } else {
+          bucket = "ongoing";
+        }
+      }
 
       const { task_status, work_summary } = deriveTaskStatusForCustomer(e, bucket, todayService);
       const { task_status: taskStatusStored, ...engCore } = e;
@@ -1112,6 +1142,10 @@ router.post("/:id/accept", async (req, res) => {
       [serviceproviderid, id]
     );
 
+    const visitDate =
+      calendarYmd(e.start_date) ||
+      dayjs.unix(Number(e.start_epoch)).tz("Asia/Kolkata").format("YYYY-MM-DD");
+
     // 4️⃣ Create provider availability (ONE row)
     await client.query(
       `
@@ -1122,21 +1156,21 @@ router.post("/:id/accept", async (req, res) => {
       [
         serviceproviderid,
         id,
-        e.start_date,
+        visitDate,
         e.start_epoch,
         e.end_epoch,
       ]
     );
 
-    // 5️⃣ Create service_day (ONE row)
+    // 5️⃣ Create service_day (ONE row) — visit calendar day in IST
     await client.query(
       `
       INSERT INTO service_days
       (engagement_id, service_date, status, created_at)
       VALUES ($1,$2::date,'SCHEDULED',NOW())
-      ON CONFLICT DO NOTHING
+      ON CONFLICT (engagement_id, service_date) DO NOTHING
       `,
-      [id, e.start_date]
+      [id, visitDate]
     );
 
     await client.query("COMMIT");
