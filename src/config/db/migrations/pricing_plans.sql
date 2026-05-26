@@ -96,11 +96,11 @@ INSERT INTO pricing_plan (
     'Maid — monthly contract', 'MONTH',
     3999, 5999,
     '{
-      "visitHoursDefault": 2,
+      "visitHoursDefault": 1,
+      "includedVisitHours": 1,
       "incrementalHourDiscountPct": 5,
-      "hourlyDiscMin": 850,
-      "hourlyDiscMax": 1150,
-      "daysPerMonth": 26
+      "extraHourPromoPct": 5,
+      "daysPerMonth": 30
     }'::jsonb,
     TRUE
   )

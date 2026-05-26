@@ -383,9 +383,9 @@ router.post("/", async (req, res) => {
     });
 
     // Payment
-    const platform_fee = base_amount * 0.1;
-    const gst = platform_fee * 0.18;
-    const total_amount = base_amount + platform_fee + gst;
+    const platform_fee = Math.round(base_amount * 0.06 * 100) / 100;
+    const gst = Math.round(platform_fee * 0.18 * 100) / 100;
+    const total_amount = Math.round((base_amount + platform_fee + gst) * 100) / 100;
 
     const razorpayOrder = await razorpay.orders.create({
       amount: Math.round(total_amount * 100),

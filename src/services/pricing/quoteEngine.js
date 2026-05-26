@@ -265,13 +265,17 @@ export async function calculateQuote(input, client) {
           : null;
     const monthly = calculateMonthlyQuote(plan, ratePreference, visitHours);
     total = monthly.total;
-    lineItems.push({
-      description: monthly.description,
-      quantity: 1,
-      unit: "MONTH",
-      unit_rate: total,
-      amount: total,
-    });
+    if (monthly.lineItems?.length) {
+      lineItems.push(...monthly.lineItems);
+    } else {
+      lineItems.push({
+        description: monthly.description,
+        quantity: 1,
+        unit: "MONTH",
+        unit_rate: total,
+        amount: total,
+      });
+    }
     discounts.push(...monthly.discounts);
     appliedRules.push(...monthly.appliedRules);
     unitRate = monthly.baseMonthly;

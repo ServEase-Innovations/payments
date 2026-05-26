@@ -264,9 +264,9 @@ const effectiveEndDate =
     }
 
     // 8️⃣ Payment (PENDING)
-    const platform_fee = Number(base_amount) * 0.1;
-    const gst = platform_fee * 0.18;
-    const total_amount = Number(base_amount) + platform_fee + gst;
+    const platform_fee = Math.round(Number(base_amount) * 0.06 * 100) / 100;
+    const gst = Math.round(platform_fee * 0.18 * 100) / 100;
+    const total_amount = Math.round((Number(base_amount) + platform_fee + gst) * 100) / 100;
 
     let razorpay_order_id = null;
     if (payment_mode === "razorpay") {

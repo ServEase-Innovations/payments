@@ -17,7 +17,8 @@ export const ST_DISC_8_15_DAYS_PCT = 25;
 export const ST_INCREMENTAL_HOUR_DISC_PCT = 5;
 export const ST_INCREMENTAL_BASELINE_HOURS = 1;
 export const ST_DEFAULT_VISIT_HOURS = 1;
-export const MONTHLY_DEFAULT_VISIT_HOURS = 2;
+/** Standard monthly contract covers 1 hour per visit (30-day period). */
+export const MONTHLY_DEFAULT_VISIT_HOURS = 1;
 export const MONTHLY_DAYS_PER_MONTH = 26;
 
 function num(v, fallback = 0) {
@@ -69,10 +70,18 @@ export function shortTermConstraints(plan) {
 
 export function monthlyConstraints(plan) {
   const c = plan?.constraints_json || {};
-  const st = shortTermConstraints(plan);
+  const visitHoursDefault = positive(
+    c.visitHoursDefault,
+    MONTHLY_DEFAULT_VISIT_HOURS
+  );
   return {
-    ...st,
-    visitHoursDefault: positive(c.visitHoursDefault, MONTHLY_DEFAULT_VISIT_HOURS),
+    visitHoursDefault,
+    includedVisitHours: positive(
+      c.includedVisitHours ?? c.visitHoursDefault,
+      visitHoursDefault
+    ),
+    hourlyDiscMin: positive(c.hourlyDiscMin, ST_HOURLY_DISC_MIN),
+    hourlyDiscMax: positive(c.hourlyDiscMax, ST_HOURLY_DISC_MAX),
     incrementalHourDiscountPct: positive(
       c.incrementalHourDiscountPct,
       ST_INCREMENTAL_HOUR_DISC_PCT
@@ -295,6 +304,12 @@ export function calculateShortTermPerVisit(
   };
 }
 
+/**
+ * Monthly contract (30 days):
+ * - 1st included hour = full base monthly rate (e.g. ₹4,999 mid).
+ * - Each extra hour per visit adds the same base amount minus promo% (5% off → 95% of base per hour).
+ * - Total = 1st hour + 2nd hour + … (additive, not × days in month).
+ */
 export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
   const mc = monthlyConstraints(plan);
   const baseMonthly = pickRate(plan.base_rate_min, plan.base_rate_max, ratePreference);
@@ -302,43 +317,69 @@ export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
     hoursPerDay != null && hoursPerDay > 0
       ? Number(hoursPerDay)
       : mc.visitHoursDefault;
-  const baseline = mc.incrementalBaselineHours || ST_INCREMENTAL_BASELINE_HOURS;
-  const extraHours = Math.max(0, h - baseline);
-  const pkg7d = sevenDayPackageRate(mc, ratePreference);
-  const perDay = dailyRateFrom7DayPackage(pkg7d);
-  const { extraNet, discountAmt } = incrementalHourDiscountAmount(
-    perDay,
-    extraHours,
-    mc.daysPerMonth,
-    mc.incrementalHourDiscountPct
-  );
-  const total = Math.round((baseMonthly + extraNet) * 100) / 100;
+  const includedHours = mc.includedVisitHours;
+  const extraHours = Math.max(0, h - includedHours);
+  const pct = mc.incrementalHourDiscountPct;
+  const extraHourRate =
+    Math.round(baseMonthly * (1 - pct / 100) * 100) / 100;
+
+  let extraNet = 0;
   const discounts = [];
-  if (discountAmt > 0) {
-    discounts.push({
-      label: `${mc.incrementalHourDiscountPct}% off extra hours (${extraHours}h/day × ${mc.daysPerMonth} days)`,
-      amount: discountAmt,
+  const appliedRules = [
+    { rule_type: "MONTHLY_BASE", label: "1st hour — monthly contract (30 days)" },
+  ];
+
+  if (extraHours > 0) {
+    extraNet = Math.round(extraHourRate * extraHours * 100) / 100;
+    const grossExtra = Math.round(baseMonthly * extraHours * 100) / 100;
+    const discountAmt = Math.round((grossExtra - extraNet) * 100) / 100;
+    if (discountAmt > 0) {
+      discounts.push({
+        label: `${pct}% off each extra hour (×${extraHours}h)`,
+        amount: discountAmt,
+      });
+    }
+    appliedRules.push({
+      rule_type: "MONTHLY_EXTRA_HOUR_PROMO",
+      label: `+${extraHours}h @ ${pct}% off 1st-hour rate (₹${extraHourRate}/h)`,
     });
   }
+
+  const total = Math.round((baseMonthly + extraNet) * 100) / 100;
+
+  const lineItems = [
+    {
+      description: "1st hour — monthly contract (30 days)",
+      quantity: 1,
+      unit: "HOUR",
+      unit_rate: baseMonthly,
+      amount: baseMonthly,
+    },
+  ];
+  for (let i = 0; i < extraHours; i++) {
+    const hourNum = includedHours + 1 + i;
+    lineItems.push({
+      description: `Hour ${hourNum} (${pct}% off 1st-hour rate)`,
+      quantity: 1,
+      unit: "HOUR",
+      unit_rate: extraHourRate,
+      amount: extraHourRate,
+    });
+  }
+
   return {
     total,
     baseMonthly,
     extraNet,
+    extraHourRate,
     discounts,
+    lineItems,
     hoursPerDay: h,
     extraHours,
-    appliedRules:
-      extraHours > 0
-        ? [
-            {
-              rule_type: "MONTHLY_EXTRA_HOURS",
-              label: `+${extraHours}h/day @ ${mc.incrementalHourDiscountPct}% off`,
-            },
-          ]
-        : [{ rule_type: "MONTHLY_BASE", label: "Monthly contract" }],
+    appliedRules,
     description:
       extraHours > 0
-        ? `Maid monthly (base + ${extraHours}h/day extra @ ${mc.incrementalHourDiscountPct}% off)`
+        ? `Monthly (${includedHours}h base + ${extraHours}h @ ${pct}% off each)`
         : "Maid monthly contract",
   };
 }
