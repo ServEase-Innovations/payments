@@ -28,6 +28,25 @@ function isSingleDayEngagement(e) {
 
 export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
   const life = (e.engagement_status && String(e.engagement_status).toUpperCase()) || "";
+  const storedTask = (e.task_status && String(e.task_status).toUpperCase()) || "";
+
+  if (life === "CANCELLED" || storedTask === "CANCELLED") {
+    return {
+      task_status: "CANCELLED",
+      work_summary: {
+        phase:
+          bucket === "past"
+            ? WORK_PHASE.PAST
+            : bucket === "upcoming"
+              ? WORK_PHASE.UPCOMING
+              : WORK_PHASE.ACTIVE,
+        engagement_status: e.engagement_status ?? null,
+        today_visit: null,
+        label: "Cancelled",
+      },
+    };
+  }
+
   const dayStatus = todayServiceRow
     ? String(todayServiceRow.status || "").toUpperCase()
     : null;
@@ -111,10 +130,6 @@ export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
   if (life === "IN_PROGRESS") {
     work_summary.label = "Active booking";
     return { task_status: "IN_PROGRESS", work_summary };
-  }
-  if (life === "CANCELLED") {
-    work_summary.label = "Cancelled";
-    return { task_status: "NOT_STARTED", work_summary };
   }
   if (e.serviceproviderid) {
     work_summary.label = "Active within service period";

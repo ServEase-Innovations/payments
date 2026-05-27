@@ -59,6 +59,13 @@ export async function transitionEngagement(client, {
        WHERE engagement_id=$2`,
       [newStatus, engagementId]
     );
+  } else if (newStatus === "CANCELLED") {
+    await client.query(
+      `UPDATE engagements
+       SET engagement_status=$1, task_status='CANCELLED'
+       WHERE engagement_id=$2`,
+      [newStatus, engagementId]
+    );
   } else {
     await client.query(
       `UPDATE engagements

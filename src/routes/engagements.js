@@ -580,7 +580,7 @@ router.get("/:customerId/engagements", async (req, res) => {
     );
 
     if (engagementsRes.rows.length === 0) {
-      return res.json({ upcoming: [], ongoing: [], past: [] });
+      return res.json({ upcoming: [], ongoing: [], past: [], cancelled: [] });
     }
 
     const engagements = engagementsRes.rows;
@@ -709,10 +709,15 @@ WHERE sp.serviceproviderid = ANY($1)`,
     const upcoming = [];
     const ongoing = [];
     const past = [];
+    const cancelled = [];
 
     const today = dayjs().tz("Asia/Kolkata").startOf("day");
 
     engagements.forEach((e) => {
+      const life = (e.engagement_status && String(e.engagement_status).toUpperCase()) || "";
+      const storedTask = (e.task_status && String(e.task_status).toUpperCase()) || "";
+      const isCancelled = life === "CANCELLED" || storedTask === "CANCELLED";
+
       const engagementStart = dayjs(e.start_date).startOf("day");
       const engagementEnd = dayjs(e.end_date).endOf("day");
 
@@ -777,7 +782,9 @@ WHERE sp.serviceproviderid = ANY($1)`,
         today_service
       };
 
-      if (bucket === "upcoming") {
+      if (isCancelled) {
+        cancelled.push(enriched);
+      } else if (bucket === "upcoming") {
         upcoming.push(enriched);
       } else if (bucket === "past") {
         past.push(enriched);
@@ -786,7 +793,7 @@ WHERE sp.serviceproviderid = ANY($1)`,
       }
     });
 
-    return res.json({ upcoming, ongoing, past });
+    return res.json({ upcoming, ongoing, past, cancelled });
 
   } catch (err) {
     console.error("GET engagements error:", err);
