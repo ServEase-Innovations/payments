@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../config/db.js";
 import crypto from "crypto";
+import { razorpay, getRazorpayKeyId, getRazorpayKeySecret } from "../utils/razorpayConfig.js";
 
 const router = express.Router();
 
@@ -21,7 +22,7 @@ router.post("/verify", async (req, res) => {
       const body = `${razorpay_order_id}|${razorpay_payment_id}`;
 
       const expectedSignature = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .createHmac("sha256", getRazorpayKeySecret())
         .update(body)
         .digest("hex");
 
@@ -146,11 +147,24 @@ router.get("/:engagementId/resume", async (req, res) => {
     const totalInr = Number(payment.total_amount);
     const amountPaise = Math.round(totalInr * 100);
 
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amountPaise,
+      currency: "INR",
+      receipt: `eng_resume_${engagementId}_${Date.now()}`,
+      notes: { engagementId: String(engagementId) },
+    });
+    const razorpay_order_id = razorpayOrder.id;
+    await pool.query(
+      `UPDATE payments SET razorpay_order_id = $1, updated_at = NOW() WHERE engagement_id = $2`,
+      [razorpay_order_id, engagementId]
+    );
+
     return res.json({
       success: true,
 
       // Razorpay essentials
-      razorpay_order_id: payment.razorpay_order_id,
+      razorpay_order_id,
+      razorpay_key_id: getRazorpayKeyId(),
       /** Paise for Razorpay Checkout */
       amount: amountPaise,
       amount_inr: totalInr,

@@ -1,6 +1,6 @@
 import express from "express";
 import pool from "../../config/db.js";
-import Razorpay from "razorpay";
+import { razorpay, getRazorpayKeyId, getRazorpayKeySecret } from "../../utils/razorpayConfig.js";
 import { createServiceDays } from "../serviceDays.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
@@ -34,11 +34,6 @@ dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.tz.setDefault("Asia/Kolkata");
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY,
-  key_secret: process.env.RAZORPAY_SECRET,
-});
 
 /** One visit cannot exceed 24h; prevents bad payloads (e.g. minutes ≈ contract length) from breaking overlap logic. */
 const MAX_SERVICE_DURATION_MINUTES = 24 * 60;
@@ -419,6 +414,7 @@ router.post("/", async (req, res) => {
       success: true,
       engagement_id: engagement.engagement_id,
       razorpay_order_id: razorpayOrder.id,
+      razorpay_key_id: getRazorpayKeyId(),
       total_amount,
     });
 
@@ -489,7 +485,6 @@ router.post("/resume-payment", async (req, res) => {
       });
     }
 
-    let razorpay_order_id = row.razorpay_order_id;
     const totalInr = Number(row.total_amount);
     if (!Number.isFinite(totalInr) || totalInr <= 0) {
       return res.status(400).json({
@@ -498,29 +493,29 @@ router.post("/resume-payment", async (req, res) => {
       });
     }
 
-    if (!razorpay_order_id) {
-      const razorpayOrder = await razorpay.orders.create({
-        amount: Math.round(totalInr * 100),
-        currency: "INR",
-        receipt: `eng_resume_${engagementId}_${Date.now()}`,
-        notes: { engagementId: String(engagementId) },
-      });
-      razorpay_order_id = razorpayOrder.id;
-      await pool.query(
-        `
-        UPDATE payments
-        SET razorpay_order_id = $1, updated_at = NOW()
-        WHERE engagement_id = $2
-        `,
-        [razorpay_order_id, engagementId]
-      );
-    }
-
     const amountPaise = Math.round(totalInr * 100);
+
+    // Fresh order on each resume so amount always matches DB and Checkout key matches server account.
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amountPaise,
+      currency: "INR",
+      receipt: `eng_resume_${engagementId}_${Date.now()}`,
+      notes: { engagementId: String(engagementId) },
+    });
+    const razorpay_order_id = razorpayOrder.id;
+    await pool.query(
+      `
+      UPDATE payments
+      SET razorpay_order_id = $1, updated_at = NOW()
+      WHERE engagement_id = $2
+      `,
+      [razorpay_order_id, engagementId]
+    );
 
     return res.json({
       success: true,
       razorpay_order_id,
+      razorpay_key_id: getRazorpayKeyId(),
       /** Amount in paise for Razorpay Checkout `options.amount` */
       amount: amountPaise,
       amount_inr: totalInr,
@@ -635,7 +630,7 @@ router.post("/verify", async (req, res) => {
       const body = `${razorpay_order_id}|${razorpay_payment_id}`;
       const expectedSignature = createHmac(
   "sha256",
-  process.env.RAZORPAY_SECRET
+  getRazorpayKeySecret()
 )
   .update(body)
   .digest("hex");
