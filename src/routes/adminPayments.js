@@ -92,8 +92,8 @@ router.get("/payments", async (req, res) => {
         e.service_type,
         c.firstname AS customer_firstname,
         c.lastname AS customer_lastname,
-        sp."firstName" AS provider_firstname,
-        sp."lastName" AS provider_lastname
+        sp.firstname AS provider_firstname,
+        sp.lastname AS provider_lastname
       ${paymentsListFrom}
       ${where}
       ORDER BY p.created_at DESC
@@ -132,8 +132,8 @@ router.get("/payments/:paymentId", async (req, res) => {
         c.firstname AS customer_firstname,
         c.lastname AS customer_lastname,
         c.mobileno,
-        sp."firstName" AS provider_firstname,
-        sp."lastName" AS provider_lastname
+        sp.firstname AS provider_firstname,
+        sp.lastname AS provider_lastname
       FROM payments p
       JOIN engagements e ON e.engagement_id = p.engagement_id
       JOIN customer c ON c.customerid = e.customerid
@@ -371,10 +371,10 @@ router.get("/engagements", async (req, res) => {
         c.lastname AS customer_lastname,
         c.mobileno AS customer_mobile,
 
-        -- Provider (Sequelize column names; quoted in PostgreSQL)
+        -- Provider
         sp.serviceproviderid,
-        sp."firstName" AS provider_firstname,
-        sp."lastName" AS provider_lastname,
+        sp.firstname AS provider_firstname,
+        sp.lastname AS provider_lastname,
 
         p.status AS payment_status,
         p.total_amount,
