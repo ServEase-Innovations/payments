@@ -13,17 +13,19 @@ const router = express.Router();
  *   - name: Pricing V2
  *     description: |
  *       Checkout pricing engine — quote totals, line items, promo rules, and coupon discounts.
- *       Use **POST /v2/pricing/quote** before create-engagement so `base_amount` matches the snapshot.
+ *       Use **POST /pricing/quote** (web: `/api/pricing/quote`) or **POST /v2/pricing/quote` before create-engagement.
  */
 
 /**
  * @swagger
- * /v2/pricing/quote:
+ * /pricing/quote:
  *   post:
- *     summary: Calculate service price quote (V2)
+ *     summary: Calculate service price quote
  *     description: |
  *       Returns a pricing snapshot for the booking checkout UI: line items, discounts, applied rules,
  *       and **total** (service subtotal after discounts, before platform fee/GST at payment).
+ *
+ *       **URLs:** `POST /api/pricing/quote` (web) and `POST /api/v2/pricing/quote` (alias) use the same handler.
  *
  *       **Coupons:** pass `coupon_code` (or `couponCode`) with `customerId`. The payments service
  *       validates via the coupons service and adds a discount line when eligible.
@@ -232,9 +234,9 @@ router.post("/quote", handlePostQuote);
 
 /**
  * @swagger
- * /v2/pricing/plans:
+ * /pricing/plans:
  *   get:
- *     summary: List active pricing plans (V2)
+ *     summary: List active pricing plans
  *     description: Returns all active plans with nested pricing rules (admin/checkout reference).
  *     tags:
  *       - Pricing V2
@@ -298,9 +300,9 @@ router.get("/plans", handleListPlans);
 
 /**
  * @swagger
- * /v2/pricing/plans/{serviceType}/{bookingType}:
+ * /pricing/plans/{serviceType}/{bookingType}:
  *   get:
- *     summary: Active plan and rules for checkout (V2)
+ *     summary: Active plan and rules for checkout
  *     description: |
  *       Single active plan for a service + booking type (e.g. MAID + ON_DEMAND).
  *       COOK resolves to maid plans until dedicated cook plans exist.

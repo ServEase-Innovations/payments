@@ -28,7 +28,6 @@ import {
 import { logger } from "./src/utils/logger.js";
 import { getPaymentsOpenApiServerUrl } from "./src/utils/swaggerServerUrl.js";
 import inAppNotificationsRouter from "./src/routes/inAppNotifications.js";
-import pricingRouter from "./src/routes/pricing.js";
 import pricingV2Router from "./src/routes/v2/pricingV2.js";
 import adminPricingRouter from "./src/routes/adminPricing.js";
 import couponsProxyRouter from "./src/routes/couponsProxy.js";
@@ -157,7 +156,8 @@ app.use("/api/customers", engagementsRouter);
 app.use("/api/engagement-service", engagementsServiceRouter);
 app.use("/api/admin", adminPaymentsRouter);
 app.use("/api/admin", adminPricingRouter);
-app.use("/api/pricing", pricingRouter);
+/** Web and legacy clients use /api/pricing/*; same router as V2. */
+app.use("/api/pricing", pricingV2Router);
 app.use("/api/v2/pricing", pricingV2Router);
 app.use("/api/v2/engagements", engagementsV2Router);
 app.use("/api/v2/createEngagements", createEngagementsRouter);
