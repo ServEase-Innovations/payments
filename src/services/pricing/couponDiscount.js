@@ -48,12 +48,14 @@ export async function validateCouponForQuote({
       signal: controller.signal,
     });
   } catch (err) {
+    const base = COUPONS_BASE.includes("localhost")
+      ? `Coupons service unreachable at ${COUPONS_BASE}. On Render, set COUPONS_SERVICE_URL on the payments service.`
+      : `Coupons service unreachable at ${COUPONS_BASE}. Check COUPONS_SERVICE_URL and that coupons is deployed.`;
     const e = new Error(
-      err?.name === "AbortError"
-        ? "Coupons service timed out"
-        : err?.message || "Could not reach coupons service"
+      err?.name === "AbortError" ? `Coupons service timed out (${COUPONS_BASE})` : base
     );
     e.status = 503;
+    e.code = "COUPONS_SERVICE_UNREACHABLE";
     throw e;
   } finally {
     clearTimeout(timeout);

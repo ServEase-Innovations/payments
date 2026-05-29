@@ -290,27 +290,39 @@ export async function calculateQuote(input, client) {
   const subtotalBeforeCoupon = total;
   const couponCode = String(input.couponCode || input.coupon_code || "").trim();
   let appliedCoupon = null;
+  let couponWarning = null;
 
   if (couponCode) {
-    const couponResult = await validateCouponForQuote({
-      couponCode,
-      customerId: input.customerId,
-      orderValue: subtotalBeforeCoupon,
-      // Use actual booking service type (COOK|MAID). Coupons service allows MAID coupons on COOK, not the reverse.
-      serviceType,
-      city: input.city,
-    });
-    if (couponResult && couponResult.discount_amount > 0) {
-      discounts.push({
-        label: `Coupon ${couponResult.coupon_code}`,
-        amount: couponResult.discount_amount,
+    try {
+      const couponResult = await validateCouponForQuote({
+        couponCode,
+        customerId: input.customerId,
+        orderValue: subtotalBeforeCoupon,
+        // Use actual booking service type (COOK|MAID). Coupons service allows MAID coupons on COOK, not the reverse.
+        serviceType,
+        city: input.city,
       });
-      total = Math.max(0, subtotalBeforeCoupon - couponResult.discount_amount);
-      appliedCoupon = {
-        coupon_code: couponResult.coupon_code,
-        coupon_id: couponResult.coupon_id,
-        discount_amount: couponResult.discount_amount,
-      };
+      if (couponResult && couponResult.discount_amount > 0) {
+        discounts.push({
+          label: `Coupon ${couponResult.coupon_code}`,
+          amount: couponResult.discount_amount,
+        });
+        total = Math.max(0, subtotalBeforeCoupon - couponResult.discount_amount);
+        appliedCoupon = {
+          coupon_code: couponResult.coupon_code,
+          coupon_id: couponResult.coupon_id,
+          discount_amount: couponResult.discount_amount,
+        };
+      }
+    } catch (err) {
+      if (err.status === 503 || err.code === "COUPONS_SERVICE_UNREACHABLE") {
+        couponWarning =
+          err.message ||
+          "Coupon could not be validated (coupons service unavailable). Quote shown without discount.";
+        console.warn("[pricing/quote] coupon validation skipped:", couponWarning);
+      } else {
+        throw err;
+      }
     }
   }
 
@@ -342,6 +354,7 @@ export async function calculateQuote(input, client) {
     discounts,
     subtotal: subtotalBeforeCoupon,
     coupon: appliedCoupon,
+    coupon_warning: couponWarning,
     total,
     display: {
       base_range: shortTermHourlyDisplay

@@ -39,6 +39,7 @@ Config loads **`.env.<NODE_ENV>`** first (e.g. `.env.development`), then falls b
 | `RAZORPAY_WEBHOOK_SECRET` | Webhook verification where implemented |
 | `SKIP_RAZORPAY_VERIFY` | Set to `true` only for controlled non-prod testing (v2 verify path) |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | SMS / Twilio (`src/routes/engagementService.js`) |
+| `COUPONS_SERVICE_URL` | Base URL of **coupons** service (default `http://localhost:3002`). **Required on Render** for `POST /api/v2/pricing/quote` with `coupon_code`; otherwise quote returns 200 without discount and `coupon_warning`. |
 
 **Production:** set real Razorpay keys; **v1** `POST /api/payments/verify` verifies signatures only when `NODE_ENV === "production"`.
 
