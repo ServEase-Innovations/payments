@@ -24,6 +24,32 @@ function normalizeDate(dateVal) {
   return new Date(dateVal).toISOString().slice(0, 10);
 }
 
+/** Ensure start/end calendar dates are always present for API consumers. */
+function resolveEngagementDates(row) {
+  let startDate = normalizeDate(row.start_date);
+  let endDate = normalizeDate(row.end_date);
+
+  if (!startDate && row.start_epoch) {
+    startDate = dayjs.unix(Number(row.start_epoch)).tz("Asia/Kolkata").format("YYYY-MM-DD");
+  }
+  if (!endDate && row.end_epoch) {
+    endDate = dayjs.unix(Number(row.end_epoch)).tz("Asia/Kolkata").format("YYYY-MM-DD");
+  }
+  if (!endDate && startDate) {
+    endDate = startDate;
+  }
+  if (!startDate && endDate) {
+    startDate = endDate;
+  }
+
+  return {
+    start_date: startDate,
+    end_date: endDate,
+    startDate,
+    endDate,
+  };
+}
+
 /* -------------------------------------------------------------------------- */
 /*              TODAY'S BOOKED VISITS (IST calendar day, by start time)       */
 /* -------------------------------------------------------------------------- */
@@ -404,8 +430,11 @@ const upcoming = [];
 const past = [];
 
 result.rows.forEach(row => {
-  row.startDate = normalizeDate(row.start_date);
-  row.endDate = normalizeDate(row.end_date);
+  const dates = resolveEngagementDates(row);
+  row.startDate = dates.startDate;
+  row.endDate = dates.endDate;
+  row.start_date = dates.start_date;
+  row.end_date = dates.end_date;
   row.startTime = epochToTime(row.start_epoch);
   row.endTime = epochToTime(row.end_epoch);
 
@@ -436,7 +465,11 @@ result.rows.forEach(row => {
 
   const enriched = {
     ...row,
-    today_service
+    start_date: dates.start_date,
+    end_date: dates.end_date,
+    startDate: dates.startDate,
+    endDate: dates.endDate,
+    today_service,
   };
 
   // ---- Engagement lifecycle bucket (IMPORTANT) ----
@@ -453,8 +486,8 @@ result.rows.forEach(row => {
     }
   } else if (row.booking_type === "SHORT_TERM" || row.booking_type === "MONTHLY") {
     // Date-based
-    const engagementStart = dayjs(row.start_date).startOf("day");
-    const engagementEnd = dayjs(row.end_date).endOf("day");
+    const engagementStart = dayjs(dates.startDate).startOf("day");
+    const engagementEnd = dayjs(dates.endDate || dates.startDate).endOf("day");
 
     if (todayDate.isBefore(engagementStart)) {
       bucket = "upcoming";

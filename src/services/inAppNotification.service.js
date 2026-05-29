@@ -154,6 +154,10 @@ export async function listInAppNotifications({
   }
 
   try {
+    if (recipientType === "provider") {
+      await autoDismissStaleProviderBookingNotifications(id);
+    }
+
     const [listRes, unreadRes] = await Promise.all([
       pool.query(
         `
@@ -264,6 +268,64 @@ export async function dismissNewBookingInAppByEngagementId(engagementId) {
     [eid, InAppTypes.NEW_BOOKING_OPPORTUNITY, InAppTypes.NEW_BOOKING_REQUEST]
   );
   return { updated: r.rowCount ?? 0 };
+}
+
+/**
+ * Mark unread provider "new booking" rows read when the engagement is no longer actionable
+ * or the notification is too old to show as an Accept/Decline popup.
+ */
+export async function autoDismissStaleProviderBookingNotifications(providerId) {
+  const spid = Number(providerId);
+  if (!Number.isFinite(spid) || spid < 1) return { updated: 0 };
+
+  const r = await pool.query(
+    `
+    UPDATE in_app_notifications n
+    SET read_at = COALESCE(n.read_at, NOW())
+    FROM engagements e
+    WHERE n.recipient_type = 'provider'
+      AND n.recipient_id = $1
+      AND n.read_at IS NULL
+      AND n.type = ANY($2::text[])
+      AND n.engagement_id = e.engagement_id
+      AND (
+        e.serviceproviderid IS NOT NULL
+        OR UPPER(COALESCE(e.engagement_status, '')) IN (
+          'CANCELLED', 'EXPIRED', 'COMPLETED', 'CLOSED', 'REJECTED'
+        )
+        OR (
+          UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
+          AND UPPER(COALESCE(e.engagement_status, '')) NOT IN (
+            'OPEN_FOR_ACCEPTANCE', 'UNASSIGNED', ''
+          )
+        )
+        OR UPPER(COALESCE(e.assignment_status, '')) NOT IN ('UNASSIGNED', '')
+        OR n.created_at < NOW() - INTERVAL '4 hours'
+      )
+    `,
+    [spid, NEW_BOOKING_TYPES]
+  );
+
+  const orphaned = await pool.query(
+    `
+    UPDATE in_app_notifications n
+    SET read_at = COALESCE(n.read_at, NOW())
+    WHERE n.recipient_type = 'provider'
+      AND n.recipient_id = $1
+      AND n.read_at IS NULL
+      AND n.type = ANY($2::text[])
+      AND (
+        n.engagement_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM engagements e WHERE e.engagement_id = n.engagement_id
+        )
+        OR n.created_at < NOW() - INTERVAL '24 hours'
+      )
+    `,
+    [spid, NEW_BOOKING_TYPES]
+  );
+
+  return { updated: (r.rowCount ?? 0) + (orphaned.rowCount ?? 0) };
 }
 
 const NEW_BOOKING_TYPES = [
