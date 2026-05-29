@@ -30,6 +30,7 @@ import { getPaymentsOpenApiServerUrl } from "./src/utils/swaggerServerUrl.js";
 import inAppNotificationsRouter from "./src/routes/inAppNotifications.js";
 import pricingRouter from "./src/routes/pricing.js";
 import adminPricingRouter from "./src/routes/adminPricing.js";
+import couponsProxyRouter from "./src/routes/couponsProxy.js";
 import { setSocketServer } from "./src/utils/socketIoRef.js";
 
 const app = express();
@@ -75,6 +76,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // In-app notification REST (list / read) — use query: recipientType + recipientId
 app.use("/api", inAppNotificationsRouter);
+app.use("/api", couponsProxyRouter);
 
 // ✅ Initialize DB
 initDB();

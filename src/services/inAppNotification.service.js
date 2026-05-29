@@ -3,6 +3,30 @@ import { getSocketServer } from "../utils/socketIoRef.js";
 
 const ALLOWED_RECIPIENT = new Set(["customer", "provider"]);
 
+const POSTGRES_CONNECTIVITY_CODES = new Set([
+  "ETIMEDOUT",
+  "ENETUNREACH",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENOTFOUND",
+]);
+
+export function isPostgresConnectivityError(err) {
+  return POSTGRES_CONNECTIVITY_CODES.has(err?.code);
+}
+
+let loggedDbUnavailable = false;
+
+function warnDbUnavailable(context, err) {
+  if (loggedDbUnavailable) return;
+  loggedDbUnavailable = true;
+  console.warn(
+    `[in-app-notifications] Postgres unreachable (${err?.code || "unknown"}); ${context}. ` +
+      "Check POSTGRES_HOST / VPN. Read endpoints return empty data until DB is reachable."
+  );
+}
+
 /**
  * @param {import('socket.io').Server | undefined | null} io
  * @param {object} params
@@ -86,17 +110,26 @@ export async function getUnreadCount({ recipientType, recipientId }) {
   if (!Number.isFinite(id) || id < 1) {
     return 0;
   }
-  const { rows } = await pool.query(
-    `
-    SELECT count(*)::int AS c
-    FROM in_app_notifications
-    WHERE recipient_type = $1
-      AND recipient_id = $2
-      AND read_at IS NULL
-    `,
-    [recipientType, id]
-  );
-  return rows[0].c;
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT count(*)::int AS c
+      FROM in_app_notifications
+      WHERE recipient_type = $1
+        AND recipient_id = $2
+        AND read_at IS NULL
+      `,
+      [recipientType, id]
+    );
+    loggedDbUnavailable = false;
+    return rows[0].c;
+  } catch (err) {
+    if (isPostgresConnectivityError(err)) {
+      warnDbUnavailable("unread count", err);
+      return 0;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -120,35 +153,44 @@ export async function listInAppNotifications({
     return { items: [], unreadCount: 0 };
   }
 
-  const [listRes, unreadRes] = await Promise.all([
-    pool.query(
-      `
-      SELECT *
-      FROM in_app_notifications
-      WHERE recipient_type = $1
-        AND recipient_id = $2
-        ${unreadOnly ? "AND read_at IS NULL" : ""}
-      ORDER BY created_at DESC
-      LIMIT $3 OFFSET $4
-      `,
-      [recipientType, id, Math.min(100, Math.max(1, limit)), Math.max(0, offset)]
-    ),
-    pool.query(
-      `
-      SELECT count(*)::int AS c
-      FROM in_app_notifications
-      WHERE recipient_type = $1
-        AND recipient_id = $2
-        AND read_at IS NULL
-      `,
-      [recipientType, id]
-    ),
-  ]);
+  try {
+    const [listRes, unreadRes] = await Promise.all([
+      pool.query(
+        `
+        SELECT *
+        FROM in_app_notifications
+        WHERE recipient_type = $1
+          AND recipient_id = $2
+          ${unreadOnly ? "AND read_at IS NULL" : ""}
+        ORDER BY created_at DESC
+        LIMIT $3 OFFSET $4
+        `,
+        [recipientType, id, Math.min(100, Math.max(1, limit)), Math.max(0, offset)]
+      ),
+      pool.query(
+        `
+        SELECT count(*)::int AS c
+        FROM in_app_notifications
+        WHERE recipient_type = $1
+          AND recipient_id = $2
+          AND read_at IS NULL
+        `,
+        [recipientType, id]
+      ),
+    ]);
 
-  return {
-    items: listRes.rows.map(formatRow),
-    unreadCount: unreadRes.rows[0].c,
-  };
+    loggedDbUnavailable = false;
+    return {
+      items: listRes.rows.map(formatRow),
+      unreadCount: unreadRes.rows[0].c,
+    };
+  } catch (err) {
+    if (isPostgresConnectivityError(err)) {
+      warnDbUnavailable("list", err);
+      return { items: [], unreadCount: 0 };
+    }
+    throw err;
+  }
 }
 
 export async function markNotificationRead({

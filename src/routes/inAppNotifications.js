@@ -46,7 +46,7 @@ router.get("/in-app-notifications", async (req, res) => {
     });
     return res.json({ notifications: items, unreadCount });
   } catch (err) {
-    console.error("in-app-notifications list", err);
+    console.error("in-app-notifications list", err?.message || err);
     return res.status(500).json({ error: err.message || "Server error" });
   }
 });
@@ -61,7 +61,7 @@ router.get("/in-app-notifications/unread-count", async (req, res) => {
     const count = await getUnreadCount({ recipientType, recipientId });
     return res.json({ count });
   } catch (err) {
-    console.error("in-app-notifications count", err);
+    console.error("in-app-notifications count", err?.message || err);
     return res.status(500).json({ error: err.message || "Server error" });
   }
 });

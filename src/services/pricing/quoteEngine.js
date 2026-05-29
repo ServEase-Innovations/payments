@@ -15,6 +15,7 @@ import {
   calculateMonthlyQuote,
   useShortTermHourPackage,
 } from "./shortTermPricing.js";
+import { validateCouponForQuote } from "./couponDiscount.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -97,6 +98,8 @@ function ruleApplies(rule, ctx) {
  * @param {number} [input.durationHours] — for hourly / package quotes
  * @param {number} [input.hoursPerDay] — short-term daily window
  * @param {'min'|'max'|'mid'} [input.ratePreference]
+ * @param {string} [input.couponCode]
+ * @param {string} [input.city]
  * @param {import('pg').PoolClient} [client]
  */
 export async function calculateQuote(input, client) {
@@ -284,6 +287,33 @@ export async function calculateQuote(input, client) {
     throw new Error(`Unsupported plan unit: ${plan.unit}`);
   }
 
+  const subtotalBeforeCoupon = total;
+  const couponCode = String(input.couponCode || input.coupon_code || "").trim();
+  let appliedCoupon = null;
+
+  if (couponCode) {
+    const couponResult = await validateCouponForQuote({
+      couponCode,
+      customerId: input.customerId,
+      orderValue: subtotalBeforeCoupon,
+      // Use actual booking service type (COOK|MAID). Coupons service allows MAID coupons on COOK, not the reverse.
+      serviceType,
+      city: input.city,
+    });
+    if (couponResult && couponResult.discount_amount > 0) {
+      discounts.push({
+        label: `Coupon ${couponResult.coupon_code}`,
+        amount: couponResult.discount_amount,
+      });
+      total = Math.max(0, subtotalBeforeCoupon - couponResult.discount_amount);
+      appliedCoupon = {
+        coupon_code: couponResult.coupon_code,
+        coupon_id: couponResult.coupon_id,
+        discount_amount: couponResult.discount_amount,
+      };
+    }
+  }
+
   const snapshot = {
     version: 1,
     quoted_at: new Date().toISOString(),
@@ -310,7 +340,8 @@ export async function calculateQuote(input, client) {
     applied_rules: appliedRules,
     line_items: lineItems,
     discounts,
-    subtotal: total,
+    subtotal: subtotalBeforeCoupon,
+    coupon: appliedCoupon,
     total,
     display: {
       base_range: shortTermHourlyDisplay

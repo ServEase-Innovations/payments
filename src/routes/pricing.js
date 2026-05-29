@@ -12,7 +12,7 @@ const router = express.Router();
 
 /**
  * POST /api/pricing/quote
- * Body: { serviceType, bookingType, customerId?, startDate, endDate?, durationHours?, hoursPerDay?, ratePreference? }
+ * Body: { serviceType, bookingType, customerId?, couponCode?, city?, startDate, endDate?, durationHours?, hoursPerDay?, ratePreference? }
  */
 router.post("/quote", async (req, res) => {
   try {
@@ -21,6 +21,8 @@ router.post("/quote", async (req, res) => {
       serviceType: body.serviceType || body.service_type,
       bookingType: body.bookingType || body.booking_type,
       customerId: body.customerId ?? body.customer_id,
+      couponCode: body.couponCode ?? body.coupon_code,
+      city: body.city,
       startDate: body.startDate || body.start_date,
       endDate: body.endDate || body.end_date,
       durationHours: body.durationHours ?? body.duration_hours,
@@ -49,7 +51,9 @@ router.post("/quote", async (req, res) => {
     });
   } catch (err) {
     const msg = err.message || "Quote failed";
-    const status = msg.includes("No active pricing") || msg.includes("cannot exceed") ? 400 : 500;
+    const status =
+      err.status ??
+      (msg.includes("No active pricing") || msg.includes("cannot exceed") ? 400 : 500);
     if (status === 500) console.error("pricing/quote:", err);
     return res.status(status).json({ success: false, error: msg });
   }

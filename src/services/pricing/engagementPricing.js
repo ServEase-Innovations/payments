@@ -38,6 +38,12 @@ export async function resolvePricingForEngagement(body, client) {
         durationHours: q.durationHours ?? q.duration_hours ?? body.duration_hours,
         hoursPerDay: q.hoursPerDay ?? q.hours_per_day ?? body.hours_per_day,
         ratePreference: q.ratePreference || q.rate_preference || "mid",
+        couponCode:
+          body.coupon_code ??
+          body.couponCode ??
+          q.couponCode ??
+          q.coupon_code,
+        city: body.city ?? q.city,
       },
       client
     );

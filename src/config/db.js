@@ -21,8 +21,18 @@ pool.on("error", (err, _client) => {
   console.error("[postgres pool] idle client error:", err?.message || err, err?.code || "");
 });
 
-pool.query("SELECT current_database(), current_schema();")
-  .then(res => console.log(res.rows))
-  .catch(err => console.error(err));
+console.log(
+  `[postgres] pool → ${config.postgres.host}:${config.postgres.port}/${config.postgres.database}`
+);
+
+pool
+  .query("SELECT current_database(), current_schema();")
+  .then((res) => console.log("[postgres] connected:", res.rows[0]))
+  .catch((err) =>
+    console.error(
+      `[postgres] initial connect failed (${err?.code || err?.message}). ` +
+        "Unread in-app notifications will return empty until POSTGRES_HOST is reachable."
+    )
+  );
 
 export default pool;

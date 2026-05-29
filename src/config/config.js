@@ -19,6 +19,8 @@ console.log("✔ Loaded env file:", envPath);
 
 export default {
   env: ENV,
+  couponsServiceUrl:
+    process.env.COUPONS_SERVICE_URL || "http://localhost:3002",
   postgres: {
     host: process.env.POSTGRES_HOST || "127.0.0.1",
     user: process.env.POSTGRES_USER,
