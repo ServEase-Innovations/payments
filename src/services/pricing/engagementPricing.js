@@ -56,7 +56,7 @@ export async function resolvePricingForEngagement(body, client) {
     const expectedTotal = Number(snapshot.total) + addonTotal;
     if (!validateQuotedAmount(baseAmount, { total: expectedTotal })) {
       throw new Error(
-        `base_amount (${baseAmount}) does not match quoted total (${expectedTotal}, rate ${snapshot.total} + addons ${addonTotal}). Call POST /api/pricing/quote first.`
+        `base_amount (${baseAmount}) does not match quoted total (${expectedTotal}, rate ${snapshot.total} + addons ${addonTotal}). Call POST /api/v2/pricing/quote first.`
       );
     }
     if (addonTotal > 0) {

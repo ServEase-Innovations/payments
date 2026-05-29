@@ -29,6 +29,7 @@ import { logger } from "./src/utils/logger.js";
 import { getPaymentsOpenApiServerUrl } from "./src/utils/swaggerServerUrl.js";
 import inAppNotificationsRouter from "./src/routes/inAppNotifications.js";
 import pricingRouter from "./src/routes/pricing.js";
+import pricingV2Router from "./src/routes/v2/pricingV2.js";
 import adminPricingRouter from "./src/routes/adminPricing.js";
 import couponsProxyRouter from "./src/routes/couponsProxy.js";
 import { setSocketServer } from "./src/utils/socketIoRef.js";
@@ -97,7 +98,8 @@ const swaggerOptionsV2 = {
     info: {
       title: "Serveaso Engagement V2 API",
       version: "2.0.0",
-      description: "Production-grade engagement lifecycle APIs",
+      description:
+        "Production-grade engagement lifecycle APIs, pricing quotes (coupons & promos), and provider discovery.",
     },
   },
   apis: ["./src/routes/v2/**/*.js"],
@@ -156,6 +158,7 @@ app.use("/api/engagement-service", engagementsServiceRouter);
 app.use("/api/admin", adminPaymentsRouter);
 app.use("/api/admin", adminPricingRouter);
 app.use("/api/pricing", pricingRouter);
+app.use("/api/v2/pricing", pricingV2Router);
 app.use("/api/v2/engagements", engagementsV2Router);
 app.use("/api/v2/createEngagements", createEngagementsRouter);
 app.use("/api/v2/service-providers", serviceProvidersDiscoveryV2Router);
