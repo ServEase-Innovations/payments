@@ -1,6 +1,6 @@
 import express from "express";
 import YAML from "yamljs";
-import dotenv from "dotenv";
+import "./src/config/config.js";
 import initDB from "./src/config/initDB.js";
 import engagementsRouter from "./src/routes/engagements.js";
 import paymentRoutes from "./src/routes/payments.js";
@@ -28,6 +28,7 @@ import {
 import { logger } from "./src/utils/logger.js";
 import { getPaymentsOpenApiServerUrl } from "./src/utils/swaggerServerUrl.js";
 import inAppNotificationsRouter from "./src/routes/inAppNotifications.js";
+import internalNotificationsRouter from "./src/routes/internalNotifications.js";
 import pricingV2Router from "./src/routes/v2/pricingV2.js";
 import adminPricingRouter from "./src/routes/adminPricing.js";
 import couponsProxyRouter from "./src/routes/couponsProxy.js";
@@ -45,8 +46,6 @@ if (
 
 app.use(cors());
 app.use(requestMetrics);
-
-dotenv.config();
 
 // Create HTTP server
 const server = http.createServer(app);
@@ -76,6 +75,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // In-app notification REST (list / read) — use query: recipientType + recipientId
 app.use("/api", inAppNotificationsRouter);
+app.use("/api", internalNotificationsRouter);
 app.use("/api", couponsProxyRouter);
 
 // ✅ Initialize DB
@@ -169,7 +169,7 @@ io.on("connection", (socket) => {
   socketIoConnectionsTotal.inc();
   console.log("🔌 Client connected");
 
-  socket.on("join", ({ providerId, customerId }) => {
+  socket.on("join", ({ providerId, customerId, adminTickets }) => {
     if (providerId != null && String(providerId).length > 0) {
       const p = Number(providerId);
       if (Number.isFinite(p)) {
@@ -183,6 +183,10 @@ io.on("connection", (socket) => {
         socket.join(`customer_${c}`);
         console.log(`✅ Customer ${c} joined customer_${c}`);
       }
+    }
+    if (adminTickets === true || adminTickets === "true" || adminTickets === 1) {
+      socket.join("admins");
+      console.log("✅ Admin joined admins room (support tickets)");
     }
   });
 
