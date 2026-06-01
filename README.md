@@ -75,7 +75,7 @@ All paths below are prefixed by your server origin (e.g. `http://localhost:4000`
 | `/api/customers` | same as engagements | Shared router instance |
 | `/api/customer` | `src/routes/customerLeaves.js` | Customer leave requests |
 | `/api` | `src/routes/walletRoutes.js` | e.g. `GET /wallets/:customerId` |
-| `/api/service-providers` | `src/routes/service-providers.js` | Payouts, engagements, calendar, withdraw, **leaves** (`GET/POST/DELETE :providerId/leaves`), **availability day-blocks** (`GET/POST/DELETE` …/availability/blocks) |
+| `/api/service-providers` | `src/routes/service-providers.js` | Payouts, **`GET :providerId/withdrawal-history`** (ledger + withdrawal requests), engagements, calendar, withdraw, **leaves** (`GET/POST/DELETE :providerId/leaves`), **availability day-blocks** (`GET/POST/DELETE` …/availability/blocks) |
 | `/api/engagement-service` | `src/routes/engagementService.js` | Service days start/OTP/complete, Twilio |
 | `/api/admin` | `src/routes/adminPayments.js` | Payment summaries, ledger, engagements |
 | `/api/v2/engagements` | `src/routes/v2/engagementsV2.js` | Lifecycle: assign, start, complete, cancel, history, vacation, accept |
@@ -133,7 +133,7 @@ curl -s http://localhost:4000/metrics | head
 
 ## Database
 
-On startup, `initDB()` runs `src/config/db/schema.sql` against the configured Postgres pool. Ensure the DB user can run the DDL in that file; in shared or restricted environments you may prefer applying migrations out-of-band and guarding `initDB`.
+**Payments does not run DDL on startup.** Apply schema via [DB_Migrations](https://github.com/ServEase-Innovations/DB_Migrations) (`npm run db:migrate` from monorepo root). `schema.sql` remains a baseline reference snapshot only.
 
 ## PM2
 

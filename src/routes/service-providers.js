@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../config/db.js";
 import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import { repairTodayServiceDays } from "./serviceDays.service.js";
+import { getProviderWalletHistory } from "../services/providerWalletHistory.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -187,122 +188,71 @@ router.get("/:providerId/payouts", async (req, res) => {
   const { month, detailed } = req.query;
 
   try {
-    // 1️⃣ Validate provider
-    const providerRes = await pool.query(
-      `
-      SELECT serviceproviderid, security_deposit_collected
-      FROM serviceprovider
-      WHERE serviceproviderid = $1
-      `,
-      [providerId]
-    );
+    const data = await getProviderWalletHistory(providerId, {
+      month: month || undefined,
+      ledgerOrder: "ASC",
+    });
 
-    if (providerRes.rows.length === 0) {
-      return res.status(404).json({
+    if (data.notFound) {
+      return res.status(404).json({ success: false, error: "Provider not found" });
+    }
+    if (data.invalidMonth) {
+      return res.status(400).json({
         success: false,
-        error: "Provider not found",
+        error: "Invalid month format. Use YYYY-MM",
       });
     }
 
-    const provider = providerRes.rows[0];
-
-    // 2️⃣ Wallet = SOURCE OF TRUTH
-    const walletRes = await pool.query(
-      `
-      SELECT balance
-      FROM provider_wallets
-      WHERE serviceproviderid = $1
-      `,
-      [providerId]
-    );
-
-    const walletBalance =
-      walletRes.rows.length > 0
-        ? Number(walletRes.rows[0].balance)
-        : 0;
-
-    // 3️⃣ Optional month filter
-    let monthFilter = "";
-    const params = [providerId];
-
-    if (month) {
-      if (!/^\d{4}-\d{2}$/.test(month)) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid month format. Use YYYY-MM",
-        });
-      }
-      monthFilter = `AND TO_CHAR(created_at, 'YYYY-MM') = $2`;
-      params.push(month);
-    }
-
-    // 4️⃣ Provider ledger (CREDIT + DEBIT)
-    const ledgerRes = await pool.query(
-      `
-      SELECT
-        ledger_id,
-        engagement_id,
-        amount,
-        direction,
-        reason,
-        reference_type,
-        reference_id,
-        created_at
-      FROM provider_ledger
-      WHERE serviceproviderid = $1
-      ${monthFilter}
-      ORDER BY created_at ASC
-      `,
-      params
-    );
-
-    const ledger = ledgerRes.rows;
-
-    // 5️⃣ Totals
-    const totalEarned = ledger
-      .filter(l => l.direction === "CREDIT")
-      .reduce((sum, l) => sum + Number(l.amount || 0), 0);
-
-    const totalWithdrawn = ledger
-      .filter(l => l.direction === "DEBIT" && l.reason === "WITHDRAWAL")
-      .reduce((sum, l) => sum + Number(l.amount || 0), 0);
-
-    const securityDepositPaid =
-      Number(provider.security_deposit_collected || 0) >= 5000;
-
-    // 6️⃣ Response
     const response = {
       success: true,
-      serviceproviderid: providerId,
-      summary: {
-        total_earned: Number(totalEarned.toFixed(2)),
-        total_withdrawn: Number(totalWithdrawn.toFixed(2)),
-        available_to_withdraw: Number(walletBalance.toFixed(2)), // ✅ CORRECT
-        wallet_balance: Number(walletBalance.toFixed(2)),
-        security_deposit_paid: securityDepositPaid,
-        security_deposit_amount: Number(
-          provider.security_deposit_collected || 0
-        ),
-      },
+      serviceproviderid: data.serviceproviderid,
+      month: data.month,
+      summary: data.summary,
     };
 
-    // 7️⃣ Optional detailed ledger
     if (detailed === "true") {
-      response.ledger = ledger.map((l) => ({
-        ledger_id: l.ledger_id,
-        engagement_id: l.engagement_id,
-        amount: Number(l.amount),
-        direction: l.direction,
-        reason: l.reason,
-        reference_type: l.reference_type,
-        reference_id: l.reference_id,
-        created_at: l.created_at,
-      }));
+      response.ledger = data.ledger;
+      response.withdrawals = data.withdrawals;
+      response.payouts = data.payouts;
     }
 
     return res.json(response);
   } catch (err) {
     console.error("Error fetching provider payouts:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*                     SP WITHDRAWAL / WALLET HISTORY                          */
+/* -------------------------------------------------------------------------- */
+
+router.get("/:providerId/withdrawal-history", async (req, res) => {
+  const { providerId } = req.params;
+  const { month } = req.query;
+
+  try {
+    const data = await getProviderWalletHistory(providerId, {
+      month: month || undefined,
+      ledgerOrder: "DESC",
+    });
+
+    if (data.notFound) {
+      return res.status(404).json({ success: false, error: "Provider not found" });
+    }
+    if (data.invalidMonth) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid month format. Use YYYY-MM",
+      });
+    }
+
+    return res.json(data);
+  } catch (err) {
+    console.error("Error fetching provider withdrawal history:", err);
     return res.status(500).json({
       success: false,
       error: "Internal server error",

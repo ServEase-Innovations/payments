@@ -715,7 +715,32 @@ paths:
                     example: false
                   error:
                     type: string
-                    example: "Internal server error"
+
+  /service-providers/{providerId}/withdrawal-history:
+    get:
+      summary: Service provider wallet and withdrawal history
+      description: Returns wallet summary, ledger transactions (newest first), and withdrawal/payout requests with status.
+      tags:
+        - Provider
+      parameters:
+        - in: path
+          name: providerId
+          required: true
+          schema:
+            type: integer
+        - in: query
+          name: month
+          required: false
+          schema:
+            type: string
+            example: "2025-09"
+      responses:
+        '200':
+          description: Wallet summary, ledger, and withdrawals
+        '404':
+          description: Provider not found
+        '500':
+          description: Internal server error
 
   /service-providers/{providerId}/engagements:
     get:

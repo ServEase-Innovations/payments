@@ -519,38 +519,6 @@ CREATE TABLE IF NOT EXISTS public.serviceprovider
     CONSTRAINT ukqt70pwr65bckmjmdftw66r40o UNIQUE (permanent_address_id)
 );
 
-CREATE TABLE IF NOT EXISTS public.serviceprovider_engagement
-(
-    id bigint NOT NULL,
-    address character varying(255) COLLATE pg_catalog."default",
-    bookingdate timestamp(6) without time zone NOT NULL,
-    bookingtype character varying(255) COLLATE pg_catalog."default",
-    childage character varying(255) COLLATE pg_catalog."default",
-    customername character varying(255) COLLATE pg_catalog."default",
-    enddate date,
-    engagements character varying(255) COLLATE pg_catalog."default",
-    experience character varying(255) COLLATE pg_catalog."default",
-    housekeepingrole character varying(255) COLLATE pg_catalog."default",
-    isactive boolean NOT NULL,
-    mealtype character varying(255) COLLATE pg_catalog."default",
-    monthlyamount double precision,
-    noofpersons character varying(255) COLLATE pg_catalog."default",
-    paymentmode character varying(255) COLLATE pg_catalog."default",
-    responsibilities text COLLATE pg_catalog."default",
-    user_role character varying(255) COLLATE pg_catalog."default",
-    serviceprovidername character varying(255) COLLATE pg_catalog."default",
-    startdate date NOT NULL,
-    taskstatus character varying(255) COLLATE pg_catalog."default" NOT NULL,
-    timeslot character varying(50) COLLATE pg_catalog."default",
-    customerid bigint NOT NULL,
-    serviceproviderid bigint,
-    servicetype character varying(255) COLLATE pg_catalog."default",
-    housekeeping_role character varying(255) COLLATE pg_catalog."default",
-    modified_date timestamp(6) without time zone,
-    modified_by character varying(255) COLLATE pg_catalog."default",
-    CONSTRAINT serviceprovider_engagement_pkey PRIMARY KEY (id)
-);
-
 CREATE TABLE IF NOT EXISTS public.serviceproviderrequest
 (
     requestid bigint NOT NULL,
@@ -625,12 +593,7 @@ CREATE TABLE IF NOT EXISTS public.provider_reviews (
 
   customerid BIGINT NOT NULL,
   serviceproviderid BIGINT NOT NULL,
-
-  -- ON_DEMAND
-  serviceprovider_engagement_id BIGINT UNIQUE,
-
-  -- SHORT_TERM / MONTHLY
-  engagement_id BIGINT UNIQUE,
+  engagement_id BIGINT NOT NULL UNIQUE,
 
   service_type VARCHAR(50) NOT NULL
     CHECK (service_type IN ('ON_DEMAND', 'SHORT_TERM', 'MONTHLY')),
@@ -640,7 +603,6 @@ CREATE TABLE IF NOT EXISTS public.provider_reviews (
 
   created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now(),
 
-  -- FKs
   CONSTRAINT fk_review_customer
     FOREIGN KEY (customerid)
     REFERENCES customer(customerid),
@@ -649,21 +611,9 @@ CREATE TABLE IF NOT EXISTS public.provider_reviews (
     FOREIGN KEY (serviceproviderid)
     REFERENCES serviceprovider(serviceproviderid),
 
-  CONSTRAINT fk_review_on_demand
-    FOREIGN KEY (serviceprovider_engagement_id)
-    REFERENCES serviceprovider_engagement(id),
-
   CONSTRAINT fk_review_engagement
     FOREIGN KEY (engagement_id)
-    REFERENCES engagements(engagement_id),
-
-  -- exactly one experience per review
-  CONSTRAINT one_experience_only
-    CHECK (
-      (serviceprovider_engagement_id IS NOT NULL AND engagement_id IS NULL)
-      OR
-      (serviceprovider_engagement_id IS NULL AND engagement_id IS NOT NULL)
-    )
+    REFERENCES engagements(engagement_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.wallet_transaction
@@ -720,8 +670,8 @@ ALTER TABLE IF EXISTS public.attendance
 
 
 ALTER TABLE IF EXISTS public.booking_transaction
-    ADD CONSTRAINT fkkivwnnxvqx05mibfdqqlwjtxl FOREIGN KEY (engagement_id)
-    REFERENCES public.serviceprovider_engagement (id) MATCH SIMPLE
+    ADD CONSTRAINT booking_transaction_engagement_id_fkey FOREIGN KEY (engagement_id)
+    REFERENCES public.engagements (engagement_id) MATCH SIMPLE
     ON UPDATE NO ACTION
     ON DELETE NO ACTION;
 CREATE INDEX IF NOT EXISTS ukq90yixy5ourcq2ntcple59et
@@ -729,8 +679,8 @@ CREATE INDEX IF NOT EXISTS ukq90yixy5ourcq2ntcple59et
 
 
 ALTER TABLE IF EXISTS public.customer_holidays
-    ADD CONSTRAINT fkbwd4f3r07gcppsbem0fjyotp5 FOREIGN KEY (engagement_id)
-    REFERENCES public.serviceprovider_engagement (id) MATCH SIMPLE
+    ADD CONSTRAINT customer_holidays_engagement_id_fkey FOREIGN KEY (engagement_id)
+    REFERENCES public.engagements (engagement_id) MATCH SIMPLE
     ON UPDATE NO ACTION
     ON DELETE NO ACTION;
 
@@ -771,8 +721,8 @@ ALTER TABLE IF EXISTS public.customer_payments
 
 
 ALTER TABLE IF EXISTS public.customer_payments
-    ADD CONSTRAINT fkraud38jxwghhw4mdfiakim2om FOREIGN KEY (engagement_id)
-    REFERENCES public.serviceprovider_engagement (id) MATCH SIMPLE
+    ADD CONSTRAINT customer_payments_engagement_id_fkey FOREIGN KEY (engagement_id)
+    REFERENCES public.engagements (engagement_id) MATCH SIMPLE
     ON UPDATE NO ACTION
     ON DELETE NO ACTION;
 
@@ -785,8 +735,8 @@ ALTER TABLE IF EXISTS public.customer_used_coupons
 
 
 ALTER TABLE IF EXISTS public.customer_used_coupons
-    ADD CONSTRAINT fkgv3frrq5tfuprorv55f82m0en FOREIGN KEY (engagement_id)
-    REFERENCES public.serviceprovider_engagement (id) MATCH SIMPLE
+    ADD CONSTRAINT customer_used_coupons_engagement_id_fkey FOREIGN KEY (engagement_id)
+    REFERENCES public.engagements (engagement_id) MATCH SIMPLE
     ON UPDATE NO ACTION
     ON DELETE NO ACTION;
 
@@ -1002,20 +952,6 @@ ALTER TABLE IF EXISTS public.serviceprovider
     ON DELETE NO ACTION;
 CREATE INDEX IF NOT EXISTS ukqt70pwr65bckmjmdftw66r40o
     ON public.serviceprovider(permanent_address_id);
-
-
-ALTER TABLE IF EXISTS public.serviceprovider_engagement
-    ADD CONSTRAINT fkh2c2wulrpu6ymcxnkkhiqnsyl FOREIGN KEY (serviceproviderid)
-    REFERENCES public.serviceprovider (serviceproviderid) MATCH SIMPLE
-    ON UPDATE NO ACTION
-    ON DELETE NO ACTION;
-
-
-ALTER TABLE IF EXISTS public.serviceprovider_engagement
-    ADD CONSTRAINT fkl0h091exkleq4l5p7wsyfnhvw FOREIGN KEY (customerid)
-    REFERENCES public.customer (customerid) MATCH SIMPLE
-    ON UPDATE NO ACTION
-    ON DELETE NO ACTION;
 
 
 ALTER TABLE IF EXISTS public.shortlisted_service_provider
