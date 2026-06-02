@@ -1,6 +1,10 @@
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const { syncPostgresDbAliases, requirePostgresDatabaseName } = require("../../../../scripts/postgres-env.cjs");
 
 const ENV = process.env.NODE_ENV || "development";
 
@@ -15,6 +19,8 @@ if (!fs.existsSync(envPath)) {
 
 dotenv.config({ path: envPath });
 
+syncPostgresDbAliases(process.env);
+
 console.log("✔ Loaded env file:", envPath);
 
 export default {
@@ -25,7 +31,7 @@ export default {
     host: process.env.POSTGRES_HOST || "127.0.0.1",
     user: process.env.POSTGRES_USER,
     password: process.env.POSTGRES_PASSWORD,
-    database: process.env.POSTGRES_DB,
+    database: requirePostgresDatabaseName(process.env),
     port: process.env.POSTGRES_PORT || 5432,
     poolMax: Number(process.env.POSTGRES_POOL_MAX) || 10,
     poolIdleTimeoutMs: Number(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS) || 60_000,
