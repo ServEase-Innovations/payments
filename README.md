@@ -135,6 +135,51 @@ curl -s http://localhost:4000/metrics | head
 
 **Payments does not run DDL on startup.** Apply schema via [DB_Migrations](https://github.com/ServEase-Innovations/DB_Migrations) (`npm run db:migrate` from monorepo root). `schema.sql` remains a baseline reference snapshot only.
 
+## Time contract (epoch-first)
+
+Bookings and calendar APIs are migrating to an epoch-first contract. Canonical fields are epoch seconds, while legacy string date/time fields remain temporarily for compatibility.
+
+- Contract doc: [EPOCH_CONTRACT.md](./EPOCH_CONTRACT.md)
+- Rule: consumers should prefer `*_epoch` fields for comparisons/sorting and use string fields only as fallback during migration.
+
+### Request input aliases (payments)
+
+The payments service now accepts epoch aliases in major write/filter paths while preserving legacy date/time inputs:
+
+- `POST /api/engagements` and `PUT /api/engagements/:id`:
+  - `start_epoch`, `end_epoch`, `start_date_epoch`, `end_date_epoch`
+  - vacation aliases: `vacation_start_epoch`, `vacation_end_epoch`
+- `POST /api/v2/createEngagements`:
+  - `start_epoch`, `end_epoch`, `start_date_epoch`, `end_date_epoch`
+- `POST /api/v2/createEngagements/:engagementId/vacation`:
+  - `vacation_start_epoch`, `vacation_end_epoch`
+- `POST /api/customer/:customerId/leaves`:
+  - `leave_start_epoch`, `leave_end_epoch`
+- `POST /api/service-providers/:providerId/leaves`:
+  - `start_date_epoch`, `end_date_epoch`
+- `POST /api/service-providers/:providerId/availability/blocks`:
+  - `date_epochs[]` or `start_date_epoch` + `end_date_epoch`
+- `POST /api/v2/pricing/quote`:
+  - `startDateEpoch` / `start_date_epoch`, `endDateEpoch` / `end_date_epoch`
+- `GET /api/admin/payments`:
+  - `from_epoch`, `to_epoch`
+- `GET /api/admin/ledger`:
+  - `from_epoch`, `to_epoch`
+- `GET /api/admin/engagements`:
+  - `start_date_epoch`, `end_date_epoch`
+
+### Local verification checklist (epoch inputs)
+
+Use this quick smoke checklist before marking payments epoch migration complete:
+
+1. Create ON_DEMAND engagement using epoch payload only, confirm row has `start_epoch`/`end_epoch`.
+2. Modify engagement using epoch-only update payload and verify `provider_availability` stays consistent.
+3. Apply vacation via both v1 and v2 routes using epoch vacation fields.
+4. Submit customer/provider leaves with epoch-only dates and confirm stored `*_date` values are correct IST days.
+5. Create provider availability block via `date_epochs[]` and via epoch range.
+6. Quote pricing with `start_date_epoch`/`end_date_epoch` and ensure quote matches string-date request.
+7. Hit admin filters with epoch params (`from_epoch`, `to_epoch`, `start_date_epoch`, `end_date_epoch`) and compare with legacy filters.
+
 ## PM2
 
 `ecosystem.config.js` defines a `payments` app pointing at `index.js` with `NODE_ENV` per `env` / `env_qa` / `env_production`.

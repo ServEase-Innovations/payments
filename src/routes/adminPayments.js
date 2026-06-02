@@ -9,6 +9,23 @@ dayjs.extend(timezone);
 
 const router = express.Router();
 
+function toFiniteEpoch(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function isoFromEpoch(epochSeconds) {
+  const ep = toFiniteEpoch(epochSeconds);
+  if (ep == null) return null;
+  return new Date(ep * 1000).toISOString();
+}
+
+function ymdFromEpoch(epochSeconds) {
+  const ep = toFiniteEpoch(epochSeconds);
+  if (ep == null) return null;
+  return dayjs.unix(ep).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
 router.get("/payments/summary", async (req, res) => {
   try {
     const result = await pool.query(`
@@ -46,10 +63,12 @@ const paymentsListFrom = `
 `;
 
 function buildAdminPaymentsFilters(query, startIdx) {
-  const { status, payment_mode, from, to, engagement_id } = query;
+  const { status, payment_mode, from, to, from_epoch, to_epoch, engagement_id } = query;
   let where = " WHERE 1=1";
   const params = [];
   let idx = startIdx;
+  const resolvedFrom = from || isoFromEpoch(from_epoch);
+  const resolvedTo = to || isoFromEpoch(to_epoch);
 
   if (status) {
     where += ` AND p.status = $${idx++}`;
@@ -63,17 +82,23 @@ function buildAdminPaymentsFilters(query, startIdx) {
     where += ` AND p.engagement_id = $${idx++}`;
     params.push(engagement_id);
   }
-  if (from) {
+  if (resolvedFrom) {
     where += ` AND p.created_at >= $${idx++}`;
-    params.push(from);
+    params.push(resolvedFrom);
   }
-  if (to) {
+  if (resolvedTo) {
     where += ` AND p.created_at <= $${idx++}`;
-    params.push(to);
+    params.push(resolvedTo);
   }
   return { where, params, nextIdx: idx };
 }
 
+/**
+ * GET /api/admin/payments
+ * Filters:
+ * - Legacy: from, to (ISO/date-time)
+ * - Epoch-first aliases: from_epoch, to_epoch (unix seconds)
+ */
 router.get("/payments", async (req, res) => {
   try {
     const { limit = 20, offset = 0 } = req.query;
@@ -156,22 +181,27 @@ router.get("/payments/:paymentId", async (req, res) => {
 /**
  * GET /api/admin/ledger
  * Admin – Serveaso Ledger
+ * Filters:
+ * - Legacy: from, to (YYYY-MM-DD)
+ * - Epoch-first aliases: from_epoch, to_epoch (unix seconds)
  */
 router.get("/ledger", async (req, res) => {
   try {
-    const { from, to, limit = 50, offset = 0 } = req.query;
+    const { from, to, from_epoch, to_epoch, limit = 50, offset = 0 } = req.query;
+    const resolvedFrom = from || ymdFromEpoch(from_epoch);
+    const resolvedTo = to || ymdFromEpoch(to_epoch);
 
     const params = [];
     let where = "";
 
     // ---- Date filters ----
-    if (from) {
-      params.push(from);
+    if (resolvedFrom) {
+      params.push(resolvedFrom);
       where += ` AND created_at::date >= $${params.length}`;
     }
 
-    if (to) {
-      params.push(to);
+    if (resolvedTo) {
+      params.push(resolvedTo);
       where += ` AND created_at::date <= $${params.length}`;
     }
 
@@ -294,6 +324,12 @@ router.get("/ledger", async (req, res) => {
 });
 
 
+/**
+ * GET /api/admin/engagements
+ * Filters:
+ * - Legacy: from, to (YYYY-MM-DD bounds over start_date/end_date)
+ * - Epoch-first aliases: start_date_epoch, end_date_epoch (unix seconds)
+ */
 router.get("/engagements", async (req, res) => {
   try {
     const {
@@ -304,9 +340,13 @@ router.get("/engagements", async (req, res) => {
       active,
       from,
       to,
+      start_date_epoch,
+      end_date_epoch,
       limit = 200,
       offset = 0,
     } = req.query;
+    const resolvedFrom = from || ymdFromEpoch(start_date_epoch);
+    const resolvedTo = to || ymdFromEpoch(end_date_epoch);
 
     const params = [];
     let where = "WHERE 1=1";
@@ -339,13 +379,13 @@ router.get("/engagements", async (req, res) => {
       where += ` AND e.active = $${params.length}`;
     }
 
-    if (from) {
-      params.push(from);
+    if (resolvedFrom) {
+      params.push(resolvedFrom);
       where += ` AND e.start_date >= $${params.length}`;
     }
 
-    if (to) {
-      params.push(to);
+    if (resolvedTo) {
+      params.push(resolvedTo);
       where += ` AND e.end_date <= $${params.length}`;
     }
 

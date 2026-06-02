@@ -45,6 +45,37 @@ function toEpochSeconds(dateStr, timeStr) {
   return dt.unix();
 }
 
+function toFiniteEpoch(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function dateYmdFromEpoch(epochSeconds) {
+  const epoch = toFiniteEpoch(epochSeconds);
+  if (epoch == null) return null;
+  return dayjs.unix(epoch).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
+function normalizeYmdInput(dateLike) {
+  if (!dateLike) return null;
+  if (typeof dateLike === "string") {
+    const trimmed = dateLike.trim();
+    const strict = dayjs.tz(trimmed.slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+    if (strict.isValid()) return strict.format("YYYY-MM-DD");
+    const parsed = dayjs.tz(trimmed, "Asia/Kolkata");
+    if (parsed.isValid()) return parsed.format("YYYY-MM-DD");
+    return null;
+  }
+  const parsed = dayjs(dateLike).tz("Asia/Kolkata");
+  return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+}
+
+function ymdFromEpoch(epochSeconds) {
+  const epoch = toFiniteEpoch(epochSeconds);
+  if (epoch == null) return null;
+  return dayjs.unix(epoch).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
 /**
  * Same-calendar-day visit length from wall-clock times (IST). Used when `duration_minutes`
  * looks like a contract length (e.g. 43260) so overlap checks use the real daily window.
@@ -204,6 +235,10 @@ router.post("/", async (req, res) => {
       end_date,
       start_time,
       end_time,
+      start_epoch,
+      end_epoch,
+      start_date_epoch,
+      end_date_epoch,
       responsibilities,
       booking_type,
       service_type,
@@ -215,11 +250,37 @@ router.post("/", async (req, res) => {
       duration_minutes
     } = req.body;
 
-    if (!customerid || !start_date || !start_time || !base_amount || !booking_type || !service_type) {
+    const isOnDemand = booking_type === "ON_DEMAND";
+    const resolvedStartEpoch =
+      toFiniteEpoch(start_epoch) ??
+      toEpochSeconds(
+        normalizeYmdInput(start_date) ?? dateYmdFromEpoch(start_date_epoch),
+        start_time
+      );
+    const resolvedStartDate =
+      normalizeYmdInput(start_date) ??
+      dateYmdFromEpoch(resolvedStartEpoch) ??
+      dateYmdFromEpoch(start_date_epoch);
+    const resolvedStartTime = start_time || (resolvedStartEpoch != null
+      ? dayjs.unix(resolvedStartEpoch).tz("Asia/Kolkata").format("HH:mm")
+      : null);
+    const resolvedEndEpoch = toFiniteEpoch(end_epoch);
+    const resolvedEndDate =
+      normalizeYmdInput(end_date) ??
+      dateYmdFromEpoch(resolvedEndEpoch) ??
+      dateYmdFromEpoch(end_date_epoch) ??
+      resolvedStartDate;
+
+    if (
+      !customerid ||
+      !resolvedStartDate ||
+      !resolvedStartTime ||
+      !base_amount ||
+      !booking_type ||
+      !service_type
+    ) {
       return res.status(400).json({ error: "Missing required fields" });
     }
-
-    const isOnDemand = booking_type === "ON_DEMAND";
 
     if (!isOnDemand && !serviceproviderid) {
       return res.status(400).json({ error: "Service Provider required" });
@@ -235,8 +296,8 @@ router.post("/", async (req, res) => {
     );
     if (rawDur > MAX_SERVICE_DURATION_MINUTES) {
       const fromClock = visitDurationMinutesFromClock(
-        start_date,
-        start_time,
+        resolvedStartDate,
+        resolvedStartTime,
         end_time
       );
       if (fromClock != null) {
@@ -245,12 +306,15 @@ router.post("/", async (req, res) => {
     }
     const durationSec = durationMinutes * 60;
 
-    const startEpoch = toEpochSeconds(start_date, start_time);
+    const startEpoch = resolvedStartEpoch;
     if (!startEpoch) throw new Error("Invalid start time");
 
-    const endEpoch = startEpoch + durationSec;
+    const endEpoch = resolvedEndEpoch ?? (startEpoch + durationSec);
 
-    const effectiveEndDate = isOnDemand ? start_date : end_date;
+    const effectiveEndDate = isOnDemand ? resolvedStartDate : resolvedEndDate;
+    if (!effectiveEndDate) {
+      return res.status(400).json({ error: "Missing end_date for non ON_DEMAND booking" });
+    }
 
     await client.query("BEGIN");
 
@@ -266,14 +330,14 @@ router.post("/", async (req, res) => {
     // Overlap check: clip existing slots to this calendar day (IST). Rows sometimes store
     // multi-day spans from bad duration_minutes; raw epoch overlap then falsely blocks bookings.
     if (!isOnDemand && serviceproviderid) {
-      const startD = new Date(start_date);
+      const startD = new Date(resolvedStartDate);
       const endD = new Date(effectiveEndDate);
       for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
         const day = d.toISOString().slice(0, 10);
         const dayWindowStart = toEpochSeconds(day, "00:00");
         if (dayWindowStart == null) continue;
         const dayWindowEnd = dayWindowStart + 86400;
-        const dayStartEpoch = toEpochSeconds(day, start_time);
+        const dayStartEpoch = toEpochSeconds(day, resolvedStartTime);
         if (dayStartEpoch == null) continue;
         const dayEndEpoch = dayStartEpoch + durationSec;
         const overlap = await client.query(
@@ -300,7 +364,7 @@ router.post("/", async (req, res) => {
           await client.query("ROLLBACK");
           return res.status(409).json({
             error: "Provider already has a booking at this time",
-            detail: `Service provider ${serviceproviderid} is booked on ${day} at the selected time slot (${start_time}).`,
+            detail: `Service provider ${serviceproviderid} is booked on ${day} at the selected time slot (${resolvedStartTime}).`,
           });
         }
       }
@@ -349,7 +413,7 @@ router.post("/", async (req, res) => {
       [
         customerid,
         isOnDemand ? null : serviceproviderid,
-        start_date,
+        resolvedStartDate,
         effectiveEndDate,
         responsibilitiesPayload,
         booking_type,
@@ -557,15 +621,22 @@ router.post("/:engagementId/vacation", async (req, res) => {
       customerid,
       vacation_start_date,
       vacation_end_date,
+      vacation_start_epoch,
+      vacation_end_epoch,
       leave_type,
       modified_by_id,
       modified_by_role,
     } = req.body || {};
 
+    const resolvedVacationStartDate =
+      normalizeYmdInput(vacation_start_date) ?? ymdFromEpoch(vacation_start_epoch);
+    const resolvedVacationEndDate =
+      normalizeYmdInput(vacation_end_date) ?? ymdFromEpoch(vacation_end_epoch);
+
     if (!Number.isFinite(engagementId) || engagementId < 1) {
       return res.status(400).json({ success: false, error: "Invalid engagementId" });
     }
-    if (!customerid || !vacation_start_date || !vacation_end_date) {
+    if (!customerid || !resolvedVacationStartDate || !resolvedVacationEndDate) {
       return res.status(400).json({
         success: false,
         error: "customerid, vacation_start_date, and vacation_end_date are required",
@@ -577,8 +648,8 @@ router.post("/:engagementId/vacation", async (req, res) => {
     const result = await applyVacationForEngagement(client, {
       engagementId,
       customerId: customerid,
-      vacationStartDate: vacation_start_date,
-      vacationEndDate: vacation_end_date,
+      vacationStartDate: resolvedVacationStartDate,
+      vacationEndDate: resolvedVacationEndDate,
       leaveType: leave_type || "VACATION",
       modifiedById: modified_by_id != null ? modified_by_id : customerid,
       modifiedByRole: modified_by_role || "CUSTOMER",

@@ -85,6 +85,14 @@ const router = express.Router();
  *               start_date:
  *                 type: string
  *                 format: date
+ *               startDateEpoch:
+ *                 type: integer
+ *                 description: Unix epoch seconds alias for startDate/start_date
+ *                 example: 1779926400
+ *               start_date_epoch:
+ *                 type: integer
+ *                 description: Unix epoch seconds alias for start_date
+ *                 example: 1779926400
  *               endDate:
  *                 type: string
  *                 format: date
@@ -92,6 +100,14 @@ const router = express.Router();
  *               end_date:
  *                 type: string
  *                 format: date
+ *               endDateEpoch:
+ *                 type: integer
+ *                 description: Unix epoch seconds alias for endDate/end_date
+ *                 example: 1782518400
+ *               end_date_epoch:
+ *                 type: integer
+ *                 description: Unix epoch seconds alias for end_date
+ *                 example: 1782518400
  *               durationHours:
  *                 type: number
  *                 description: Visit length for ON_DEMAND / per-visit short-term

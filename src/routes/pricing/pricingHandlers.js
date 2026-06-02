@@ -5,6 +5,24 @@ import {
   listPlans,
   insertQuoteLog,
 } from "../../services/pricing/pricingRepository.js";
+import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc.js";
+import timezone from "dayjs/plugin/timezone.js";
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.tz.setDefault("Asia/Kolkata");
+
+function toFiniteEpoch(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function ymdFromEpoch(epochSeconds) {
+  const ep = toFiniteEpoch(epochSeconds);
+  if (ep == null) return null;
+  return dayjs.unix(ep).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
 
 /**
  * @param {import('express').Request} req
@@ -13,14 +31,22 @@ import {
 export async function handlePostQuote(req, res) {
   try {
     const body = req.body || {};
+    const resolvedStartDate =
+      body.startDate ||
+      body.start_date ||
+      ymdFromEpoch(body.startDateEpoch ?? body.start_date_epoch);
+    const resolvedEndDate =
+      body.endDate ||
+      body.end_date ||
+      ymdFromEpoch(body.endDateEpoch ?? body.end_date_epoch);
     const result = await calculateQuote({
       serviceType: body.serviceType || body.service_type,
       bookingType: body.bookingType || body.booking_type,
       customerId: body.customerId ?? body.customer_id,
       couponCode: body.couponCode ?? body.coupon_code,
       city: body.city,
-      startDate: body.startDate || body.start_date,
-      endDate: body.endDate || body.end_date,
+      startDate: resolvedStartDate,
+      endDate: resolvedEndDate,
       durationHours: body.durationHours ?? body.duration_hours,
       hoursPerDay: body.hoursPerDay ?? body.hours_per_day,
       ratePreference: body.ratePreference || body.rate_preference || "mid",

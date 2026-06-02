@@ -9,6 +9,26 @@ dayjs.extend(timezone);
 
 const router = express.Router();
 
+function toFiniteEpoch(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function ymdFromEpoch(epochSeconds) {
+  const ep = toFiniteEpoch(epochSeconds);
+  if (ep == null) return null;
+  return dayjs.unix(ep).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
+function normalizeYmd(dateLike) {
+  if (!dateLike) return null;
+  const val = String(dateLike).trim();
+  const strict = dayjs.tz(val.slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  if (strict.isValid()) return strict.format("YYYY-MM-DD");
+  const parsed = dayjs.tz(val, "Asia/Kolkata");
+  return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+}
+
 function computeDailyRate(baseAmount, startDate, endDate) {
   const totalDays = (new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24) + 1;
   return Number(baseAmount) / totalDays;
@@ -32,17 +52,29 @@ async function getCustomerWalletId(client, customerId) {
  */
 router.post("/:customerId/leaves", async (req, res) => {
   const { customerId } = req.params;
-  const { engagement_id, leave_start_date, leave_end_date, leave_type } = req.body;
+  const {
+    engagement_id,
+    leave_start_date,
+    leave_end_date,
+    leave_start_epoch,
+    leave_end_epoch,
+    leave_type,
+  } = req.body;
 
   const client = await pool.connect();
 
   try {
-    if (!leave_start_date || !leave_end_date) {
+    const resolvedLeaveStartDate =
+      normalizeYmd(leave_start_date) ?? ymdFromEpoch(leave_start_epoch);
+    const resolvedLeaveEndDate =
+      normalizeYmd(leave_end_date) ?? ymdFromEpoch(leave_end_epoch);
+
+    if (!resolvedLeaveStartDate || !resolvedLeaveEndDate) {
       return res.status(400).json({ error: "leave_start_date and leave_end_date are required" });
     }
 
-    const start = dayjs.tz(leave_start_date, "Asia/Kolkata").startOf("day");
-    const end = dayjs.tz(leave_end_date, "Asia/Kolkata").endOf("day");
+    const start = dayjs.tz(resolvedLeaveStartDate, "Asia/Kolkata").startOf("day");
+    const end = dayjs.tz(resolvedLeaveEndDate, "Asia/Kolkata").endOf("day");
 
     if (!start.isValid() || !end.isValid() || end.isBefore(start)) {
       return res.status(400).json({ error: "Invalid leave_start_date or leave_end_date" });

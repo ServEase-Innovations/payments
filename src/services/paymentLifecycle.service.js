@@ -116,7 +116,7 @@ export async function handlePaymentSuccess({
   }
 
   const socketServer = io != null ? io : getSocketServer();
-  console.log(`Payment successful for engagement ${engagementId}.`, io);
+  console.log(`Payment successful for engagement ${engagementId}.`);
 
   if (engagement.booking_type === "ON_DEMAND" && socketServer) {
     const life = String(engagement.engagement_status || "").toUpperCase();
@@ -172,15 +172,23 @@ export async function handlePaymentSuccess({
       );
 
       if (distance <= 5000) {
-        const room = `provider_${p.serviceproviderid}`;
+        const spid = Number(p.serviceproviderid);
+        if (!Number.isFinite(spid) || spid < 1) continue;
+        const room = `provider_${spid}`;
 
-        const clients = socketServer.sockets.adapter.rooms.get(room);
+        const roomSet = socketServer.sockets.adapter.rooms.get(room);
+        const connectedCount = roomSet ? roomSet.size : 0;
 
         console.log(
           `📡 Broadcasting engagement ${engagement.engagement_id} → ${room}`,
           "| connections:",
-          clients ? clients.size : 0
+          connectedCount
         );
+        if (connectedCount === 0) {
+          console.warn(
+            `No live socket in ${room} — provider must open the dashboard while logged in (Auth0 or OTP) so the app can join that room.`
+          );
+        }
 
         const distanceKm = Math.round((distance / 1000) * 10) / 10;
         const startTimeLabel = engagement.start_epoch
@@ -222,7 +230,7 @@ export async function handlePaymentSuccess({
         try {
           await upsertProviderNewBookingNotification({
             io: socketServer,
-            recipientId: p.serviceproviderid,
+            recipientId: spid,
             engagementId: engagement.engagement_id,
             title: "New paid booking nearby — tap to review",
             body: bodyText,

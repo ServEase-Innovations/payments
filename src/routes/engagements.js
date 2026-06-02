@@ -44,6 +44,31 @@ function toEpochSeconds(dateStr, timeStr) {
   return dt.unix();
 }
 
+function toFiniteEpoch(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function dateYmdFromEpoch(epochSeconds) {
+  const epoch = toFiniteEpoch(epochSeconds);
+  if (epoch == null) return null;
+  return dayjs.unix(epoch).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
+function normalizeYmdInput(dateLike) {
+  if (!dateLike) return null;
+  if (typeof dateLike === "string") {
+    const trimmed = dateLike.trim();
+    const strict = dayjs.tz(trimmed.slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+    if (strict.isValid()) return strict.format("YYYY-MM-DD");
+    const parsed = dayjs.tz(trimmed, "Asia/Kolkata");
+    if (parsed.isValid()) return parsed.format("YYYY-MM-DD");
+    return null;
+  }
+  const parsed = dayjs(dateLike).tz("Asia/Kolkata");
+  return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+}
+
 function epochToTimeHM(epochSeconds) {
   if (!epochSeconds) return null;
   return dayjs.unix(Number(epochSeconds)).tz("Asia/Kolkata").format("HH:mm");
@@ -107,6 +132,10 @@ router.post("/", async (req, res) => {
       start_date,
       end_date,
       start_time,
+      start_epoch,
+      end_epoch,
+      start_date_epoch,
+      end_date_epoch,
       responsibilities,
       booking_type, // ON_DEMAND | MONTHLY
       service_type,
@@ -117,23 +146,52 @@ router.post("/", async (req, res) => {
       payment_mode = "razorpay",
     } = req.body;
 
+    const isOnDemand = booking_type === "ON_DEMAND";
+    const resolvedStartEpoch =
+      toFiniteEpoch(start_epoch) ??
+      toEpochSeconds(
+        normalizeYmdInput(start_date) ?? dateYmdFromEpoch(start_date_epoch),
+        start_time
+      );
+    const resolvedStartDate =
+      normalizeYmdInput(start_date) ??
+      dateYmdFromEpoch(resolvedStartEpoch) ??
+      dateYmdFromEpoch(start_date_epoch);
+    const resolvedStartTime = start_time || epochToTimeHM(resolvedStartEpoch);
+    const resolvedEndEpoch =
+      toFiniteEpoch(end_epoch) ??
+      (resolvedStartEpoch != null
+        ? resolvedStartEpoch + (isOnDemand ? 2 : 1) * 3600
+        : null);
+    const resolvedEndDate =
+      normalizeYmdInput(end_date) ??
+      dateYmdFromEpoch(resolvedEndEpoch) ??
+      dateYmdFromEpoch(end_date_epoch) ??
+      resolvedStartDate;
+
     // 1️⃣ Validation
-    if (!customerid || !start_date || !end_date || !start_time || !base_amount || !booking_type || !service_type) {
+    if (
+      !customerid ||
+      !resolvedStartDate ||
+      !resolvedStartTime ||
+      !resolvedEndDate ||
+      !base_amount ||
+      !booking_type ||
+      !service_type
+    ) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const providerId = booking_type === "ON_DEMAND" ? null : serviceproviderid;
-    const assignment_status = booking_type === "ON_DEMAND" ? "UNASSIGNED" : "ASSIGNED";
+    const providerId = isOnDemand ? null : serviceproviderid;
+    const assignment_status = isOnDemand ? "UNASSIGNED" : "ASSIGNED";
 
-    // 2️⃣ Epochs — ONLY for non-ON_DEMAND
-    const startEpoch = toEpochSeconds(start_date, start_time);
-if (!startEpoch) throw new Error("Invalid date/time");
+    // 2️⃣ Epochs
+    const startEpoch = resolvedStartEpoch;
+    if (!startEpoch) throw new Error("Invalid date/time");
 
-const hoursToAdd = booking_type === "ON_DEMAND" ? 2 : 1;
-const endEpoch = startEpoch + hoursToAdd * 3600;
-
-const effectiveEndDate =
-  booking_type === "ON_DEMAND" ? start_date : end_date;
+    const hoursToAdd = isOnDemand ? 2 : 1;
+    const endEpoch = resolvedEndEpoch ?? startEpoch + hoursToAdd * 3600;
+    const effectiveEndDate = isOnDemand ? resolvedStartDate : resolvedEndDate;
 
 
     await client.query("BEGIN");
@@ -163,8 +221,8 @@ const effectiveEndDate =
     }
 
     // 4️⃣ Overlap check (ONLY for non-ON_DEMAND) — clip DB slots to start_date’s IST calendar day
-    if (providerId && booking_type !== "ON_DEMAND") {
-      const day = typeof start_date === "string" ? start_date.slice(0, 10) : start_date;
+    if (providerId && !isOnDemand) {
+      const day = resolvedStartDate;
       const dayWindowStart = toEpochSeconds(day, "00:00");
       const dayWindowEnd = dayWindowStart != null ? dayWindowStart + 86400 : null;
       if (dayWindowStart != null && dayWindowEnd != null) {
@@ -218,7 +276,7 @@ const effectiveEndDate =
   [
     customerid,
     providerId,
-    start_date,
+    resolvedStartDate,
     effectiveEndDate,   // ✅ IMPORTANT
     responsibilitiesPayload,
     booking_type,
@@ -237,19 +295,21 @@ const effectiveEndDate =
     const engagement = engRes.rows[0];
 
     // 6️⃣ Create service_days ONLY for non-ON_DEMAND
-    if (booking_type !== "ON_DEMAND") {
-      await createServiceDays(client, engagement.engagement_id, start_date, effectiveEndDate);
+    if (!isOnDemand) {
+      await createServiceDays(client, engagement.engagement_id, resolvedStartDate, effectiveEndDate);
     }
 
     // 7️⃣ Provider availability ONLY for non-ON_DEMAND
-    if (providerId && booking_type !== "ON_DEMAND") {
-      const startD = new Date(start_date);
+    if (providerId && !isOnDemand) {
+      const startD = new Date(resolvedStartDate);
       const endD = new Date(effectiveEndDate);
+      const dailyStartTime = epochToTimeHM(startEpoch);
+      if (!dailyStartTime) throw new Error("Unable to derive slot start time");
 
 
       for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
         const day = d.toISOString().slice(0, 10);
-        const dayStartEpoch = toEpochSeconds(day, start_time);
+        const dayStartEpoch = toEpochSeconds(day, dailyStartTime);
         const dayEndEpoch = dayStartEpoch + hoursToAdd * 3600;
 
         await client.query(
@@ -447,6 +507,8 @@ router.get("/:customerId/today-bookings", async (req, res) => {
         pa.date::text AS visit_date,
         pa.slot_start_epoch,
         pa.slot_end_epoch,
+        e.start_epoch,
+        e.end_epoch,
         pa.status AS availability_status,
         e.booking_type,
         e.service_type,
@@ -517,6 +579,10 @@ router.get("/:customerId/today-bookings", async (req, res) => {
         visit_date: row.visit_date,
         slot_start_epoch: startEp,
         slot_end_epoch: endEp,
+        engagement_start_epoch:
+          row.start_epoch != null ? Number(row.start_epoch) : null,
+        engagement_end_epoch:
+          row.end_epoch != null ? Number(row.end_epoch) : null,
         start_time_ist: startEp != null ? epochToTimeHM(startEp) : null,
         end_time_ist: endEp != null ? epochToTimeHM(endEp) : null,
         availability_status: row.availability_status,
@@ -747,8 +813,10 @@ WHERE sp.serviceproviderid = ANY($1)`,
         : "";
       if (bookingType === "ON_DEMAND") {
         const nowUnix = dayjs().tz("Asia/Kolkata").unix();
-        const startEp = Number(e.start_epoch);
-        const endEp = Number(e.end_epoch);
+        const startEpRaw = Number(e.start_epoch);
+        const endEpRaw = Number(e.end_epoch);
+        const startEp = Number.isFinite(startEpRaw) && startEpRaw > 0 ? startEpRaw : null;
+        const endEp = Number.isFinite(endEpRaw) && endEpRaw > 0 ? endEpRaw : null;
         if (
           dayStatusUpper === "IN_PROGRESS" ||
           dayStatusUpper === "STARTED"
@@ -756,9 +824,9 @@ WHERE sp.serviceproviderid = ANY($1)`,
           bucket = "ongoing";
         } else if (dayStatusUpper === "COMPLETED") {
           bucket = "past";
-        } else if (Number.isFinite(endEp) && nowUnix >= endEp) {
+        } else if (endEp != null && nowUnix >= endEp) {
           bucket = "past";
-        } else if (Number.isFinite(startEp) && nowUnix < startEp) {
+        } else if (startEp != null && nowUnix < startEp) {
           bucket = "upcoming";
         } else {
           bucket = "ongoing";
@@ -768,13 +836,24 @@ WHERE sp.serviceproviderid = ANY($1)`,
       const { task_status, work_summary } = deriveTaskStatusForCustomer(e, bucket, todayService);
       const { task_status: taskStatusStored, ...engCore } = e;
 
+      const startEpoch = Number(e.start_epoch);
+      const endEpoch = Number(e.end_epoch);
+      const safeStartTime =
+        Number.isFinite(startEpoch) && startEpoch > 0
+          ? dayjs.unix(startEpoch).tz("Asia/Kolkata").format("HH:mm")
+          : null;
+      const safeEndTime =
+        Number.isFinite(endEpoch) && endEpoch > 0
+          ? dayjs.unix(endEpoch).tz("Asia/Kolkata").format("HH:mm")
+          : null;
+
       const enriched = {
         ...engCore,
         task_status,
         task_status_stored: taskStatusStored,
         work_summary,
-        start_time: dayjs.unix(e.start_epoch).tz("Asia/Kolkata").format("HH:mm"),
-        end_time: dayjs.unix(e.end_epoch).tz("Asia/Kolkata").format("HH:mm"),
+        start_time: safeStartTime,
+        end_time: safeEndTime,
         provider: providerById[e.serviceproviderid] || null,
         payment: paymentByEng[e.engagement_id] || null,
         modifications: modsByEng[e.engagement_id] || [],
@@ -846,6 +925,10 @@ router.put("/:id", async (req, res) => {
       start_date,
       end_date,
       start_time,
+      start_epoch,
+      end_epoch,
+      start_date_epoch,
+      end_date_epoch,
       serviceproviderid,
       responsibilities,
       booking_type,
@@ -855,12 +938,19 @@ router.put("/:id", async (req, res) => {
       active,
       vacation_start_date,
       vacation_end_date,
+      vacation_start_epoch,
+      vacation_end_epoch,
       cancel_vacation,
       modified_by_id,
       modified_by_role
     } = body;
 
-    const isVacationOperation = (vacation_start_date !== undefined) || (vacation_end_date !== undefined) || (cancel_vacation);
+    const vacationStartDateResolved =
+      normalizeYmdInput(vacation_start_date) ?? dateYmdFromEpoch(vacation_start_epoch);
+    const vacationEndDateResolved =
+      normalizeYmdInput(vacation_end_date) ?? dateYmdFromEpoch(vacation_end_epoch);
+
+    const isVacationOperation = (vacationStartDateResolved !== undefined && vacationStartDateResolved !== null) || (vacationEndDateResolved !== undefined && vacationEndDateResolved !== null) || (cancel_vacation);
 
     // If it's a non-vacation update that can include changing time/provider/dates -> handle separately
     if (!isVacationOperation) {
@@ -900,7 +990,30 @@ router.put("/:id", async (req, res) => {
       let newStartDate = oldEng.start_date;
       let newEndDate = oldEng.end_date;
       let newProviderId = (body.serviceproviderid !== undefined) ? body.serviceproviderid : oldEng.serviceproviderid;
-      let newStartTimeStr = start_time || epochToTimeHM(oldEng.start_epoch);
+
+      const bodyStartEpoch = toFiniteEpoch(start_epoch);
+      const bodyEndEpoch = toFiniteEpoch(end_epoch);
+      const bodyStartDate = normalizeYmdInput(start_date) ?? dateYmdFromEpoch(start_date_epoch);
+      const bodyEndDate = normalizeYmdInput(end_date) ?? dateYmdFromEpoch(end_date_epoch);
+
+      if (bodyStartEpoch != null) {
+        newStartEpoch = bodyStartEpoch;
+        newStartDate = dateYmdFromEpoch(bodyStartEpoch) || newStartDate;
+      }
+      if (bodyEndEpoch != null) {
+        newEndEpoch = bodyEndEpoch;
+        newEndDate = dateYmdFromEpoch(bodyEndEpoch) || newEndDate;
+      }
+      if (bodyStartDate) {
+        newStartDate = bodyStartDate;
+        if (!bodyStartEpoch && (start_time || oldEng.start_epoch)) {
+          const timeForStart = start_time || epochToTimeHM(oldEng.start_epoch);
+          newStartEpoch = toEpochSeconds(bodyStartDate, timeForStart);
+        }
+      }
+      if (bodyEndDate) {
+        newEndDate = bodyEndDate;
+      }
 
       if ((start_date && start_time) || (start_date && !start_time && oldEng.start_epoch)) {
         // we have a new start_date and possibly start_time -> compute newStartEpoch
@@ -1115,12 +1228,12 @@ router.put("/:id", async (req, res) => {
     }
 
     // APPLY or MODIFY vacation
-    if (!vacation_start_date || !vacation_end_date) {
+      if (!vacationStartDateResolved || !vacationEndDateResolved) {
       await client.query("ROLLBACK"); return res.status(400).json({ error: "Both vacation_start_date and vacation_end_date are required" });
     }
 
-    const vacStart = new Date(vacation_start_date);
-    const vacEnd = new Date(vacation_end_date);
+    const vacStart = new Date(vacationStartDateResolved);
+    const vacEnd = new Date(vacationEndDateResolved);
     if (vacStart > vacEnd) { await client.query("ROLLBACK"); return res.status(400).json({ error: "vacation_start_date must be <= vacation_end_date" }); }
 
     // ensure vacation within engagement bounds
@@ -1204,13 +1317,13 @@ router.put("/:id", async (req, res) => {
     }
 
     // Update engagement row with vacation info
-    await client.query(`UPDATE engagements SET vacation_start_date=$1::date, vacation_end_date=$2::date, leave_days=$3 WHERE engagement_id=$4`, [vacation_start_date, vacation_end_date, newLeaveDays, id]);
+    await client.query(`UPDATE engagements SET vacation_start_date=$1::date, vacation_end_date=$2::date, leave_days=$3 WHERE engagement_id=$4`, [vacationStartDateResolved, vacationEndDateResolved, newLeaveDays, id]);
 
     // Audit
     const auditEntry = {
       modification_type: prevDates.length === 0 ? "VACATION_ADDED" : "VACATION_MODIFIED",
       previous: prevDates.length > 0 ? { vacation_start_date: prevVacStart ? prevVacStart.toISOString().slice(0,10) : null, vacation_end_date: prevVacEnd ? prevVacEnd.toISOString().slice(0,10) : null, leave_days: prevDates.length } : null,
-      updated: { vacation_start_date: vacation_start_date, vacation_end_date: vacation_end_date, leave_days: newLeaveDays, refund: refundAmount },
+      updated: { vacation_start_date: vacationStartDateResolved, vacation_end_date: vacationEndDateResolved, leave_days: newLeaveDays, refund: refundAmount },
       difference: { days_added: Math.max(0, newLeaveDays - prevLeaveDays), days_removed: Math.max(0, prevLeaveDays - newLeaveDays), refund_change: refundAmount - (oldEng.refund || 0), penalty },
       wallet_effect: { customer_credit: refundAmount, customer_debit: penalty, provider_debit: refundAmount, payout_adjustment: -refundAmount },
       availability_changes: { dates_freed: freedDates, dates_rebooked: restoredDates }

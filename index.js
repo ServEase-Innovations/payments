@@ -169,12 +169,17 @@ io.on("connection", (socket) => {
   socketIoConnectionsTotal.inc();
   console.log("🔌 Client connected");
 
-  socket.on("join", ({ providerId, customerId, adminTickets }) => {
+  socket.on("join", (payload = {}) => {
+    const { customerId, adminTickets } = payload;
+    const providerId =
+      payload.providerId ?? payload.serviceProviderId ?? payload.serviceproviderid;
     if (providerId != null && String(providerId).length > 0) {
       const p = Number(providerId);
-      if (Number.isFinite(p)) {
-        socket.join(`provider_${p}`);
-        console.log(`✅ Provider ${p} joined provider_${p}`);
+      if (Number.isFinite(p) && p > 0) {
+        const room = `provider_${p}`;
+        socket.join(room);
+        const size = io.sockets.adapter.rooms.get(room)?.size ?? 0;
+        console.log(`✅ Provider ${p} joined ${room} (${size} socket(s) in room)`);
       }
     }
     if (customerId != null && String(customerId).length > 0) {

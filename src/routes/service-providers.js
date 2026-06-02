@@ -51,6 +51,38 @@ function resolveEngagementDates(row) {
   };
 }
 
+function ymdToIstStartEpoch(ymd) {
+  if (!ymd) return null;
+  const d = dayjs.tz(String(ymd).slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  return d.isValid() ? d.startOf("day").unix() : null;
+}
+
+function ymdToIstEndEpoch(ymd) {
+  if (!ymd) return null;
+  const d = dayjs.tz(String(ymd).slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  return d.isValid() ? d.endOf("day").unix() : null;
+}
+
+function toFiniteEpoch(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function ymdFromEpoch(epochSeconds) {
+  const ep = toFiniteEpoch(epochSeconds);
+  if (ep == null) return null;
+  return dayjs.unix(ep).tz("Asia/Kolkata").format("YYYY-MM-DD");
+}
+
+function normalizeYmd(dateLike) {
+  if (!dateLike) return null;
+  const val = String(dateLike).trim();
+  const strict = dayjs.tz(val.slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  if (strict.isValid()) return strict.format("YYYY-MM-DD");
+  const parsed = dayjs.tz(val, "Asia/Kolkata");
+  return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
+}
+
 /* -------------------------------------------------------------------------- */
 /*              TODAY'S BOOKED VISITS (IST calendar day, by start time)       */
 /* -------------------------------------------------------------------------- */
@@ -97,6 +129,8 @@ router.get("/:providerId/today-bookings", async (req, res) => {
         pa.date::text AS visit_date,
         pa.slot_start_epoch,
         pa.slot_end_epoch,
+        e.start_epoch,
+        e.end_epoch,
         pa.status AS availability_status,
         e.customerid,
         e.booking_type,
@@ -141,6 +175,10 @@ router.get("/:providerId/today-bookings", async (req, res) => {
         visit_date: row.visit_date,
         slot_start_epoch: startEp,
         slot_end_epoch: endEp,
+        engagement_start_epoch:
+          row.start_epoch != null ? Number(row.start_epoch) : null,
+        engagement_end_epoch:
+          row.end_epoch != null ? Number(row.end_epoch) : null,
         start_time_ist: startEp != null ? epochToTime(startEp) : null,
         end_time_ist: endEp != null ? epochToTime(endEp) : null,
         availability_status: row.availability_status,
@@ -388,8 +426,16 @@ result.rows.forEach(row => {
   row.startTime = epochToTime(row.start_epoch);
   row.endTime = epochToTime(row.end_epoch);
 
-  const startEpoch = parseInt(row.start_epoch, 10);
-  const endEpoch = parseInt(row.end_epoch, 10);
+  const startEpochRaw = Number(row.start_epoch);
+  const endEpochRaw = Number(row.end_epoch);
+  const startEpoch =
+    Number.isFinite(startEpochRaw) && startEpochRaw > 0
+      ? startEpochRaw
+      : ymdToIstStartEpoch(dates.startDate);
+  const endEpoch =
+    Number.isFinite(endEpochRaw) && endEpochRaw > 0
+      ? endEpochRaw
+      : ymdToIstEndEpoch(dates.endDate || dates.startDate);
 
   const todayService = todayServiceByEng[row.engagement_id] || null;
 
@@ -415,6 +461,10 @@ result.rows.forEach(row => {
 
   const enriched = {
     ...row,
+    start_epoch: startEpoch,
+    end_epoch: endEpoch,
+    start_date_epoch: ymdToIstStartEpoch(dates.startDate),
+    end_date_epoch: ymdToIstEndEpoch(dates.endDate || dates.startDate),
     start_date: dates.start_date,
     end_date: dates.end_date,
     startDate: dates.startDate,
@@ -523,6 +573,9 @@ router.get("/:providerId/calendar", async (req, res) => {
     const calendar = result.rows.map((r) => ({
       ...r,
       date: normalizeDate(r.date),
+      date_epoch: ymdToIstStartEpoch(normalizeDate(r.date)),
+      start_epoch: r.slot_start_epoch != null ? Number(r.slot_start_epoch) : null,
+      end_epoch: r.slot_end_epoch != null ? Number(r.slot_end_epoch) : null,
       start_time: epochToTime(r.slot_start_epoch),
       end_time: epochToTime(r.slot_end_epoch),
     }));
@@ -770,16 +823,26 @@ router.get("/:providerId/leaves", async (req, res) => {
 
 router.post("/:providerId/leaves", async (req, res) => {
   const { providerId } = req.params;
-  const { start_date, end_date, reason, engagement_id } = req.body || {};
+  const {
+    start_date,
+    end_date,
+    start_date_epoch,
+    end_date_epoch,
+    reason,
+    engagement_id,
+  } = req.body || {};
 
-  if (!start_date || !end_date) {
+  const resolvedStartDate = normalizeYmd(start_date) ?? ymdFromEpoch(start_date_epoch);
+  const resolvedEndDate = normalizeYmd(end_date) ?? ymdFromEpoch(end_date_epoch);
+
+  if (!resolvedStartDate || !resolvedEndDate) {
     return res
       .status(400)
       .json({ success: false, error: "start_date and end_date are required (YYYY-MM-DD)" });
   }
 
-  const startD = dayjs.tz(String(start_date).trim().slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
-  const endD = dayjs.tz(String(end_date).trim().slice(0, 10), "YYYY-MM-DD", "Asia/Kolkata");
+  const startD = dayjs.tz(resolvedStartDate, "YYYY-MM-DD", "Asia/Kolkata");
+  const endD = dayjs.tz(resolvedEndDate, "YYYY-MM-DD", "Asia/Kolkata");
   if (!startD.isValid() || !endD.isValid()) {
     return res.status(400).json({ success: false, error: "Invalid start_date or end_date" });
   }
@@ -915,7 +978,10 @@ router.get("/:providerId/availability/blocks", async (req, res) => {
         id: r.id,
         serviceproviderid: r.serviceproviderid,
         date: normalizeDate(r.date),
+        date_epoch: ymdToIstStartEpoch(normalizeDate(r.date)),
         status: r.status,
+        start_epoch: r.slot_start_epoch != null ? Number(r.slot_start_epoch) : null,
+        end_epoch: r.slot_end_epoch != null ? Number(r.slot_end_epoch) : null,
         start_time: epochToTime(r.slot_start_epoch),
         end_time: epochToTime(r.slot_end_epoch),
         created_at: r.created_at,
@@ -929,13 +995,30 @@ router.get("/:providerId/availability/blocks", async (req, res) => {
 
 router.post("/:providerId/availability/blocks", async (req, res) => {
   const { providerId } = req.params;
-  const { start_date, end_date, dates } = req.body || {};
+  const {
+    start_date,
+    end_date,
+    start_date_epoch,
+    end_date_epoch,
+    dates,
+    date_epochs,
+  } = req.body || {};
   const client = await pool.connect();
   let dateList = [];
   if (Array.isArray(dates) && dates.length) {
     dateList = dates.map((d) => String(d).trim().slice(0, 10)).filter(Boolean);
+  } else if (Array.isArray(date_epochs) && date_epochs.length) {
+    dateList = date_epochs
+      .map((ep) => ymdFromEpoch(ep))
+      .filter(Boolean);
   } else if (start_date && end_date) {
     dateList = expandDateRangeYmd(start_date, end_date);
+  } else if (start_date_epoch && end_date_epoch) {
+    const startYmd = ymdFromEpoch(start_date_epoch);
+    const endYmd = ymdFromEpoch(end_date_epoch);
+    if (startYmd && endYmd) {
+      dateList = expandDateRangeYmd(startYmd, endYmd);
+    }
   } else {
     return res
       .status(400)
