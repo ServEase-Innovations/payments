@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../config/db.js";
 import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import { repairTodayServiceDays } from "./serviceDays.service.js";
+import { deriveTaskStatusForProvider } from "../utils/engagementTaskStatus.js";
 import { getProviderWalletHistory } from "../services/providerWalletHistory.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
@@ -185,7 +186,13 @@ router.get("/:providerId/today-bookings", async (req, res) => {
         customerid: row.customerid != null ? Number(row.customerid) : null,
         booking_type: row.booking_type,
         service_type: row.service_type,
-        task_status: row.task_status,
+        task_status: deriveTaskStatusForProvider(
+          { task_status: row.task_status, engagement_status: row.engagement_status },
+          row.service_day_status
+            ? { status: row.service_day_status }
+            : null
+        ),
+        task_status_stored: row.task_status,
         engagement_status: row.engagement_status,
         address: row.address || null,
         base_amount:
@@ -449,18 +456,24 @@ result.rows.forEach(row => {
       now >= startEpoch - earlyStartSec &&
       now < endEpoch;
 
+    const sdStatus = String(todayService.status || "").toUpperCase();
+    const visitStarted =
+      sdStatus === "IN_PROGRESS" || sdStatus === "STARTED" || sdStatus === "COMPLETED";
     today_service = {
       service_day_id: todayService.service_day_id,
-      status: inProgressToday ? "IN_PROGRESS" : todayService.status,
-      can_start: canStartVisit,
-      can_generate_otp: inProgressToday,
-      can_complete: inProgressToday,
-      otp_active: !!otpByServiceDay[todayService.service_day_id]
+      status: todayService.status,
+      can_start: canStartVisit && !visitStarted,
+      can_generate_otp: visitStarted && sdStatus === "IN_PROGRESS",
+      can_complete: sdStatus === "IN_PROGRESS" || sdStatus === "STARTED",
+      otp_active: !!otpByServiceDay[todayService.service_day_id],
     };
   }
 
+  const effectiveTaskStatus = deriveTaskStatusForProvider(row, todayService);
+
   const enriched = {
     ...row,
+    task_status: effectiveTaskStatus,
     start_epoch: startEpoch,
     end_epoch: endEpoch,
     start_date_epoch: ymdToIstStartEpoch(dates.startDate),

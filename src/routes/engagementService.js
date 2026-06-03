@@ -55,7 +55,7 @@ router.post("/service-days/:id/start", async (req, res) => {
     await client.query("BEGIN");
 
     const sd = await client.query(
-      `SELECT sd.*, e.customerid, e.engagement_id, e.service_type
+      `SELECT sd.*, e.customerid, e.engagement_id, e.service_type, e.serviceproviderid
        FROM service_days sd
        JOIN engagements e ON e.engagement_id = sd.engagement_id
        WHERE sd.service_day_id = $1
@@ -76,9 +76,28 @@ router.post("/service-days/:id/start", async (req, res) => {
       [id]
     );
 
-    await client.query("COMMIT");
-
     const row0 = sd.rows[0];
+    try {
+      await transitionEngagement(client, {
+        engagementId: row0.engagement_id,
+        newStatus: "IN_PROGRESS",
+        eventType: "SERVICE_DAY_STARTED",
+        actorType: "PROVIDER",
+        actorId: row0.serviceproviderid ?? null,
+        metadata: { service_day_id: id },
+      });
+    } catch (transErr) {
+      await client.query(
+        `UPDATE engagements
+         SET task_status = 'IN_PROGRESS'
+         WHERE engagement_id = $1
+           AND COALESCE(UPPER(task_status), 'NOT_STARTED') IN ('NOT_STARTED', 'SCHEDULED', '')`,
+        [row0.engagement_id]
+      );
+      console.warn("transitionEngagement on start (non-fatal):", transErr?.message || transErr);
+    }
+
+    await client.query("COMMIT");
     try {
       await createInAppNotification({
         io: req.io,
@@ -336,7 +355,11 @@ router.post("/service-days/:id/complete", async (req, res) => {
     );
 
     const bookingType = String(sd.booking_type || "").toUpperCase();
-    if (bookingType === "ON_DEMAND") {
+    const startYmd = String(sd.start_date ?? "").slice(0, 10);
+    const endYmd = String(sd.end_date ?? sd.start_date ?? "").slice(0, 10);
+    const singleDay = startYmd && endYmd && startYmd === endYmd;
+
+    if (bookingType === "ON_DEMAND" || singleDay) {
       await transitionEngagement(client, {
         engagementId: sd.engagement_id,
         newStatus: "COMPLETED",
@@ -345,6 +368,14 @@ router.post("/service-days/:id/complete", async (req, res) => {
         actorId: sd.serviceproviderid,
         metadata: { service_day_id: serviceDayId },
       });
+    } else {
+      await client.query(
+        `UPDATE engagements
+         SET task_status = 'IN_PROGRESS'
+         WHERE engagement_id = $1
+           AND COALESCE(UPPER(task_status), 'NOT_STARTED') NOT IN ('COMPLETED', 'CANCELLED')`,
+        [sd.engagement_id]
+      );
     }
 
     await client.query("COMMIT");

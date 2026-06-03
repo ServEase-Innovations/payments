@@ -138,3 +138,34 @@ export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
   work_summary.label = "Awaiting provider";
   return { task_status: "NOT_STARTED", work_summary };
 }
+
+/**
+ * Provider dashboard: prefer today's service_days.status over stale engagements.task_status.
+ * @param {object} e - engagement row (task_status, booking_type, engagement_status, start_date, end_date)
+ * @param {object|null} [todayServiceRow] - { status } from service_days for IST today
+ */
+export function deriveTaskStatusForProvider(e, todayServiceRow) {
+  const dayStatus = todayServiceRow
+    ? String(todayServiceRow.status || "").toUpperCase()
+    : "";
+
+  if (dayStatus === "IN_PROGRESS" || dayStatus === "STARTED") {
+    return "IN_PROGRESS";
+  }
+  if (dayStatus === "COMPLETED" || dayStatus === "DONE") {
+    return "COMPLETED";
+  }
+
+  const stored = String(e.task_status || "").toUpperCase();
+  if (stored === "STARTED") return "IN_PROGRESS";
+  if (stored === "IN_PROGRESS" || stored === "COMPLETED" || stored === "CANCELLED") {
+    return stored;
+  }
+
+  const life = String(e.engagement_status || "").toUpperCase();
+  if (life === "IN_PROGRESS") return "IN_PROGRESS";
+  if (life === "COMPLETED") return "COMPLETED";
+  if (life === "CANCELLED") return "CANCELLED";
+
+  return "NOT_STARTED";
+}
