@@ -3,6 +3,7 @@ import pool from "../config/db.js";
 import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import { repairTodayServiceDays } from "./serviceDays.service.js";
 import { deriveTaskStatusForProvider } from "../utils/engagementTaskStatus.js";
+import { isVisitOverdue } from "../services/overdueStartReminder.service.js";
 import { getProviderWalletHistory } from "../services/providerWalletHistory.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
@@ -111,6 +112,14 @@ router.get("/:providerId/today-bookings", async (req, res) => {
         AND pa.date = ${PG_IST_TODAY_DATE}
         AND pa.status = 'BOOKED'
         AND pa.engagement_id IS NOT NULL
+      UNION
+      SELECT DISTINCT e.engagement_id
+      FROM engagements e
+      WHERE e.serviceproviderid = $1
+        AND e.start_date <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+        AND e.end_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+        AND UPPER(COALESCE(e.engagement_status, '')) NOT IN ('CANCELLED')
+        AND UPPER(COALESCE(e.task_status, '')) NOT IN ('CANCELLED')
       `,
       [pid]
     );
@@ -123,53 +132,121 @@ router.get("/:providerId/today-bookings", async (req, res) => {
       `
       WITH today_ist AS (
         SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date AS d
+      ),
+      booked_visits AS (
+        SELECT
+          pa.id AS availability_id,
+          pa.engagement_id,
+          pa.date::text AS visit_date,
+          pa.slot_start_epoch,
+          pa.slot_end_epoch,
+          e.start_epoch,
+          e.end_epoch,
+          pa.status AS availability_status,
+          e.customerid,
+          e.booking_type,
+          e.service_type,
+          e.task_status,
+          e.engagement_status,
+          e.address,
+          e.base_amount,
+          e.duration_minutes,
+          c.firstname,
+          c.lastname,
+          c.mobileno,
+          sd.service_day_id,
+          sd.status AS service_day_status
+        FROM provider_availability pa
+        CROSS JOIN today_ist t
+        JOIN engagements e ON e.engagement_id = pa.engagement_id
+        JOIN customer c ON c.customerid = e.customerid
+        LEFT JOIN LATERAL (
+          SELECT s.service_day_id, s.status
+          FROM service_days s
+          WHERE s.engagement_id = e.engagement_id
+            AND s.service_date = pa.date
+          ORDER BY s.service_day_id
+          LIMIT 1
+        ) sd ON true
+        WHERE pa.serviceproviderid = $1
+          AND pa.date = t.d
+          AND pa.status = 'BOOKED'
+          AND pa.engagement_id IS NOT NULL
+      ),
+      assigned_without_slot AS (
+        SELECT
+          (-e.engagement_id)::bigint AS availability_id,
+          e.engagement_id,
+          t.d::text AS visit_date,
+          e.start_epoch AS slot_start_epoch,
+          e.end_epoch AS slot_end_epoch,
+          e.start_epoch,
+          e.end_epoch,
+          'ASSIGNED' AS availability_status,
+          e.customerid,
+          e.booking_type,
+          e.service_type,
+          e.task_status,
+          e.engagement_status,
+          e.address,
+          e.base_amount,
+          e.duration_minutes,
+          c.firstname,
+          c.lastname,
+          c.mobileno,
+          sd.service_day_id,
+          sd.status AS service_day_status
+        FROM engagements e
+        CROSS JOIN today_ist t
+        JOIN customer c ON c.customerid = e.customerid
+        LEFT JOIN LATERAL (
+          SELECT s.service_day_id, s.status
+          FROM service_days s
+          WHERE s.engagement_id = e.engagement_id
+            AND s.service_date = t.d
+          ORDER BY s.service_day_id
+          LIMIT 1
+        ) sd ON true
+        WHERE e.serviceproviderid = $1
+          AND e.start_date <= t.d
+          AND e.end_date >= t.d
+          AND UPPER(COALESCE(e.engagement_status, '')) NOT IN ('CANCELLED')
+          AND UPPER(COALESCE(e.task_status, '')) NOT IN ('CANCELLED')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM provider_availability pa2
+            WHERE pa2.engagement_id = e.engagement_id
+              AND pa2.serviceproviderid = $1
+              AND pa2.date = t.d
+              AND pa2.status = 'BOOKED'
+          )
       )
-      SELECT
-        pa.id AS availability_id,
-        pa.engagement_id,
-        pa.date::text AS visit_date,
-        pa.slot_start_epoch,
-        pa.slot_end_epoch,
-        e.start_epoch,
-        e.end_epoch,
-        pa.status AS availability_status,
-        e.customerid,
-        e.booking_type,
-        e.service_type,
-        e.task_status,
-        e.engagement_status,
-        e.address,
-        e.base_amount,
-        e.duration_minutes,
-        c.firstname,
-        c.lastname,
-        c.mobileno,
-        sd.service_day_id,
-        sd.status AS service_day_status
-      FROM provider_availability pa
-      CROSS JOIN today_ist t
-      JOIN engagements e ON e.engagement_id = pa.engagement_id
-      JOIN customer c ON c.customerid = e.customerid
-      LEFT JOIN LATERAL (
-        SELECT s.service_day_id, s.status
-        FROM service_days s
-        WHERE s.engagement_id = e.engagement_id
-          AND s.service_date = pa.date
-        ORDER BY s.service_day_id
-        LIMIT 1
-      ) sd ON true
-      WHERE pa.serviceproviderid = $1
-        AND pa.date = t.d
-        AND pa.status = 'BOOKED'
-        AND pa.engagement_id IS NOT NULL
-      ORDER BY pa.slot_start_epoch ASC NULLS LAST, pa.id ASC
+      SELECT * FROM booked_visits
+      UNION ALL
+      SELECT * FROM assigned_without_slot
+      ORDER BY slot_start_epoch ASC NULLS LAST, availability_id ASC
       `,
       [pid]
     );
 
+    const nowEpoch = dayjs().unix();
+
     const rows = result.rows.map((row) => {
       const startEp = row.slot_start_epoch != null ? Number(row.slot_start_epoch) : null;
       const endEp = row.slot_end_epoch != null ? Number(row.slot_end_epoch) : null;
+      const scheduledStartEpoch = startEp ?? (row.start_epoch != null ? Number(row.start_epoch) : null);
+      const overdue = isVisitOverdue({
+        scheduledStartEpoch,
+        serviceDayStatus: row.service_day_status,
+        nowUnix: nowEpoch,
+      });
+      const overdueMessage = overdue
+        ? `This visit was scheduled to start at ${
+            scheduledStartEpoch != null
+              ? dayjs.unix(scheduledStartEpoch).tz("Asia/Kolkata").format("h:mm A")
+              : "the scheduled time"
+          } and has not been started yet. Please start the task.`
+        : null;
       return {
         availability_id: Number(row.availability_id),
         engagement_id: Number(row.engagement_id),
@@ -205,6 +282,8 @@ router.get("/:providerId/today-bookings", async (req, res) => {
         service_day_id:
           row.service_day_id != null ? Number(row.service_day_id) : null,
         service_day_status: row.service_day_status || null,
+        is_overdue: overdue,
+        overdue_message: overdueMessage,
       };
     });
 
@@ -332,14 +411,18 @@ router.get("/:providerId/engagements", async (req, res) => {
         e.service_type,
         e.task_status,
         e.assignment_status,
+        e.engagement_status,
         e.base_amount,
+        e.address,
+        e.duration_minutes,
         e.created_at,
         e.vacation_start_date,
         e.vacation_end_date,
         e.leave_days,
         c.firstname,
         c.lastname,
-        c.mobileno
+        c.mobileno,
+        c.emailid AS customer_email
       FROM engagements e
       JOIN customer c ON e.customerid = c.customerid
       WHERE e.serviceproviderid = $1
@@ -473,6 +556,7 @@ result.rows.forEach(row => {
 
   const enriched = {
     ...row,
+    id: row.engagement_id,
     task_status: effectiveTaskStatus,
     start_epoch: startEpoch,
     end_epoch: endEpoch,
@@ -482,6 +566,10 @@ result.rows.forEach(row => {
     end_date: dates.end_date,
     startDate: dates.startDate,
     endDate: dates.endDate,
+    address: row.address || null,
+    duration_minutes:
+      row.duration_minutes != null ? Number(row.duration_minutes) : null,
+    email: row.customer_email || null,
     today_service,
   };
 
@@ -696,8 +784,8 @@ router.post("/:providerId/withdraw", async (req, res) => {
 
     if (walletRes.rows.length === 0) {
       await client.query(
-        `INSERT INTO provider_wallets (serviceproviderid, balance, created_at)
-         VALUES ($1, 0, NOW())`,
+        `INSERT INTO provider_wallets (serviceproviderid, balance, security_deposit_collected)
+         VALUES ($1, 0, 0)`,
         [providerId]
       );
 

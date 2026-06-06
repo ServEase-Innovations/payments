@@ -15,6 +15,10 @@ import {
   emitBookingRequestClosed,
 } from "../../services/inAppNotification.service.js";
 import { findProviderBookedConflict } from "../../services/providerAvailabilityOverlap.js";
+import {
+  assertCancellationAllowed,
+  loadCancellationPolicy,
+} from "../../services/cancellationPolicy.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -131,6 +135,31 @@ router.post("/:id/cancel", async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
+
+    const engagementRes = await client.query(
+      `SELECT booking_type, start_epoch, start_date, engagement_status
+       FROM engagements
+       WHERE engagement_id = $1`,
+      [id]
+    );
+
+    if (!engagementRes.rows.length) {
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+
+    const engagement = engagementRes.rows[0];
+    const status = String(engagement.engagement_status || "").toUpperCase();
+    if (status === "CANCELLED") {
+      return res.status(400).json({ error: "Engagement is already cancelled" });
+    }
+
+    const policy = await loadCancellationPolicy();
+    try {
+      assertCancellationAllowed(engagement, policy);
+    } catch (policyErr) {
+      const statusCode = policyErr.statusCode || 400;
+      return res.status(statusCode).json({ error: policyErr.message });
+    }
 
     await client.query("BEGIN");
 

@@ -500,47 +500,95 @@ router.get("/:customerId/today-bookings", async (req, res) => {
       `
       WITH today_ist AS (
         SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date AS d
+      ),
+      booked_visits AS (
+        SELECT
+          pa.id AS availability_id,
+          pa.engagement_id,
+          pa.date::text AS visit_date,
+          pa.slot_start_epoch,
+          pa.slot_end_epoch,
+          e.start_epoch,
+          e.end_epoch,
+          pa.status AS availability_status,
+          e.booking_type,
+          e.service_type,
+          e.task_status,
+          e.engagement_status,
+          e.assignment_status,
+          e.address,
+          e.base_amount,
+          e.duration_minutes,
+          sp.serviceproviderid,
+          sp.firstname AS provider_firstname,
+          sp.lastname AS provider_lastname,
+          sp.mobileno AS provider_mobileno,
+          sp.rating AS provider_rating,
+          sd.service_day_id,
+          sd.status AS service_day_status
+        FROM provider_availability pa
+        CROSS JOIN today_ist t
+        JOIN engagements e ON e.engagement_id = pa.engagement_id
+        LEFT JOIN serviceprovider sp ON sp.serviceproviderid = e.serviceproviderid
+        LEFT JOIN LATERAL (
+          SELECT s.service_day_id, s.status
+          FROM service_days s
+          WHERE s.engagement_id = e.engagement_id
+            AND s.service_date = pa.date
+          ORDER BY s.service_day_id
+          LIMIT 1
+        ) sd ON true
+        WHERE e.customerid = $1
+          AND pa.date = t.d
+          AND pa.status = 'BOOKED'
+          AND pa.engagement_id IS NOT NULL
+      ),
+      pending_on_demand AS (
+        SELECT
+          (-e.engagement_id)::bigint AS availability_id,
+          e.engagement_id,
+          t.d::text AS visit_date,
+          e.start_epoch AS slot_start_epoch,
+          e.end_epoch AS slot_end_epoch,
+          e.start_epoch,
+          e.end_epoch,
+          'UNASSIGNED' AS availability_status,
+          e.booking_type,
+          e.service_type,
+          e.task_status,
+          e.engagement_status,
+          e.assignment_status,
+          e.address,
+          e.base_amount,
+          e.duration_minutes,
+          NULL::bigint AS serviceproviderid,
+          NULL::text AS provider_firstname,
+          NULL::text AS provider_lastname,
+          NULL::bigint AS provider_mobileno,
+          NULL::numeric AS provider_rating,
+          NULL::bigint AS service_day_id,
+          NULL::text AS service_day_status
+        FROM engagements e
+        CROSS JOIN today_ist t
+        WHERE e.customerid = $1
+          AND e.start_date <= t.d
+          AND e.end_date >= t.d
+          AND UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
+          AND UPPER(COALESCE(e.assignment_status, '')) = 'UNASSIGNED'
+          AND UPPER(COALESCE(e.engagement_status, '')) NOT IN ('CANCELLED')
+          AND UPPER(COALESCE(e.task_status, '')) NOT IN ('CANCELLED')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM provider_availability pa2
+            WHERE pa2.engagement_id = e.engagement_id
+              AND pa2.date = t.d
+              AND pa2.status = 'BOOKED'
+          )
       )
-      SELECT
-        pa.id AS availability_id,
-        pa.engagement_id,
-        pa.date::text AS visit_date,
-        pa.slot_start_epoch,
-        pa.slot_end_epoch,
-        e.start_epoch,
-        e.end_epoch,
-        pa.status AS availability_status,
-        e.booking_type,
-        e.service_type,
-        e.task_status,
-        e.engagement_status,
-        e.address,
-        e.base_amount,
-        e.duration_minutes,
-        sp.serviceproviderid,
-        sp.firstname AS provider_firstname,
-        sp.lastname AS provider_lastname,
-        sp.mobileno AS provider_mobileno,
-        sp.rating AS provider_rating,
-        sd.service_day_id,
-        sd.status AS service_day_status
-      FROM provider_availability pa
-      CROSS JOIN today_ist t
-      JOIN engagements e ON e.engagement_id = pa.engagement_id
-      LEFT JOIN serviceprovider sp ON sp.serviceproviderid = e.serviceproviderid
-      LEFT JOIN LATERAL (
-        SELECT s.service_day_id, s.status
-        FROM service_days s
-        WHERE s.engagement_id = e.engagement_id
-          AND s.service_date = pa.date
-        ORDER BY s.service_day_id
-        LIMIT 1
-      ) sd ON true
-      WHERE e.customerid = $1
-        AND pa.date = t.d
-        AND pa.status = 'BOOKED'
-        AND pa.engagement_id IS NOT NULL
-      ORDER BY pa.slot_start_epoch ASC NULLS LAST, pa.id ASC
+      SELECT * FROM booked_visits
+      UNION ALL
+      SELECT * FROM pending_on_demand
+      ORDER BY slot_start_epoch ASC NULLS LAST, availability_id ASC
       `,
       [cid]
     );
@@ -590,6 +638,7 @@ router.get("/:customerId/today-bookings", async (req, res) => {
         service_type: row.service_type,
         task_status: row.task_status,
         engagement_status: row.engagement_status,
+        assignment_status: row.assignment_status,
         address: row.address || null,
         base_amount:
           row.base_amount != null ? Number(Number(row.base_amount).toFixed(2)) : null,

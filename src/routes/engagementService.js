@@ -4,6 +4,7 @@ import pool from "../config/db.js";
 import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import twilio from "twilio";
 import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
+import { dismissOverdueRemindersForEngagement } from "../services/overdueStartReminder.service.js";
 import { transitionEngagement } from "../services/engagementLifecycle.js";
 
 function getTwilioClient() {
@@ -98,6 +99,11 @@ router.post("/service-days/:id/start", async (req, res) => {
     }
 
     await client.query("COMMIT");
+    try {
+      await dismissOverdueRemindersForEngagement(row0.engagement_id);
+    } catch (dismissErr) {
+      console.warn("dismiss overdue reminders (non-fatal):", dismissErr?.message || dismissErr);
+    }
     try {
       await createInAppNotification({
         io: req.io,
@@ -337,8 +343,8 @@ router.post("/service-days/:id/complete", async (req, res) => {
     /* 7️⃣ Ensure provider wallet exists */
     await client.query(
       `
-      INSERT INTO provider_wallets (serviceproviderid, balance, created_at)
-      VALUES ($1, 0, NOW())
+      INSERT INTO provider_wallets (serviceproviderid, balance, security_deposit_collected)
+      VALUES ($1, 0, 0)
       ON CONFLICT (serviceproviderid) DO NOTHING
       `,
       [sd.serviceproviderid]
@@ -423,9 +429,19 @@ router.post("/service-days/:id/complete", async (req, res) => {
       earning: Number(dailyEarning.toFixed(2)),
     });
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
     console.error("Service day completion error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    const message = err?.message || "Internal server error";
+    res.status(500).json({
+      error:
+        process.env.NODE_ENV === "production"
+          ? "Internal server error"
+          : message,
+    });
   } finally {
     client.release();
   }
