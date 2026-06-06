@@ -1,6 +1,15 @@
 import express from "express";
 import YAML from "yamljs";
 import "./src/config/config.js";
+import { validatePaymentsProductionSecrets } from "./src/config/validateProductionSecrets.js";
+
+try {
+  validatePaymentsProductionSecrets();
+} catch (err) {
+  console.error("❌ Production secret validation failed:", err.message);
+  process.exit(1);
+}
+
 import initDB from "./src/config/initDB.js";
 import engagementsRouter from "./src/routes/engagements.js";
 import paymentRoutes from "./src/routes/payments.js";

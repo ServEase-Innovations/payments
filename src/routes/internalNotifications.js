@@ -8,7 +8,7 @@ import { getSocketServer } from "../utils/socketIoRef.js";
 
 const router = express.Router();
 
-/** Same as services/tickets `DEV_ADMIN_SECRET` and utils `.env.example`. */
+/** Dev-only fallback — never used when NODE_ENV=production (startup validation enforces real secret). */
 const DEV_INTERNAL_SECRET = "serveaso-test-push-secret";
 
 function resolveExpectedInternalSecret() {
@@ -19,8 +19,9 @@ function resolveExpectedInternalSecret() {
     ""
   ).trim();
   if (fromEnv) return fromEnv;
-  const env = process.env.NODE_ENV || "development";
-  if (env === "development") return DEV_INTERNAL_SECRET;
+  if ((process.env.NODE_ENV || "development") === "development") {
+    return DEV_INTERNAL_SECRET;
+  }
   return "";
 }
 
