@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../config/db.js";
+import { requireAdminApiAuth } from "../middleware/adminApiAuth.js";
 import {
   listPlans,
   findRulesForPlan,
@@ -8,6 +9,8 @@ import {
 } from "../services/pricing/pricingRepository.js";
 
 const router = express.Router();
+
+router.use(requireAdminApiAuth);
 
 router.get("/pricing/plans", async (req, res) => {
   try {

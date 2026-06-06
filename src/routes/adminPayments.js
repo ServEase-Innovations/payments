@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../config/db.js";
+import { requireAdminApiAuth } from "../middleware/adminApiAuth.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -8,6 +9,8 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const router = express.Router();
+
+router.use(requireAdminApiAuth);
 
 function toFiniteEpoch(value) {
   const n = Number(value);
