@@ -70,8 +70,17 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Middleware to parse JSON requests
-app.use(express.json());
+// ✅ Middleware to parse JSON requests (keep raw body for Razorpay webhook HMAC)
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      const path = req.originalUrl || req.url || "";
+      if (path.includes("/webhook")) {
+        req.rawBody = buf;
+      }
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 // In-app notification REST (list / read) — use query: recipientType + recipientId

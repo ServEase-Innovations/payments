@@ -686,6 +686,7 @@ router.post("/:engagementId/vacation", async (req, res) => {
 });
 
 import { handlePaymentSuccess } from "../../services/paymentLifecycle.service.js";
+import { handleRazorpayPaymentWebhook } from "../../services/razorpayWebhook.service.js";
 
 router.post("/verify", async (req, res) => {
   try {
@@ -726,28 +727,7 @@ router.post("/verify", async (req, res) => {
   }
 });
 
-router.post("/webhook", async (req, res) => {
-  try {
-    const event = req.body;
-
-    if (event.event === "payment.captured") {
-      const payment = event.payload.payment.entity;
-
-      await handlePaymentSuccess({
-        engagementId: payment.notes?.engagementId,
-        razorpay_order_id: payment.order_id,
-        razorpay_payment_id: payment.id,
-        rawEvent: event
-      });
-    }
-
-    res.json({ received: true });
-
-  } catch (err) {
-    console.error("Webhook error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+router.post("/webhook", handleRazorpayPaymentWebhook);
 
 
 
@@ -956,7 +936,7 @@ export default router;
  *     description: |
  *       Receives payment events directly from Razorpay.
  *       This endpoint must be publicly accessible.
- *       Signature verification should be enabled in production.
+ *       Verifies x-razorpay-signature using RAZORPAY_WEBHOOK_SECRET (required in production).
  *     tags: [Payments V2]
  *     requestBody:
  *       required: true
