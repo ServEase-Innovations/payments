@@ -5,6 +5,7 @@ import { repairTodayServiceDays } from "./serviceDays.service.js";
 import { deriveTaskStatusForProvider } from "../utils/engagementTaskStatus.js";
 import { isVisitOverdue } from "../services/overdueStartReminder.service.js";
 import { getProviderWalletHistory } from "../services/providerWalletHistory.service.js";
+import { redactEngagementForProvider } from "../utils/responseRedaction.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -421,8 +422,7 @@ router.get("/:providerId/engagements", async (req, res) => {
         e.leave_days,
         c.firstname,
         c.lastname,
-        c.mobileno,
-        c.emailid AS customer_email
+        c.mobileno
       FROM engagements e
       JOIN customer c ON e.customerid = c.customerid
       WHERE e.serviceproviderid = $1
@@ -554,7 +554,7 @@ result.rows.forEach(row => {
 
   const effectiveTaskStatus = deriveTaskStatusForProvider(row, todayService);
 
-  const enriched = {
+  const enriched = redactEngagementForProvider({
     ...row,
     id: row.engagement_id,
     task_status: effectiveTaskStatus,
@@ -569,9 +569,8 @@ result.rows.forEach(row => {
     address: row.address || null,
     duration_minutes:
       row.duration_minutes != null ? Number(row.duration_minutes) : null,
-    email: row.customer_email || null,
     today_service,
-  };
+  });
 
   // ---- Engagement lifecycle bucket (IMPORTANT) ----
   let bucket;

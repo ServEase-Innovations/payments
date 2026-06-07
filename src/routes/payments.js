@@ -2,6 +2,10 @@ import express from "express";
 import pool from "../config/db.js";
 import crypto from "crypto";
 import { razorpay, getRazorpayKeyId, getRazorpayKeySecret } from "../utils/razorpayConfig.js";
+import {
+  buildResumeCheckoutResponse,
+  redactPaymentVerifyResponse,
+} from "../utils/responseRedaction.js";
 
 const router = express.Router();
 
@@ -51,7 +55,7 @@ router.post("/verify", async (req, res) => {
     res.json({
       success: true,
       message: "Payment verified successfully",
-      payment: payRes.rows[0],
+      payment: redactPaymentVerifyResponse(payRes.rows[0]),
     });
 
   } catch (err) {
@@ -159,35 +163,27 @@ router.get("/:engagementId/resume", async (req, res) => {
       [razorpay_order_id, engagementId]
     );
 
-    return res.json({
-      success: true,
-
-      // Razorpay essentials
-      razorpay_order_id,
-      razorpay_key_id: getRazorpayKeyId(),
-      /** Paise for Razorpay Checkout */
-      amount: amountPaise,
-      amount_inr: totalInr,
-      currency: "INR",
-
-      // Context
-      payment_id: payment.payment_id,
-      engagement_id: payment.engagement_id,
-      engagementId: payment.engagement_id,
-      booking_type: payment.booking_type,
-      service_type: payment.service_type,
-      status: payment.status,
-      created_at: payment.created_at,
-
-      customer: {
-        customerid: payment.customerid,
-        firstname: payment.customer_firstname,
-        lastname: payment.customer_lastname,
-        contact: payment.customer_mobile,
-        mobile: payment.customer_mobile,
-        email: payment.customer_emailid,
-      },
-    });
+    return res.json(
+      buildResumeCheckoutResponse({
+        razorpay_order_id,
+        razorpay_key_id: getRazorpayKeyId(),
+        amount: amountPaise,
+        amount_inr: totalInr,
+        currency: "INR",
+        engagement_id: payment.engagement_id,
+        booking_type: payment.booking_type,
+        service_type: payment.service_type,
+        status: payment.status,
+        created_at: payment.created_at,
+        customer: {
+          customerid: payment.customerid,
+          firstname: payment.customer_firstname,
+          lastname: payment.customer_lastname,
+          contact: payment.customer_mobile,
+          email: payment.customer_emailid,
+        },
+      })
+    );
   } catch (err) {
     console.error("Resume payment error:", err);
     return res.status(500).json({

@@ -21,6 +21,10 @@ import {
 import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
 import { resolvePricingForEngagement } from "../services/pricing/engagementPricing.js";
 import { findProviderBookedConflict } from "../services/providerAvailabilityOverlap.js";
+import {
+  redactEngagementForCustomer,
+  redactEngagementForProvider,
+} from "../utils/responseRedaction.js";
 
 
 dayjs.extend(customParseFormat);
@@ -896,7 +900,7 @@ WHERE sp.serviceproviderid = ANY($1)`,
           ? dayjs.unix(endEpoch).tz("Asia/Kolkata").format("HH:mm")
           : null;
 
-      const enriched = {
+      const enriched = redactEngagementForCustomer({
         ...engCore,
         task_status,
         task_status_stored: taskStatusStored,
@@ -907,8 +911,8 @@ WHERE sp.serviceproviderid = ANY($1)`,
         payment: paymentByEng[e.engagement_id] || null,
         modifications: modsByEng[e.engagement_id] || [],
         vacations: vacationsByEng[e.engagement_id] || [],
-        today_service
-      };
+        today_service,
+      });
 
       if (isCancelled) {
         cancelled.push(enriched);
@@ -1545,7 +1549,7 @@ router.post("/:id/accept", async (req, res) => {
 
     return res.json({
       message: "Engagement accepted successfully",
-      engagement: updated,
+      engagement: redactEngagementForProvider(updated),
     });
 
   } catch (err) {

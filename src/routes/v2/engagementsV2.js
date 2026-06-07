@@ -19,6 +19,7 @@ import {
   assertCancellationAllowed,
   loadCancellationPolicy,
 } from "../../services/cancellationPolicy.js";
+import { redactEngagementForProvider } from "../../utils/responseRedaction.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -397,7 +398,7 @@ router.post("/:id/accept", async (req, res) => {
 
     return res.json({
       message: "Engagement accepted successfully",
-      engagement: updated,
+      engagement: redactEngagementForProvider(updated),
     });
 
   } catch (err) {

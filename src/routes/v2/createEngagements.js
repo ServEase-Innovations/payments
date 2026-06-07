@@ -10,6 +10,7 @@ import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
 import { resolvePricingForEngagement } from "../../services/pricing/engagementPricing.js";
+import { buildResumeCheckoutResponse } from "../../utils/responseRedaction.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -576,27 +577,27 @@ router.post("/resume-payment", async (req, res) => {
       [razorpay_order_id, engagementId]
     );
 
-    return res.json({
-      success: true,
-      razorpay_order_id,
-      razorpay_key_id: getRazorpayKeyId(),
-      /** Amount in paise for Razorpay Checkout `options.amount` */
-      amount: amountPaise,
-      amount_inr: totalInr,
-      currency: "INR",
-      engagementId,
-      engagement_id: engagementId,
-      booking_type: row.booking_type,
-      service_type: row.service_type,
-      engagement_status: row.engagement_status,
-      customer: {
-        customerid: row.customerid,
-        firstname: row.firstname,
-        lastname: row.lastname,
-        contact: row.mobileno,
-        email: row.emailid,
-      },
-    });
+    return res.json(
+      buildResumeCheckoutResponse({
+        razorpay_order_id,
+        razorpay_key_id: getRazorpayKeyId(),
+        amount: amountPaise,
+        amount_inr: totalInr,
+        currency: "INR",
+        engagement_id: engagementId,
+        booking_type: row.booking_type,
+        service_type: row.service_type,
+        status: row.engagement_status,
+        created_at: row.created_at,
+        customer: {
+          customerid: row.customerid,
+          firstname: row.firstname,
+          lastname: row.lastname,
+          contact: row.mobileno,
+          email: row.emailid,
+        },
+      })
+    );
   } catch (err) {
     console.error("V2 resume-payment error:", err);
     return res.status(500).json({
