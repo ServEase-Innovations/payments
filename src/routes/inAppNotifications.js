@@ -5,8 +5,15 @@ import {
   markAllRead,
   markNotificationRead,
 } from "../services/inAppNotification.service.js";
+import {
+  authenticateRead,
+  loadActor,
+  requireNotificationRecipient,
+} from "../middleware/resourceAccess.js";
 
 const router = express.Router();
+
+const notificationRead = [authenticateRead, loadActor, requireNotificationRecipient];
 
 function parseRecipient(req) {
   const q = req.query && typeof req.query === "object" ? req.query : {};
@@ -27,7 +34,7 @@ function parseRecipient(req) {
   return { recipientType, recipientId };
 }
 
-router.get("/in-app-notifications", async (req, res) => {
+router.get("/in-app-notifications", ...notificationRead, async (req, res) => {
   const parsed = parseRecipient(req);
   if (parsed.error) {
     return res.status(parsed.error.status).json({ error: parsed.error.message });
@@ -51,7 +58,7 @@ router.get("/in-app-notifications", async (req, res) => {
   }
 });
 
-router.get("/in-app-notifications/unread-count", async (req, res) => {
+router.get("/in-app-notifications/unread-count", ...notificationRead, async (req, res) => {
   const parsed = parseRecipient(req);
   if (parsed.error) {
     return res.status(parsed.error.status).json({ error: parsed.error.message });
@@ -66,7 +73,7 @@ router.get("/in-app-notifications/unread-count", async (req, res) => {
   }
 });
 
-router.patch("/in-app-notifications/:id/read", async (req, res) => {
+router.patch("/in-app-notifications/:id/read", ...notificationRead, async (req, res) => {
   const parsed = parseRecipient(req);
   if (parsed.error) {
     return res.status(parsed.error.status).json({ error: parsed.error.message });

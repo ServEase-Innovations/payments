@@ -25,6 +25,23 @@ import {
   redactEngagementForCustomer,
   redactEngagementForProvider,
 } from "../utils/responseRedaction.js";
+import {
+  authenticateRead,
+  loadActor,
+  requireOwnCustomerId,
+  requireEngagementParticipant,
+} from "../middleware/resourceAccess.js";
+
+const customerOwnerRead = [
+  authenticateRead,
+  loadActor,
+  requireOwnCustomerId("customerId"),
+];
+const engagementParticipantRead = [
+  authenticateRead,
+  loadActor,
+  requireEngagementParticipant("id"),
+];
 
 
 dayjs.extend(customParseFormat);
@@ -426,7 +443,7 @@ router.post("/", async (req, res) => {
 });
 
 // GET modification history for one engagement (audit: who changed what, when)
-router.get("/:id/modifications", async (req, res) => {
+router.get("/:id/modifications", ...engagementParticipantRead, async (req, res) => {
   try {
     const { id } = req.params;
     if (id == null || String(id).trim() === "" || !/^\d+$/.test(String(id).trim())) {
@@ -468,7 +485,7 @@ router.get("/:id/modifications", async (req, res) => {
 });
 
 // GET today's booked visits for a customer (IST calendar day, by start time)
-router.get("/:customerId/today-bookings", async (req, res) => {
+router.get("/:customerId/today-bookings", ...customerOwnerRead, async (req, res) => {
   const cid = Number(req.params.customerId);
   if (!Number.isFinite(cid) || cid < 1) {
     return res.status(400).json({ success: false, error: "Invalid customer id" });
@@ -688,7 +705,7 @@ router.get("/:customerId/today-bookings", async (req, res) => {
 // GET all engagements for a customer (FULL VERSION)
 // Includes: provider details, payments, modifications, vacations, epoch times
 
-router.get("/:customerId/engagements", async (req, res) => {
+router.get("/:customerId/engagements", ...customerOwnerRead, async (req, res) => {
   try {
     const { customerId } = req.params;
 

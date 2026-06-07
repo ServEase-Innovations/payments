@@ -1,12 +1,22 @@
 import express from "express";
 import pool from "../config/db.js";
+import {
+  authenticateRead,
+  loadActor,
+  requireOwnCustomerId,
+} from "../middleware/resourceAccess.js";
 
 const router = express.Router();
 
 /**
  * Get wallet balance & transactions for a customer
  */
-router.get("/wallets/:customerId", async (req, res) => {
+router.get(
+  "/wallets/:customerId",
+  authenticateRead,
+  loadActor,
+  requireOwnCustomerId("customerId"),
+  async (req, res) => {
   const { customerId } = req.params;
 
   try {

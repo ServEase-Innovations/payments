@@ -6,6 +6,17 @@ import { deriveTaskStatusForProvider } from "../utils/engagementTaskStatus.js";
 import { isVisitOverdue } from "../services/overdueStartReminder.service.js";
 import { getProviderWalletHistory } from "../services/providerWalletHistory.service.js";
 import { redactEngagementForProvider } from "../utils/responseRedaction.js";
+import {
+  authenticateRead,
+  loadActor,
+  requireOwnProviderId,
+} from "../middleware/resourceAccess.js";
+
+const providerOwnerRead = [
+  authenticateRead,
+  loadActor,
+  requireOwnProviderId("providerId"),
+];
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -90,7 +101,7 @@ function normalizeYmd(dateLike) {
 /*              TODAY'S BOOKED VISITS (IST calendar day, by start time)       */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/today-bookings", async (req, res) => {
+router.get("/:providerId/today-bookings", ...providerOwnerRead, async (req, res) => {
   const pid = Number(req.params.providerId);
   if (!Number.isFinite(pid) || pid < 1) {
     return res.status(400).json({ success: false, error: "Invalid provider id" });
@@ -308,7 +319,7 @@ router.get("/:providerId/today-bookings", async (req, res) => {
 /*                            PROVIDER PAYOUT SUMMARY                          */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/payouts", async (req, res) => {
+router.get("/:providerId/payouts", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   const { month, detailed } = req.query;
 
@@ -355,7 +366,7 @@ router.get("/:providerId/payouts", async (req, res) => {
 /*                     SP WITHDRAWAL / WALLET HISTORY                          */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/withdrawal-history", async (req, res) => {
+router.get("/:providerId/withdrawal-history", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   const { month } = req.query;
 
@@ -393,7 +404,7 @@ router.get("/:providerId/withdrawal-history", async (req, res) => {
 /*                      GET ALL ENGAGEMENTS FOR PROVIDER                      */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/engagements", async (req, res) => {
+router.get("/:providerId/engagements", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   const { status, month } = req.query;
 
@@ -626,7 +637,7 @@ result.rows.forEach(row => {
 /*                           PROVIDER CALENDAR API                             */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/calendar", async (req, res) => {
+router.get("/:providerId/calendar", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   const { month, status } = req.query;
 
@@ -695,7 +706,7 @@ router.get("/:providerId/calendar", async (req, res) => {
 /*  Engagement modification log (all engagements for this provider)         */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/modification-log", async (req, res) => {
+router.get("/:providerId/modification-log", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   const limitRaw = req.query.limit;
   const limit = Math.min(Math.max(Number(limitRaw) || 200, 1), 500);
@@ -885,7 +896,7 @@ router.post("/:providerId/withdraw", async (req, res) => {
 /*  Provider leave requests (provider_leaves)                                  */
 /* -------------------------------------------------------------------------- */
 
-router.get("/:providerId/leaves", async (req, res) => {
+router.get("/:providerId/leaves", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   try {
     const result = await pool.query(
@@ -1046,7 +1057,7 @@ function expandDateRangeYmd(startStr, endStr) {
   return out;
 }
 
-router.get("/:providerId/availability/blocks", async (req, res) => {
+router.get("/:providerId/availability/blocks", ...providerOwnerRead, async (req, res) => {
   const { providerId } = req.params;
   const { month } = req.query;
   if (!month || !/^\d{4}-\d{2}$/.test(month)) {

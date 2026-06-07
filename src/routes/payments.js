@@ -6,6 +6,12 @@ import {
   buildResumeCheckoutResponse,
   redactPaymentVerifyResponse,
 } from "../utils/responseRedaction.js";
+import {
+  authenticateRead,
+  loadActor,
+  requireEngagementCustomer,
+  requireOwnProviderId,
+} from "../middleware/resourceAccess.js";
 
 const router = express.Router();
 
@@ -67,7 +73,12 @@ router.post("/verify", async (req, res) => {
 
 
 
-router.get("/:providerId/payment-history", async (req, res) => {
+router.get(
+  "/:providerId/payment-history",
+  authenticateRead,
+  loadActor,
+  requireOwnProviderId("providerId"),
+  async (req, res) => {
   const { providerId } = req.params;
 
   try {
@@ -101,7 +112,12 @@ router.get("/:providerId/payment-history", async (req, res) => {
   }
 });
 
-router.get("/:engagementId/resume", async (req, res) => {
+router.get(
+  "/:engagementId/resume",
+  authenticateRead,
+  loadActor,
+  requireEngagementCustomer("engagementId"),
+  async (req, res) => {
   try {
     const { engagementId } = req.params;
 

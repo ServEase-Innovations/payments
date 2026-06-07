@@ -16,7 +16,7 @@ const PUBLIC_MUTATION_EXACT = new Set([
   "/api/v2/service-providers/nearby-monthly",
 ]);
 
-function isAuthConfigured() {
+export function isAuthConfigured() {
   return Boolean(
     process.env.AUTH0_DOMAIN?.trim() && process.env.AUTH0_AUDIENCE?.trim()
   );
@@ -32,13 +32,13 @@ function shouldProtectMutations() {
   return isProduction() && isAuthConfigured();
 }
 
-function isProduction() {
+export function isProduction() {
   return process.env.NODE_ENV === "production";
 }
 
 let checkJwtMiddleware = null;
 
-function getCheckJwt() {
+export function getCheckJwt() {
   if (!checkJwtMiddleware && isAuthConfigured()) {
     checkJwtMiddleware = expressjwt({
       secret: jwksRsa.expressJwtSecret({
@@ -63,7 +63,7 @@ function resolveExpectedServiceSecret() {
   ).trim();
 }
 
-function hasValidBypassSecret(req) {
+export function hasValidBypassSecret(req) {
   const expected = resolveExpectedServiceSecret();
   const adminProvided = String(
     req.headers["x-admin-push-secret"] || req.headers["x-admin-api-secret"] || ""
