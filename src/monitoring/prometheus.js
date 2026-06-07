@@ -1,6 +1,12 @@
 import client from "prom-client";
 
+const SERVICE_NAME = "payments";
+
 const register = new client.Registry();
+register.setDefaultLabels({
+  service: SERVICE_NAME,
+  environment: process.env.NODE_ENV || "development",
+});
 client.collectDefaultMetrics({ register });
 
 export const httpRequestDurationMs = new client.Histogram({
