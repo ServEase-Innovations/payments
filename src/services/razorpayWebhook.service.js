@@ -1,22 +1,14 @@
-import { createHmac } from "crypto";
 import pool from "../config/db.js";
 import { handlePaymentSuccess } from "./paymentLifecycle.service.js";
+import { verifyRazorpayWebhookSignature } from "../utils/razorpayWebhookHmac.js";
+
+export { verifyRazorpayWebhookSignature };
 
 export function isRazorpayWebhookVerifySkipped() {
   return (
     process.env.NODE_ENV !== "production" &&
     process.env.SKIP_RAZORPAY_WEBHOOK_VERIFY === "true"
   );
-}
-
-export function verifyRazorpayWebhookSignature(rawBody, signature, webhookSecret) {
-  if (!rawBody || !signature || !webhookSecret) {
-    return false;
-  }
-  const expectedSignature = createHmac("sha256", webhookSecret)
-    .update(rawBody)
-    .digest("hex");
-  return expectedSignature === signature;
 }
 
 async function resolveEngagementIdForOrder(razorpayOrderId, paymentEntity) {

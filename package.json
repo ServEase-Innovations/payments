@@ -8,7 +8,8 @@
     "qa": "NODE_ENV=qa node index.js",
     "prod": "NODE_ENV=production node index.js",
     "monitoring:up": "docker compose -f docker-compose.monitoring.yml up -d",
-    "monitoring:down": "docker compose -f docker-compose.monitoring.yml down"
+    "monitoring:down": "docker compose -f docker-compose.monitoring.yml down",
+    "test": "node --test test/"
   },
   "keywords": [],
   "author": "",

@@ -376,7 +376,10 @@ router.post("/", async (req, res) => {
       `SELECT customerid FROM customer WHERE customerid=$1`,
       [customerid]
     );
-    if (!cust.rows.length) throw new Error("Customer not found");
+    if (!cust.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Customer not found" });
+    }
 
     const assignment_status = isOnDemand ? "UNASSIGNED" : "ASSIGNED";
     const engagement_status = "PAYMENT_PENDING";
