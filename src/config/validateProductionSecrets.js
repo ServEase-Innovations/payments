@@ -1,3 +1,5 @@
+import { assertCorsOriginsProduction } from "../lib/corsOrigins.js";
+
 /** Dev-only defaults that must never be active when NODE_ENV=production */
 export const FORBIDDEN_PRODUCTION_SECRETS = new Set([
   "serveaso-test-push-secret",
@@ -63,4 +65,6 @@ export function validatePaymentsProductionSecrets() {
   if (process.env.SKIP_RAZORPAY_VERIFY === "true") {
     throw new Error("SKIP_RAZORPAY_VERIFY must not be true in production");
   }
+
+  assertCorsOriginsProduction();
 }

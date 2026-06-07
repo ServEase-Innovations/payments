@@ -18,8 +18,11 @@ import walletRoutes from "./src/routes/walletRoutes.js";
 import serviceProviderRoutes from "./src/routes/service-providers.js";
 import http from "http";
 import { Server } from "socket.io";
-import cors from "cors";
 import config from "./src/config/config.js";
+import { corsMiddleware } from "./src/middleware/corsMiddleware.js";
+import { getSocketIoCorsConfig } from "./src/lib/corsOrigins.js";
+import { requireJwtOnMutations } from "./src/middleware/checkJwt.js";
+import healthRouter from "./src/routes/health.js";
 import engagementsServiceRouter from "./src/routes/engagementService.js";
 import adminPaymentsRouter from "./src/routes/adminPayments.js";
 import engagementsV2Router from "./src/routes/v2/engagementsV2.js";
@@ -54,7 +57,9 @@ if (
   app.set("trust proxy", 1);
 }
 
-app.use(cors());
+app.use(corsMiddleware);
+app.use(requireJwtOnMutations);
+app.use(healthRouter);
 app.use(requestMetrics);
 
 // Create HTTP server
@@ -62,14 +67,7 @@ const server = http.createServer(app);
 
 // Attach Socket.IO
 const io = new Server(server, {
-  cors: {
-    origin: [
-      "http://localhost:3000",               // local dev
-      "https://servease-innovation.netlify.app" // your deployed frontend
-    ],
-    methods: ["GET", "POST"],
-    credentials: true
-  }
+  cors: getSocketIoCorsConfig(),
 });
 setSocketServer(io);
 
@@ -223,6 +221,13 @@ io.on("connection", (socket) => {
 
 
 
+
+app.use((err, req, res, next) => {
+  if (err?.name === "UnauthorizedError") {
+    return res.status(401).json({ error: "Invalid or missing authorization token" });
+  }
+  return next(err);
+});
 
 const httpPort = Number(process.env.PORT) || 4000;
 server.listen(httpPort, () => {
