@@ -187,8 +187,8 @@ export async function transitionEngagement(client, {
     }
   }
 
-  // 🔹 Release availability when cancelled
-  if (newStatus === "CANCELLED") {
+  // 🔹 Release availability when booking ends (cancelled or completed)
+  if (newStatus === "CANCELLED" || newStatus === "COMPLETED") {
     await client.query(
       `DELETE FROM provider_availability
        WHERE engagement_id=$1`,

@@ -229,7 +229,7 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
-const httpPort = Number(process.env.PORT) || 4000;
+const httpPort = Number(process.env.PORT) || 4100;
 server.listen(httpPort, () => {
   logger.info("payments_api_started", {
     port: httpPort,

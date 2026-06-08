@@ -9,6 +9,19 @@ dayjs.extend(timezone);
 
 export const MAX_SERVICE_DURATION_MINUTES = 24 * 60;
 
+/** Engagements in these states must not block provider availability. */
+export const TERMINAL_ENGAGEMENT_STATUSES = [
+  "CANCELLED",
+  "COMPLETED",
+  "CLOSED",
+  "EXPIRED",
+];
+
+export function activeEngagementStatusSql(alias = "e") {
+  const list = TERMINAL_ENGAGEMENT_STATUSES.map((s) => `'${s}'`).join(", ");
+  return `UPPER(COALESCE(${alias}.engagement_status, '')) NOT IN (${list})`;
+}
+
 export function calendarYmd(value) {
   if (value == null) return null;
   if (typeof value === "string") {
@@ -107,23 +120,25 @@ export async function findProviderBookedConflict(
     ];
     let excludeClause = "";
     if (Number.isFinite(excludeEid) && excludeEid > 0) {
-      excludeClause = "AND engagement_id IS DISTINCT FROM $7";
+      excludeClause = "AND pa.engagement_id IS DISTINCT FROM $7";
       params.push(excludeEid);
     }
 
     const overlap = await client.query(
       `
-      SELECT engagement_id, date, slot_start_epoch, slot_end_epoch
-      FROM provider_availability
-      WHERE serviceproviderid = $1
-        AND status = 'BOOKED'
-        AND date = $2::date
-        AND slot_start_epoch IS NOT NULL
-        AND slot_end_epoch IS NOT NULL
+      SELECT pa.engagement_id, pa.date, pa.slot_start_epoch, pa.slot_end_epoch
+      FROM provider_availability pa
+      INNER JOIN engagements e ON e.engagement_id = pa.engagement_id
+      WHERE pa.serviceproviderid = $1
+        AND pa.status = 'BOOKED'
+        AND pa.date = $2::date
+        AND pa.slot_start_epoch IS NOT NULL
+        AND pa.slot_end_epoch IS NOT NULL
+        AND ${activeEngagementStatusSql("e")}
         ${excludeClause}
-        AND GREATEST(slot_start_epoch, $5::bigint) < LEAST(slot_end_epoch, $6::bigint)
-        AND $3::bigint < LEAST(slot_end_epoch, $6::bigint)
-        AND $4::bigint > GREATEST(slot_start_epoch, $5::bigint)
+        AND GREATEST(pa.slot_start_epoch, $5::bigint) < LEAST(pa.slot_end_epoch, $6::bigint)
+        AND $3::bigint < LEAST(pa.slot_end_epoch, $6::bigint)
+        AND $4::bigint > GREATEST(pa.slot_start_epoch, $5::bigint)
       LIMIT 1
       `,
       params

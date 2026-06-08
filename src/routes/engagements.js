@@ -26,6 +26,11 @@ import {
   redactEngagementForProvider,
 } from "../utils/responseRedaction.js";
 import {
+  formatPlacedAtIstLabel,
+  normalizePaymentTimestamps,
+  pgTimestampToIsoUtc,
+} from "../utils/pgTimestamp.js";
+import {
   authenticateRead,
   loadActor,
   requireOwnCustomerId,
@@ -917,15 +922,20 @@ WHERE sp.serviceproviderid = ANY($1)`,
           ? dayjs.unix(endEpoch).tz("Asia/Kolkata").format("HH:mm")
           : null;
 
+      const paymentRow = paymentByEng[e.engagement_id] || null;
+      const createdIso = pgTimestampToIsoUtc(e.created_at);
+
       const enriched = redactEngagementForCustomer({
         ...engCore,
+        created_at: createdIso ?? e.created_at,
+        placed_at_label: formatPlacedAtIstLabel(e.created_at),
         task_status,
         task_status_stored: taskStatusStored,
         work_summary,
         start_time: safeStartTime,
         end_time: safeEndTime,
         provider: providerById[e.serviceproviderid] || null,
-        payment: paymentByEng[e.engagement_id] || null,
+        payment: normalizePaymentTimestamps(paymentRow),
         modifications: modsByEng[e.engagement_id] || [],
         vacations: vacationsByEng[e.engagement_id] || [],
         today_service,

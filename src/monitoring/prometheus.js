@@ -5,7 +5,7 @@ const SERVICE_NAME = "payments";
 const register = new client.Registry();
 register.setDefaultLabels({
   service: SERVICE_NAME,
-  environment: process.env.NODE_ENV || "development",
+  environment: process.env.METRICS_ENVIRONMENT || process.env.NODE_ENV || "development",
 });
 client.collectDefaultMetrics({ register });
 

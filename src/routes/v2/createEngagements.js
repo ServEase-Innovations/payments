@@ -7,6 +7,7 @@ import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
+import { activeEngagementStatusSql } from "../../services/providerAvailabilityOverlap.js";
 import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
 import { resolvePricingForEngagement } from "../../services/pricing/engagementPricing.js";
@@ -342,15 +343,17 @@ router.post("/", async (req, res) => {
         if (dayStartEpoch == null) continue;
         const dayEndEpoch = dayStartEpoch + durationSec;
         const overlap = await client.query(
-          `SELECT 1 FROM provider_availability
-           WHERE serviceproviderid = $1
-             AND status = 'BOOKED'
-             AND date = $2::date
-             AND slot_start_epoch IS NOT NULL
-             AND slot_end_epoch IS NOT NULL
-             AND GREATEST(slot_start_epoch, $5::bigint) < LEAST(slot_end_epoch, $6::bigint)
-             AND $3::bigint < LEAST(slot_end_epoch, $6::bigint)
-             AND $4::bigint > GREATEST(slot_start_epoch, $5::bigint)
+          `SELECT 1 FROM provider_availability pa
+           INNER JOIN engagements e ON e.engagement_id = pa.engagement_id
+           WHERE pa.serviceproviderid = $1
+             AND pa.status = 'BOOKED'
+             AND pa.date = $2::date
+             AND pa.slot_start_epoch IS NOT NULL
+             AND pa.slot_end_epoch IS NOT NULL
+             AND ${activeEngagementStatusSql("e")}
+             AND GREATEST(pa.slot_start_epoch, $5::bigint) < LEAST(pa.slot_end_epoch, $6::bigint)
+             AND $3::bigint < LEAST(pa.slot_end_epoch, $6::bigint)
+             AND $4::bigint > GREATEST(pa.slot_start_epoch, $5::bigint)
            LIMIT 1`,
           [
             serviceproviderid,

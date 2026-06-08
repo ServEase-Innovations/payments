@@ -15,6 +15,92 @@ import { getSocketServer } from "../utils/socketIoRef.js";
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+/** Max distance (m) to notify providers of a paid on-demand booking. */
+const ON_DEMAND_NOTIFY_RADIUS_M = 12_000;
+const ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M = 30_000;
+
+async function notifyOnDemandProvider(socketServer, engagement, providerRow, distanceM) {
+  const spid = Number(providerRow.serviceproviderid);
+  if (!Number.isFinite(spid) || spid < 1) return false;
+
+  const room = `provider_${spid}`;
+  const roomSet = socketServer.sockets.adapter.rooms.get(room);
+  const connectedCount = roomSet ? roomSet.size : 0;
+
+  console.log(
+    `📡 Broadcasting engagement ${engagement.engagement_id} → ${room}`,
+    "| connections:",
+    connectedCount
+  );
+  if (connectedCount === 0) {
+    console.warn(
+      `No live socket in ${room} — provider must keep the app open while logged in so the UI joins that room.`
+    );
+  }
+
+  const distanceKm = Math.round((distanceM / 1000) * 10) / 10;
+  const startTimeLabel = engagement.start_epoch
+    ? dayjs
+        .unix(Number(engagement.start_epoch))
+        .tz("Asia/Kolkata")
+        .format("D MMM YYYY, h:mm a")
+    : engagement.start_date
+      ? String(engagement.start_date)
+      : "";
+  const addressLine = engagement.address ? String(engagement.address).trim() : "";
+
+  socketServer.to(room).emit("new-engagement-request", {
+    engagement_id: engagement.engagement_id,
+    service_type: engagement.service_type,
+    booking_type: engagement.booking_type,
+    start_date: engagement.start_date,
+    start_epoch: engagement.start_epoch,
+    duration_minutes: engagement.duration_minutes,
+    base_amount: engagement.base_amount,
+    address: addressLine || null,
+    distance_meters: distanceM,
+    payment_ready: true,
+  });
+
+  const amountLabel =
+    engagement.base_amount != null && engagement.base_amount !== ""
+      ? `₹${engagement.base_amount}`
+      : null;
+  const summaryParts = [
+    engagement.service_type,
+    startTimeLabel ? `Starts ${startTimeLabel}` : null,
+    `~${distanceKm} km from you`,
+    amountLabel,
+  ].filter(Boolean);
+  const bodyText = summaryParts.join(" · ");
+
+  try {
+    await upsertProviderNewBookingNotification({
+      io: socketServer,
+      recipientId: spid,
+      engagementId: engagement.engagement_id,
+      title: "New paid booking nearby — tap to review",
+      body: bodyText,
+      metadata: {
+        service_type: engagement.service_type,
+        booking_type: engagement.booking_type,
+        start_date: engagement.start_date,
+        start_epoch: engagement.start_epoch,
+        start_time_label: startTimeLabel,
+        duration_minutes: engagement.duration_minutes,
+        base_amount: engagement.base_amount,
+        distance_m: distanceM,
+        distance_km: distanceKm,
+        address: addressLine || null,
+        payment_ready: true,
+      },
+    });
+  } catch (e) {
+    console.error("in-app notification (payment success) failed", e);
+  }
+  return true;
+}
+
 export async function handlePaymentSuccess({
   engagementId,
   razorpay_order_id,
@@ -165,95 +251,46 @@ export async function handlePaymentSuccess({
       `Broadcasting new ON_DEMAND engagement ${engagement.engagement_id} to nearby providers...`
     );
 
-    for (const p of providers.rows) {
-      const distance = geolib.getDistance(
-        { latitude: engagement.latitude, longitude: engagement.longitude },
-        { latitude: p.latitude, longitude: p.longitude }
-      );
+    const customerPoint = {
+      latitude: engagement.latitude,
+      longitude: engagement.longitude,
+    };
+    const distances = providers.rows.map((p) => ({
+      row: p,
+      distance: geolib.getDistance(customerPoint, {
+        latitude: p.latitude,
+        longitude: p.longitude,
+      }),
+    }));
 
-      if (distance <= 5000) {
-        const spid = Number(p.serviceproviderid);
-        if (!Number.isFinite(spid) || spid < 1) continue;
-        const room = `provider_${spid}`;
+    let notified = 0;
+    const notifiedIds = new Set();
 
-        const roomSet = socketServer.sockets.adapter.rooms.get(room);
-        const connectedCount = roomSet ? roomSet.size : 0;
-
-        console.log(
-          `📡 Broadcasting engagement ${engagement.engagement_id} → ${room}`,
-          "| connections:",
-          connectedCount
-        );
-        if (connectedCount === 0) {
-          console.warn(
-            `No live socket in ${room} — provider must open the dashboard while logged in (Auth0 or OTP) so the app can join that room.`
-          );
-        }
-
-        const distanceKm = Math.round((distance / 1000) * 10) / 10;
-        const startTimeLabel = engagement.start_epoch
-          ? dayjs
-              .unix(Number(engagement.start_epoch))
-              .tz("Asia/Kolkata")
-              .format("D MMM YYYY, h:mm a")
-          : engagement.start_date
-            ? String(engagement.start_date)
-            : "";
-        const addressLine = engagement.address
-          ? String(engagement.address).trim()
-          : "";
-
-        socketServer.to(room).emit("new-engagement-request", {
-          engagement_id: engagement.engagement_id,
-          service_type: engagement.service_type,
-          booking_type: engagement.booking_type,
-          start_date: engagement.start_date,
-          start_epoch: engagement.start_epoch,
-          duration_minutes: engagement.duration_minutes,
-          base_amount: engagement.base_amount,
-          address: addressLine || null,
-          distance_meters: distance,
-          payment_ready: true,
-        });
+    const notifyWithin = async (maxM) => {
+      for (const { row, distance } of distances) {
+        if (distance > maxM) continue;
+        const spid = Number(row.serviceproviderid);
+        if (!Number.isFinite(spid) || spid < 1 || notifiedIds.has(spid)) continue;
         /* eslint-disable no-await-in-loop */
-        const amountLabel =
-          engagement.base_amount != null && engagement.base_amount !== ""
-            ? `₹${engagement.base_amount}`
-            : null;
-        const summaryParts = [
-          engagement.service_type,
-          startTimeLabel ? `Starts ${startTimeLabel}` : null,
-          `~${distanceKm} km from you`,
-          amountLabel,
-        ].filter(Boolean);
-        const bodyText = summaryParts.join(" · ");
-        try {
-          await upsertProviderNewBookingNotification({
-            io: socketServer,
-            recipientId: spid,
-            engagementId: engagement.engagement_id,
-            title: "New paid booking nearby — tap to review",
-            body: bodyText,
-            metadata: {
-              service_type: engagement.service_type,
-              booking_type: engagement.booking_type,
-              start_date: engagement.start_date,
-              start_epoch: engagement.start_epoch,
-              start_time_label: startTimeLabel,
-              duration_minutes: engagement.duration_minutes,
-              base_amount: engagement.base_amount,
-              distance_m: distance,
-              distance_km: distanceKm,
-              address: addressLine || null,
-              payment_ready: true,
-            },
-          });
-        } catch (e) {
-          console.error("in-app notification (payment success) failed", e);
-        }
+        const ok = await notifyOnDemandProvider(socketServer, engagement, row, distance);
         /* eslint-enable no-await-in-loop */
+        if (ok) {
+          notifiedIds.add(spid);
+          notified += 1;
+        }
       }
+    };
+
+    await notifyWithin(ON_DEMAND_NOTIFY_RADIUS_M);
+    if (notified === 0) {
+      console.warn(
+        `No providers within ${ON_DEMAND_NOTIFY_RADIUS_M}m for engagement ${engagement.engagement_id} — widening to ${ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M}m`
+      );
+      await notifyWithin(ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M);
     }
+    console.log(
+      `ON_DEMAND engagement ${engagement.engagement_id}: notified ${notified} provider(s)`
+    );
   } else if (
     (engagement.booking_type === "SHORT_TERM" ||
       engagement.booking_type === "MONTHLY") &&

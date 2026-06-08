@@ -37,8 +37,72 @@ function toIso(v) {
   return v;
 }
 
+const NEW_BOOKING_TYPES = ["NEW_BOOKING_OPPORTUNITY", "NEW_BOOKING_REQUEST"];
+
+const OPEN_FOR_ACCEPTANCE_STATUSES = new Set([
+  "OPEN_FOR_ACCEPTANCE",
+  "UNASSIGNED",
+  "",
+]);
+
+const TERMINAL_ENGAGEMENT_STATUSES = new Set([
+  "CANCELLED",
+  "EXPIRED",
+  "COMPLETED",
+  "CLOSED",
+  "REJECTED",
+]);
+
+/**
+ * For provider "new booking" rows, derive whether Accept/Decline should still show.
+ * @param {object} row — notification row; may include joined `eng_*` engagement columns
+ */
+function deriveBookingNotificationAction(row) {
+  const type = String(row.type || "");
+  if (!NEW_BOOKING_TYPES.includes(type)) return null;
+
+  const eid = row.engagement_id != null ? Number(row.engagement_id) : NaN;
+  if (!Number.isFinite(eid) || eid < 1) {
+    return { bookingActionable: false, bookingClosureLabel: "Already accepted" };
+  }
+
+  const engStatus = String(
+    row.eng_engagement_status ?? row.engagement_status ?? ""
+  ).toUpperCase();
+  const assignStatus = String(
+    row.eng_assignment_status ?? row.assignment_status ?? ""
+  ).toUpperCase();
+  const assignedSpRaw = row.eng_serviceproviderid ?? row.serviceproviderid;
+  const assignedSp =
+    assignedSpRaw != null && assignedSpRaw !== ""
+      ? Number(assignedSpRaw)
+      : null;
+  const bookingType = String(
+    row.eng_booking_type ?? row.booking_type ?? ""
+  ).toUpperCase();
+
+  if (TERMINAL_ENGAGEMENT_STATUSES.has(engStatus)) {
+    return { bookingActionable: false, bookingClosureLabel: "Already accepted" };
+  }
+
+  if (Number.isFinite(assignedSp) && assignedSp > 0) {
+    return { bookingActionable: false, bookingClosureLabel: "Already accepted" };
+  }
+
+  if (assignStatus && assignStatus !== "UNASSIGNED") {
+    return { bookingActionable: false, bookingClosureLabel: "Already accepted" };
+  }
+
+  const isOnDemand = bookingType === "ON_DEMAND" || bookingType === "";
+  if (isOnDemand && !OPEN_FOR_ACCEPTANCE_STATUSES.has(engStatus)) {
+    return { bookingActionable: false, bookingClosureLabel: "Already accepted" };
+  }
+
+  return { bookingActionable: true, bookingClosureLabel: null };
+}
+
 export function formatRow(row) {
-  return {
+  const out = {
     id: String(row.id),
     recipientType: row.recipient_type,
     recipientId: String(row.recipient_id),
@@ -50,6 +114,14 @@ export function formatRow(row) {
     readAt: toIso(row.read_at),
     createdAt: toIso(row.created_at) ?? new Date().toISOString(),
   };
+
+  const action = deriveBookingNotificationAction(row);
+  if (action) {
+    out.bookingActionable = action.bookingActionable;
+    out.bookingClosureLabel = action.bookingClosureLabel;
+  }
+
+  return out;
 }
 
 /**
@@ -161,12 +233,18 @@ export async function listInAppNotifications({
     const [listRes, unreadRes] = await Promise.all([
       pool.query(
         `
-        SELECT *
-        FROM in_app_notifications
-        WHERE recipient_type = $1
-          AND recipient_id = $2
-          ${unreadOnly ? "AND read_at IS NULL" : ""}
-        ORDER BY created_at DESC
+        SELECT
+          n.*,
+          e.engagement_status AS eng_engagement_status,
+          e.assignment_status AS eng_assignment_status,
+          e.serviceproviderid AS eng_serviceproviderid,
+          e.booking_type AS eng_booking_type
+        FROM in_app_notifications n
+        LEFT JOIN engagements e ON e.engagement_id = n.engagement_id
+        WHERE n.recipient_type = $1
+          AND n.recipient_id = $2
+          ${unreadOnly ? "AND n.read_at IS NULL" : ""}
+        ORDER BY n.created_at DESC
         LIMIT $3 OFFSET $4
         `,
         [recipientType, id, Math.min(100, Math.max(1, limit)), Math.max(0, offset)]
@@ -329,11 +407,6 @@ export async function autoDismissStaleProviderBookingNotifications(providerId) {
 
   return { updated: (r.rowCount ?? 0) + (orphaned.rowCount ?? 0) };
 }
-
-const NEW_BOOKING_TYPES = [
-  InAppTypes.NEW_BOOKING_OPPORTUNITY,
-  InAppTypes.NEW_BOOKING_REQUEST,
-];
 
 /**
  * One actionable "new booking" row per provider per engagement (replaces stale unread duplicates).

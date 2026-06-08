@@ -53,12 +53,26 @@ export function corsOriginCallback(allowedOrigins) {
   };
 }
 
+const LOCAL_DEV_SOCKET_ORIGINS = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
+];
+
 /** @returns {SocketIoCorsConfig} */
 export function getSocketIoCorsConfig() {
   const allowedOrigins = parseSocketIoOrigins();
   if (allowedOrigins.length === 0) {
+    if (!isProduction()) {
+      return {
+        origin: LOCAL_DEV_SOCKET_ORIGINS,
+        methods: ["GET", "POST"],
+        credentials: true,
+      };
+    }
     return {
-      origin: !isProduction(),
+      origin: false,
       methods: ["GET", "POST"],
       credentials: true,
     };
