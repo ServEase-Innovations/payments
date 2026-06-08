@@ -6,6 +6,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const IST = "Asia/Kolkata";
+const PLACED_TODAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Postgres `timestamp without time zone` / Date → canonical UTC ISO for clients. */
 export function pgTimestampToIsoUtc(value) {
@@ -25,11 +26,17 @@ export function pgTimestampToIsoUtc(value) {
 export function formatPlacedAtIstLabel(value) {
   const iso = pgTimestampToIsoUtc(value);
   if (!iso) return null;
-  const d = dayjs(iso).tz(IST);
+  const ms = dayjs(iso).valueOf();
   const now = dayjs().tz(IST);
+  const d = dayjs(ms).tz(IST);
   const timePart = d.format("h:mm A");
+  const ageMs = now.valueOf() - ms;
+  if (ageMs >= 0 && ageMs < PLACED_TODAY_WINDOW_MS) {
+    return `Today at ${timePart}`;
+  }
   if (d.isSame(now, "day")) return `Today at ${timePart}`;
-  if (d.isSame(now.subtract(1, "day"), "day")) return `Yesterday at ${timePart}`;
+  const yesterday = now.startOf("day").subtract(1, "day");
+  if (d.isSame(yesterday, "day")) return `Yesterday at ${timePart}`;
   return d.format("MMM D, YYYY [at] h:mm A");
 }
 
