@@ -397,7 +397,7 @@ router.post("/:id/accept", async (req, res) => {
     }
 
     return res.json({
-      message: "Engagement accepted successfully",
+      message: "Booking accepted successfully",
       engagement: redactEngagementForProvider(updated),
     });
 
@@ -593,7 +593,7 @@ router.post("/:id/accept", async (req, res) => {
  *
  *     responses:
  *       200:
- *         description: Engagement accepted successfully
+ *         description: Booking accepted successfully
  *         content:
  *           application/json:
  *             schema:
@@ -604,7 +604,7 @@ router.post("/:id/accept", async (req, res) => {
  *                   example: true
  *                 message:
  *                   type: string
- *                   example: Engagement accepted
+ *                   example: Booking accepted successfully
  *
  *       400:
  *         description: Business validation error

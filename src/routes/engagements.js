@@ -1575,7 +1575,7 @@ router.post("/:id/accept", async (req, res) => {
     updated.end_time = epochToTimeHM(updated.end_epoch);
 
     return res.json({
-      message: "Engagement accepted successfully",
+      message: "Booking accepted successfully",
       engagement: redactEngagementForProvider(updated),
     });
 
