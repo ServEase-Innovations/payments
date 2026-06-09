@@ -266,6 +266,7 @@ router.post("/service-days/:id/complete", async (req, res) => {
       SELECT
         sd.service_day_id,
         sd.engagement_id,
+        sd.service_date,
         sd.status,
         e.customerid,
         e.serviceproviderid,
@@ -365,6 +366,8 @@ router.post("/service-days/:id/complete", async (req, res) => {
     const endYmd = String(sd.end_date ?? sd.start_date ?? "").slice(0, 10);
     const singleDay = startYmd && endYmd && startYmd === endYmd;
 
+    const visitYmd = String(sd.service_date ?? "").slice(0, 10);
+
     if (bookingType === "ON_DEMAND" || singleDay) {
       await transitionEngagement(client, {
         engagementId: sd.engagement_id,
@@ -382,6 +385,37 @@ router.post("/service-days/:id/complete", async (req, res) => {
            AND COALESCE(UPPER(task_status), 'NOT_STARTED') NOT IN ('COMPLETED', 'CANCELLED')`,
         [sd.engagement_id]
       );
+
+      if (visitYmd) {
+        await client.query(
+          `DELETE FROM provider_availability
+           WHERE engagement_id = $1
+             AND date = $2::date`,
+          [sd.engagement_id, visitYmd]
+        );
+      }
+
+      const openDays = await client.query(
+        `
+        SELECT 1
+        FROM service_days
+        WHERE engagement_id = $1
+          AND UPPER(COALESCE(status, '')) NOT IN ('COMPLETED', 'CANCELLED', 'SKIPPED')
+        LIMIT 1
+        `,
+        [sd.engagement_id]
+      );
+
+      if (!openDays.rows.length) {
+        await transitionEngagement(client, {
+          engagementId: sd.engagement_id,
+          newStatus: "COMPLETED",
+          eventType: "ENGAGEMENT_ALL_SERVICE_DAYS_COMPLETED",
+          actorType: "PROVIDER",
+          actorId: sd.serviceproviderid,
+          metadata: { service_day_id: serviceDayId },
+        });
+      }
     }
 
     await client.query("COMMIT");

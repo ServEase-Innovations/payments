@@ -19,7 +19,24 @@ export const TERMINAL_ENGAGEMENT_STATUSES = [
 
 export function activeEngagementStatusSql(alias = "e") {
   const list = TERMINAL_ENGAGEMENT_STATUSES.map((s) => `'${s}'`).join(", ");
-  return `UPPER(COALESCE(${alias}.engagement_status, '')) NOT IN (${list})`;
+  return `(
+    UPPER(COALESCE(${alias}.engagement_status, '')) NOT IN (${list})
+    AND UPPER(COALESCE(${alias}.task_status, 'NOT_STARTED')) NOT IN ('CANCELLED', 'COMPLETED')
+  )`;
+}
+
+/** BOOKED slots for visits already marked complete must not block new accepts. */
+export function completedServiceDayConflictExclusionSql(
+  paAlias = "pa",
+  engAlias = "e"
+) {
+  return `NOT EXISTS (
+    SELECT 1
+    FROM service_days sd_done
+    WHERE sd_done.engagement_id = ${engAlias}.engagement_id
+      AND sd_done.service_date = ${paAlias}.date
+      AND UPPER(COALESCE(sd_done.status, '')) IN ('COMPLETED', 'CANCELLED', 'SKIPPED')
+  )`;
 }
 
 export function calendarYmd(value) {
@@ -135,6 +152,7 @@ export async function findProviderBookedConflict(
         AND pa.slot_start_epoch IS NOT NULL
         AND pa.slot_end_epoch IS NOT NULL
         AND ${activeEngagementStatusSql("e")}
+        AND ${completedServiceDayConflictExclusionSql("pa", "e")}
         ${excludeClause}
         AND GREATEST(pa.slot_start_epoch, $5::bigint) < LEAST(pa.slot_end_epoch, $6::bigint)
         AND $3::bigint < LEAST(pa.slot_end_epoch, $6::bigint)

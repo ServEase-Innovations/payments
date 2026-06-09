@@ -6,7 +6,7 @@ import {
   isWithinProviderTimeslot,
   ON_DEMAND_PROVIDER_RADIUS_KM,
   ON_DEMAND_NO_PROVIDERS_MESSAGE,
-} from "../src/services/onDemandProviderAvailability.js";
+} from "../src/services/onDemandProviderAvailability.helpers.js";
 
 describe("onDemandProviderAvailability helpers", () => {
   it("maps service types to provider roles", () => {
