@@ -402,6 +402,14 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Missing end_date for non ON_DEMAND booking" });
     }
 
+    const custPreview = await pool.query(
+      `SELECT customerid FROM customer WHERE customerid=$1`,
+      [customerid]
+    );
+    if (!custPreview.rows.length) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+
     if (isOnDemand) {
       const availability = await assertOnDemandProvidersAvailable({
         latitude,

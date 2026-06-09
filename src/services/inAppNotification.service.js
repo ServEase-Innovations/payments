@@ -1,5 +1,6 @@
 import pool from "../config/db.js";
 import { getSocketServer } from "../utils/socketIoRef.js";
+import { enrichAutoCancelNotificationMetadata } from "./bookingNotificationMetadata.js";
 
 const ALLOWED_RECIPIENT = new Set(["customer", "provider"]);
 
@@ -101,6 +102,25 @@ function deriveBookingNotificationAction(row) {
   return { bookingActionable: true, bookingClosureLabel: null };
 }
 
+function resolveNotificationMetadata(row) {
+  const type = String(row.type || "").toUpperCase();
+  if (type === "BOOKING_AUTO_CANCELLED_NO_PROVIDER") {
+    return enrichAutoCancelNotificationMetadata(row);
+  }
+  const raw = row.metadata;
+  if (raw != null && typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      /* keep raw */
+    }
+  }
+  return raw;
+}
+
 export function formatRow(row) {
   const out = {
     id: String(row.id),
@@ -110,7 +130,7 @@ export function formatRow(row) {
     title: row.title,
     body: row.body,
     engagementId: row.engagement_id != null ? String(row.engagement_id) : null,
-    metadata: row.metadata,
+    metadata: resolveNotificationMetadata(row),
     readAt: toIso(row.read_at),
     createdAt: toIso(row.created_at) ?? new Date().toISOString(),
   };
@@ -238,9 +258,20 @@ export async function listInAppNotifications({
           e.engagement_status AS eng_engagement_status,
           e.assignment_status AS eng_assignment_status,
           e.serviceproviderid AS eng_serviceproviderid,
-          e.booking_type AS eng_booking_type
+          e.booking_type AS eng_booking_type,
+          e.service_type AS eng_service_type,
+          e.start_epoch AS eng_start_epoch,
+          e.end_epoch AS eng_end_epoch,
+          e.start_date AS eng_start_date,
+          e.end_date AS eng_end_date,
+          e.duration_minutes AS eng_duration_minutes,
+          e.address AS eng_address,
+          e.base_amount AS eng_base_amount,
+          p.total_amount AS pay_total_amount
         FROM in_app_notifications n
         LEFT JOIN engagements e ON e.engagement_id = n.engagement_id
+        LEFT JOIN payments p ON p.engagement_id = n.engagement_id
+          AND UPPER(COALESCE(p.status, '')) IN ('SUCCESS', 'REFUNDED')
         WHERE n.recipient_type = $1
           AND n.recipient_id = $2
           ${unreadOnly ? "AND n.read_at IS NULL" : ""}
@@ -329,6 +360,8 @@ export const InAppTypes = {
   SERVICE_START_OVERDUE: "SERVICE_START_OVERDUE",
   /** Customer: payment still PENDING after booking creation */
   PAYMENT_PENDING_REMINDER: "PAYMENT_PENDING_REMINDER",
+  /** Customer: paid on-demand booking auto-cancelled — no provider before start */
+  BOOKING_AUTO_CANCELLED_NO_PROVIDER: "BOOKING_AUTO_CANCELLED_NO_PROVIDER",
   SUPPORT_TICKET_UPDATE: "SUPPORT_TICKET_UPDATE",
 };
 
