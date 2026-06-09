@@ -46,6 +46,7 @@ import adminPricingRouter from "./src/routes/adminPricing.js";
 import couponsProxyRouter from "./src/routes/couponsProxy.js";
 import { setSocketServer } from "./src/utils/socketIoRef.js";
 import { startOverdueStartReminderScheduler } from "./src/services/overdueStartReminder.service.js";
+import { startPaymentPendingReminderScheduler } from "./src/services/paymentPendingReminder.service.js";
 
 const app = express();
 
@@ -239,6 +240,7 @@ server.listen(httpPort, () => {
   });
   console.log(`Server running on http://localhost:${httpPort}/v1/api-docs`);
   startOverdueStartReminderScheduler(io);
+  startPaymentPendingReminderScheduler(io);
 });
 
 export { io };

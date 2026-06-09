@@ -11,6 +11,7 @@ import {
   createInAppNotification,
 } from "./inAppNotification.service.js";
 import { getSocketServer } from "../utils/socketIoRef.js";
+import { dismissPaymentPendingRemindersForEngagement } from "./paymentPendingReminder.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -203,6 +204,12 @@ export async function handlePaymentSuccess({
 
   const socketServer = io != null ? io : getSocketServer();
   console.log(`Payment successful for engagement ${engagementId}.`);
+
+  try {
+    await dismissPaymentPendingRemindersForEngagement(engagementId);
+  } catch (eDismissPending) {
+    console.error("dismiss payment-pending reminders failed", eDismissPending);
+  }
 
   if (engagement.booking_type === "ON_DEMAND" && socketServer) {
     const life = String(engagement.engagement_status || "").toUpperCase();
