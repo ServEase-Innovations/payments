@@ -4,7 +4,7 @@ import {
   parsePaymentPendingPolicy,
   resolveDuePaymentReminderTier,
   DEFAULT_PAYMENT_REMINDER_POLICY,
-} from "../src/services/paymentPendingReminder.service.js";
+} from "../src/services/paymentPendingReminderPolicy.js";
 
 test("parsePaymentPendingPolicy uses defaults when missing", () => {
   const policy = parsePaymentPendingPolicy({});

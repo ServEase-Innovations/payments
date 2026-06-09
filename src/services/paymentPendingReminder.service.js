@@ -4,45 +4,25 @@ import {
   InAppTypes,
 } from "./inAppNotification.service.js";
 import { getSocketServer } from "../utils/socketIoRef.js";
+import {
+  clampReminderInt,
+  DEFAULT_PAYMENT_REMINDER_POLICY,
+  parsePaymentPendingPolicy,
+  resolveDuePaymentReminderTier,
+} from "./paymentPendingReminderPolicy.js";
+
+export {
+  DEFAULT_PAYMENT_REMINDER_POLICY,
+  parsePaymentPendingPolicy,
+  resolveDuePaymentReminderTier,
+} from "./paymentPendingReminderPolicy.js";
 
 export const PAYMENT_PENDING_REMINDER_BODY =
   "Your booking payment is still pending. Please complete the payment to confirm your booking. A service provider cannot be assigned until the payment is successfully received.";
 
-export const DEFAULT_PAYMENT_REMINDER_POLICY = {
-  paymentPendingOffsetsMinutes: [15, 60, 180],
-};
-
 let cachedPolicy = null;
 let cachedAt = 0;
 const POLICY_CACHE_MS = 60_000;
-
-function clampInt(value, min, max, fallback) {
-  const n = parseInt(String(value), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-export function parsePaymentPendingPolicy(settings) {
-  const raw = settings?.customerReminders;
-  let offsets = raw?.paymentPendingOffsetsMinutes;
-  if (!Array.isArray(offsets)) {
-    offsets = DEFAULT_PAYMENT_REMINDER_POLICY.paymentPendingOffsetsMinutes;
-  }
-  const normalized = [
-    ...new Set(
-      offsets
-        .map((v) => clampInt(v, 1, 7 * 24 * 60, null))
-        .filter((n) => n != null)
-    ),
-  ].sort((a, b) => a - b);
-
-  return {
-    paymentPendingOffsetsMinutes:
-      normalized.length > 0
-        ? normalized
-        : [...DEFAULT_PAYMENT_REMINDER_POLICY.paymentPendingOffsetsMinutes],
-  };
-}
 
 export async function loadPaymentPendingPolicy() {
   const now = Date.now();
@@ -72,21 +52,6 @@ export async function loadPaymentPendingPolicy() {
   cachedPolicy = { ...DEFAULT_PAYMENT_REMINDER_POLICY };
   cachedAt = now;
   return cachedPolicy;
-}
-
-/**
- * Pick the next reminder tier (minutes after booking) that is due and not yet sent.
- * @param {number} ageMinutes
- * @param {number[]} offsetsMinutes sorted ascending
- * @param {Set<number>} sentTiers
- */
-export function resolveDuePaymentReminderTier(ageMinutes, offsetsMinutes, sentTiers) {
-  for (const tier of offsetsMinutes) {
-    if (ageMinutes >= tier && !sentTiers.has(tier)) {
-      return tier;
-    }
-  }
-  return null;
 }
 
 async function getSentReminderTiers(customerId, engagementId) {
@@ -262,8 +227,8 @@ export function startPaymentPendingReminderScheduler(io = null) {
     return;
   }
 
-  const tickMs = clampInt(process.env.PAYMENT_PENDING_REMINDER_TICK_MS, 30_000, 300_000, 60_000);
-  const startupDelayMs = clampInt(
+  const tickMs = clampReminderInt(process.env.PAYMENT_PENDING_REMINDER_TICK_MS, 30_000, 300_000, 60_000);
+  const startupDelayMs = clampReminderInt(
     process.env.PAYMENT_PENDING_REMINDER_STARTUP_DELAY_MS,
     5_000,
     120_000,
