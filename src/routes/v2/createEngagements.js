@@ -12,6 +12,10 @@ import { applyVacationForEngagement } from "../../services/vacationApply.service
 import { createHmac } from "crypto";
 import { resolvePricingForEngagement } from "../../services/pricing/engagementPricing.js";
 import { buildResumeCheckoutResponse } from "../../utils/responseRedaction.js";
+import {
+  assertOnDemandProvidersAvailable,
+  ON_DEMAND_PROVIDER_RADIUS_KM,
+} from "../../services/onDemandProviderAvailability.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -226,6 +230,86 @@ router.get("/providers/:providerId/booking-debug", async (req, res) => {
   }
 });
 
+/**
+ * Pre-checkout: are any on-demand providers available near the booking location?
+ * GET /api/v2/createEngagements/on-demand-availability
+ */
+router.get("/on-demand-availability", async (req, res) => {
+  try {
+    const {
+      latitude,
+      longitude,
+      lat,
+      lng,
+      service_type,
+      start_date,
+      start_time,
+      start_epoch,
+      end_epoch,
+      duration_minutes,
+    } = req.query;
+
+    const resolvedLat = latitude ?? lat;
+    const resolvedLng = longitude ?? lng;
+    const resolvedStartEpoch =
+      toFiniteEpoch(start_epoch) ??
+      toEpochSeconds(
+        normalizeYmdInput(start_date),
+        String(start_time || "").trim() || null
+      );
+
+    if (!service_type) {
+      return res.status(400).json({
+        success: false,
+        error: "service_type is required",
+      });
+    }
+    if (!resolvedStartEpoch) {
+      return res.status(400).json({
+        success: false,
+        error: "start_date and start_time (or start_epoch) are required",
+      });
+    }
+
+    const rawDur =
+      duration_minutes != null && Number.isFinite(Number(duration_minutes))
+        ? Number(duration_minutes)
+        : 60;
+    const durationMinutes = Math.min(
+      Math.max(rawDur, 15),
+      MAX_SERVICE_DURATION_MINUTES
+    );
+    const startEp = resolvedStartEpoch;
+    const endEp =
+      toFiniteEpoch(end_epoch) ?? startEp + durationMinutes * 60;
+
+    const availability = await assertOnDemandProvidersAvailable({
+      latitude: resolvedLat,
+      longitude: resolvedLng,
+      serviceType: service_type,
+      visitDateYmd: normalizeYmdInput(start_date) ?? ymdFromEpoch(startEp),
+      startEpoch: startEp,
+      endEpoch: endEp,
+    });
+
+    return res.json({
+      success: true,
+      available: availability.available,
+      count: availability.count ?? 0,
+      radiusKm: availability.radiusKm ?? ON_DEMAND_PROVIDER_RADIUS_KM,
+      role: availability.role,
+      code: availability.code,
+      message: availability.available ? undefined : availability.message,
+    });
+  } catch (err) {
+    console.error("on-demand-availability error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Internal server error",
+    });
+  }
+});
+
 router.post("/", async (req, res) => {
   const client = await pool.connect();
 
@@ -316,6 +400,24 @@ router.post("/", async (req, res) => {
     const effectiveEndDate = isOnDemand ? resolvedStartDate : resolvedEndDate;
     if (!effectiveEndDate) {
       return res.status(400).json({ error: "Missing end_date for non ON_DEMAND booking" });
+    }
+
+    if (isOnDemand) {
+      const availability = await assertOnDemandProvidersAvailable({
+        latitude,
+        longitude,
+        serviceType: service_type,
+        visitDateYmd: resolvedStartDate,
+        startEpoch,
+        endEpoch,
+      });
+      if (!availability.available) {
+        return res.status(409).json({
+          error: availability.message,
+          code: availability.code,
+          availableProviders: availability.count ?? 0,
+        });
+      }
     }
 
     await client.query("BEGIN");
@@ -528,6 +630,12 @@ router.post("/resume-payment", async (req, res) => {
         e.booking_type,
         e.service_type,
         e.engagement_status,
+        e.latitude,
+        e.longitude,
+        e.start_date,
+        e.start_epoch,
+        e.end_epoch,
+        e.duration_minutes,
         c.firstname,
         c.lastname,
         c.mobileno,
@@ -562,6 +670,31 @@ router.post("/resume-payment", async (req, res) => {
         success: false,
         error: "Invalid payment amount on record",
       });
+    }
+
+    if (String(row.booking_type || "").toUpperCase() === "ON_DEMAND") {
+      const startEp = Number(row.start_epoch);
+      const durMin = Number(row.duration_minutes);
+      const endEp =
+        Number(row.end_epoch) > startEp
+          ? Number(row.end_epoch)
+          : startEp + (Number.isFinite(durMin) ? durMin : 60) * 60;
+      const availability = await assertOnDemandProvidersAvailable({
+        latitude: row.latitude,
+        longitude: row.longitude,
+        serviceType: row.service_type,
+        visitDateYmd: row.start_date,
+        startEpoch: startEp,
+        endEpoch: endEp,
+      });
+      if (!availability.available) {
+        return res.status(409).json({
+          success: false,
+          error: availability.message,
+          code: availability.code,
+          availableProviders: availability.count ?? 0,
+        });
+      }
     }
 
     const amountPaise = Math.round(totalInr * 100);
