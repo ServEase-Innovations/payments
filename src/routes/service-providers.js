@@ -82,6 +82,36 @@ function toFiniteEpoch(value) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+/** Sort key for provider lists: actual service start (epoch-first, then calendar date). */
+function serviceStartSortEpoch(row) {
+  return (
+    toFiniteEpoch(row.start_epoch) ??
+    toFiniteEpoch(row.start_date_epoch) ??
+    ymdToIstStartEpoch(row.start_date ?? row.startDate) ??
+    0
+  );
+}
+
+/** Sort key for ended engagements: service end, then start. */
+function serviceEndSortEpoch(row) {
+  return (
+    toFiniteEpoch(row.end_epoch) ??
+    toFiniteEpoch(row.end_date_epoch) ??
+    ymdToIstEndEpoch(row.end_date ?? row.endDate) ??
+    serviceStartSortEpoch(row)
+  );
+}
+
+function sortProviderEngagementBucket(rows, { order = "asc", useEnd = false } = {}) {
+  const keyFn = useEnd ? serviceEndSortEpoch : serviceStartSortEpoch;
+  const dir = order === "desc" ? -1 : 1;
+  return rows.sort((a, b) => {
+    const diff = keyFn(a) - keyFn(b);
+    if (diff !== 0) return diff * dir;
+    return Number(a.engagement_id ?? a.id ?? 0) - Number(b.engagement_id ?? b.id ?? 0);
+  });
+}
+
 function ymdFromEpoch(epochSeconds) {
   const ep = toFiniteEpoch(epochSeconds);
   if (ep == null) return null;
@@ -455,7 +485,7 @@ router.get("/:providerId/engagements", ...providerOwnerRead, async (req, res) =>
       params.push(month);
     }
 
-    query += " ORDER BY e.start_date DESC";
+    query += " ORDER BY e.start_date ASC, e.start_epoch ASC NULLS LAST, e.engagement_id ASC";
 
     const result = await pool.query(query, params);
 
@@ -617,6 +647,9 @@ result.rows.forEach(row => {
   if (bucket === "past") past.push(enriched);
 });
 
+    sortProviderEngagementBucket(current, { order: "asc" });
+    sortProviderEngagementBucket(upcoming, { order: "asc" });
+    sortProviderEngagementBucket(past, { order: "desc", useEnd: true });
 
     return res.json({
       success: true,
