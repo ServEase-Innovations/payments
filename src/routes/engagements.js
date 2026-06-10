@@ -924,6 +924,8 @@ WHERE sp.serviceproviderid = ANY($1)`,
 
       const paymentRow = paymentByEng[e.engagement_id] || null;
       const createdIso = pgTimestampToIsoUtc(e.created_at);
+      const vacationStartYmd = e.vacation_start_date ? normalizeDateToIST(e.vacation_start_date) : null;
+      const vacationEndYmd = e.vacation_end_date ? normalizeDateToIST(e.vacation_end_date) : null;
 
       const enriched = redactEngagementForCustomer({
         ...engCore,
@@ -938,6 +940,14 @@ WHERE sp.serviceproviderid = ANY($1)`,
         payment: normalizePaymentTimestamps(paymentRow),
         modifications: modsByEng[e.engagement_id] || [],
         vacations: vacationsByEng[e.engagement_id] || [],
+        vacation:
+          vacationStartYmd && vacationEndYmd
+            ? {
+                start_date: vacationStartYmd,
+                end_date: vacationEndYmd,
+                leave_days: Number(e.leave_days) || 0,
+              }
+            : null,
         today_service,
       });
 
