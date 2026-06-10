@@ -820,7 +820,14 @@ WHERE sp.serviceproviderid = ANY($1)`,
 
     // ---- Maps ----
     const providerById = {};
-    providerRes.rows.forEach(p => providerById[p.serviceproviderid] = p);
+    providerRes.rows.forEach((p) => {
+      providerById[p.serviceproviderid] = {
+        ...p,
+        firstName:
+          p.firstName != null ? String(p.firstName).trim() : p.firstName,
+        lastName: p.lastName != null ? String(p.lastName).trim() : p.lastName,
+      };
+    });
 
     const paymentByEng = {};
     paymentsRes.rows.forEach(p => paymentByEng[p.engagement_id] = p);
