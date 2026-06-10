@@ -2,6 +2,7 @@
 
 export const DEFAULT_PAYMENT_REMINDER_POLICY = {
   paymentPendingOffsetsMinutes: [15, 60, 180],
+  paymentPendingExpiryMinutes: 20,
 };
 
 export function clampReminderInt(value, min, max, fallback) {
@@ -24,12 +25,49 @@ export function parsePaymentPendingPolicy(settings) {
     ),
   ].sort((a, b) => a - b);
 
+  const expiryMinutes = clampReminderInt(
+    raw?.paymentPendingExpiryMinutes,
+    5,
+    7 * 24 * 60,
+    DEFAULT_PAYMENT_REMINDER_POLICY.paymentPendingExpiryMinutes
+  );
+
   return {
     paymentPendingOffsetsMinutes:
       normalized.length > 0
         ? normalized
         : [...DEFAULT_PAYMENT_REMINDER_POLICY.paymentPendingOffsetsMinutes],
+    paymentPendingExpiryMinutes: expiryMinutes,
   };
+}
+
+/**
+ * @param {object} engagement
+ * @param {object} payment
+ * @param {number} ageMinutes minutes since engagement.created_at
+ * @param {number} expiryMinutes configured payment window
+ */
+export function isEligibleForPaymentTimeoutExpiry(
+  engagement,
+  payment,
+  ageMinutes,
+  expiryMinutes
+) {
+  if (!engagement || !payment) return false;
+  const payStatus = String(payment.status || "").toUpperCase();
+  if (payStatus !== "PENDING") return false;
+
+  const engStatus = String(engagement.engagement_status || "").toUpperCase();
+  if (!["PAYMENT_PENDING", "CREATED", ""].includes(engStatus)) return false;
+
+  const taskStatus = String(engagement.task_status || "").toUpperCase();
+  if (taskStatus === "CANCELLED") return false;
+
+  const expiry = Number(expiryMinutes);
+  if (!Number.isFinite(expiry) || expiry < 1) return false;
+  if (Number(ageMinutes) < expiry) return false;
+
+  return true;
 }
 
 /**

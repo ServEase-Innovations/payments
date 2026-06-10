@@ -12,6 +12,10 @@ test("parsePaymentPendingPolicy uses defaults when missing", () => {
     policy.paymentPendingOffsetsMinutes,
     DEFAULT_PAYMENT_REMINDER_POLICY.paymentPendingOffsetsMinutes
   );
+  assert.equal(
+    policy.paymentPendingExpiryMinutes,
+    DEFAULT_PAYMENT_REMINDER_POLICY.paymentPendingExpiryMinutes
+  );
 });
 
 test("parsePaymentPendingPolicy sorts and dedupes offsets", () => {

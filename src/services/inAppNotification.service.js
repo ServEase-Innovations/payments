@@ -104,7 +104,10 @@ function deriveBookingNotificationAction(row) {
 
 function resolveNotificationMetadata(row) {
   const type = String(row.type || "").toUpperCase();
-  if (type === "BOOKING_AUTO_CANCELLED_NO_PROVIDER") {
+  if (
+    type === "BOOKING_AUTO_CANCELLED_NO_PROVIDER" ||
+    type === "BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT"
+  ) {
     return enrichAutoCancelNotificationMetadata(row);
   }
   const raw = row.metadata;
@@ -362,6 +365,8 @@ export const InAppTypes = {
   PAYMENT_PENDING_REMINDER: "PAYMENT_PENDING_REMINDER",
   /** Customer: paid on-demand booking auto-cancelled — no provider before start */
   BOOKING_AUTO_CANCELLED_NO_PROVIDER: "BOOKING_AUTO_CANCELLED_NO_PROVIDER",
+  /** Customer: unpaid booking auto-cancelled after payment window elapsed */
+  BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT: "BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT",
   SUPPORT_TICKET_UPDATE: "SUPPORT_TICKET_UPDATE",
 };
 
