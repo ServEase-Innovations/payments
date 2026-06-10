@@ -26,11 +26,17 @@ router.get(
       [customerId]
     );
 
-    if (walletRes.rows.length === 0) {
-      return res.status(404).json({ error: "Wallet not found for this customer" });
+    let wallet = walletRes.rows[0];
+    if (!wallet) {
+      const created = await pool.query(
+        `INSERT INTO customer_wallets (customerid, balance)
+         VALUES ($1, 0)
+         ON CONFLICT (customerid) DO UPDATE SET customerid = EXCLUDED.customerid
+         RETURNING *`,
+        [customerId]
+      );
+      wallet = created.rows[0];
     }
-
-    const wallet = walletRes.rows[0];
 
     // 2️⃣ Fetch recent transactions (latest 10)
     const txnRes = await pool.query(
