@@ -789,6 +789,22 @@ router.get("/:customerId/engagements", ...customerOwnerRead, async (req, res) =>
       [engagementIds]
     );
 
+    // ---- Payment-timeout cancellations (system auto-cancel) ----
+    const paymentTimeoutCancelRes = await pool.query(
+      `
+      SELECT DISTINCT ON (engagement_id)
+        engagement_id,
+        event_type,
+        metadata
+      FROM engagement_events
+      WHERE engagement_id = ANY($1)
+        AND event_type = 'PAYMENT_TIMEOUT'
+        AND to_status = 'CANCELLED'
+      ORDER BY engagement_id, created_at DESC
+      `,
+      [engagementIds]
+    );
+
     // ---- Fetch provider details ----
     const providerIds = engagements.map(e => e.serviceproviderid).filter(Boolean);
     const providerRes = await pool.query(
@@ -808,6 +824,28 @@ WHERE sp.serviceproviderid = ANY($1)`,
 
     const paymentByEng = {};
     paymentsRes.rows.forEach(p => paymentByEng[p.engagement_id] = p);
+
+    const paymentTimeoutCancelByEng = {};
+    paymentTimeoutCancelRes.rows.forEach((row) => {
+      let metadata = row.metadata;
+      if (typeof metadata === "string") {
+        try {
+          metadata = JSON.parse(metadata);
+        } catch {
+          metadata = {};
+        }
+      }
+      const meta = metadata && typeof metadata === "object" ? metadata : {};
+      paymentTimeoutCancelByEng[row.engagement_id] = {
+        event_type: row.event_type,
+        reason: meta.cancellation_reason || "Payment Timeout",
+        payment_timeout_minutes:
+          meta.payment_timeout_minutes != null
+            ? Number(meta.payment_timeout_minutes)
+            : 20,
+        auto_cancelled: Boolean(meta.auto_cancelled),
+      };
+    });
 
     const modsByEng = {};
     const vacationsByEng = {};
@@ -938,6 +976,7 @@ WHERE sp.serviceproviderid = ANY($1)`,
         end_time: safeEndTime,
         provider: providerById[e.serviceproviderid] || null,
         payment: normalizePaymentTimestamps(paymentRow),
+        cancellation: paymentTimeoutCancelByEng[e.engagement_id] || null,
         modifications: modsByEng[e.engagement_id] || [],
         vacations: vacationsByEng[e.engagement_id] || [],
         vacation:
