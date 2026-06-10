@@ -2,6 +2,7 @@ import express from "express";
 import pool from "../config/db.js";
 import crypto from "crypto";
 import { razorpay, getRazorpayKeyId, getRazorpayKeySecret } from "../utils/razorpayConfig.js";
+import { handlePaymentSuccess } from "../services/paymentLifecycle.service.js";
 import {
   buildResumeCheckoutResponse,
   redactPaymentVerifyResponse,
@@ -41,17 +42,17 @@ router.post("/verify", async (req, res) => {
       }
     }
 
-    // ✅ Mark payment SUCCESS
+    const result = await handlePaymentSuccess({
+      engagementId,
+      razorpay_order_id,
+      razorpay_payment_id,
+      rawEvent: null,
+      io: req.io,
+    });
+
     const payRes = await pool.query(
-      `
-      UPDATE payments
-      SET status='SUCCESS',
-          transaction_id=$1,
-          updated_at=NOW()
-      WHERE razorpay_order_id=$2
-      RETURNING *
-      `,
-      [razorpay_payment_id, razorpay_order_id]
+      `SELECT * FROM payments WHERE razorpay_order_id = $1 LIMIT 1`,
+      [razorpay_order_id]
     );
 
     if (payRes.rows.length === 0) {
@@ -61,6 +62,7 @@ router.post("/verify", async (req, res) => {
     res.json({
       success: true,
       message: "Payment verified successfully",
+      alreadyProcessed: result?.alreadyProcessed === true,
       payment: redactPaymentVerifyResponse(payRes.rows[0]),
     });
 

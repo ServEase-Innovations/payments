@@ -159,6 +159,7 @@ export async function dismissPaymentPendingRemindersForEngagement(engagementId) 
 export async function processPaymentPendingReminders(ioOverride = null) {
   const policy = await loadPaymentPendingPolicy();
   const offsets = policy.paymentPendingOffsetsMinutes;
+  const expiryMinutes = policy.paymentPendingExpiryMinutes;
   const candidates = await findPendingPaymentEngagements();
   if (!candidates.length) return { processed: 0, notified: 0 };
 
@@ -174,6 +175,18 @@ export async function processPaymentPendingReminders(ioOverride = null) {
     if (!Number.isFinite(createdAt)) continue;
 
     const ageMinutes = (Date.now() - createdAt) / 60_000;
+    if (ageMinutes > expiryMinutes) {
+      try {
+        await dismissPaymentPendingRemindersForEngagement(engagementId);
+      } catch (eDismiss) {
+        console.error(
+          `[payment-pending-reminder] dismiss past-window engagement=${engagementId}:`,
+          eDismiss?.message || eDismiss
+        );
+      }
+      continue;
+    }
+
     const sentTiers = await getSentReminderTiers(customerId, engagementId);
     const dueTier = resolveDuePaymentReminderTier(ageMinutes, offsets, sentTiers);
     if (dueTier == null) continue;

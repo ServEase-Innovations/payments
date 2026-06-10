@@ -130,9 +130,17 @@ export async function handlePaymentSuccess({
 
     const payment = paymentRes.rows[0];
 
-    // 🛑 Idempotent check
+    // 🛑 Idempotent check — still clear stale payment-pending reminders
     if (payment.status === "SUCCESS") {
       await client.query("COMMIT");
+      try {
+        await dismissPaymentPendingRemindersForEngagement(engagementId);
+      } catch (eDismissPending) {
+        console.error(
+          "dismiss payment-pending reminders failed (already processed)",
+          eDismissPending
+        );
+      }
       return { alreadyProcessed: true };
     }
 

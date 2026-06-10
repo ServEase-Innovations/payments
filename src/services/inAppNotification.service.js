@@ -206,6 +206,12 @@ export async function getUnreadCount({ recipientType, recipientId }) {
     return 0;
   }
   try {
+    if (recipientType === "provider") {
+      await autoDismissStaleProviderBookingNotifications(id);
+    } else if (recipientType === "customer") {
+      await autoDismissStaleCustomerPaymentPendingReminders(id);
+    }
+
     const { rows } = await pool.query(
       `
       SELECT count(*)::int AS c
@@ -251,6 +257,8 @@ export async function listInAppNotifications({
   try {
     if (recipientType === "provider") {
       await autoDismissStaleProviderBookingNotifications(id);
+    } else if (recipientType === "customer") {
+      await autoDismissStaleCustomerPaymentPendingReminders(id);
     }
 
     const [listRes, unreadRes] = await Promise.all([
@@ -443,6 +451,55 @@ export async function autoDismissStaleProviderBookingNotifications(providerId) {
       )
     `,
     [spid, NEW_BOOKING_TYPES]
+  );
+
+  return { updated: (r.rowCount ?? 0) + (orphaned.rowCount ?? 0) };
+}
+
+/**
+ * Clear unread payment-pending reminders when the booking is paid, cancelled, or no longer awaiting payment.
+ */
+export async function autoDismissStaleCustomerPaymentPendingReminders(customerId) {
+  const cid = Number(customerId);
+  if (!Number.isFinite(cid) || cid < 1) return { updated: 0 };
+
+  const r = await pool.query(
+    `
+    UPDATE in_app_notifications n
+    SET read_at = COALESCE(n.read_at, NOW())
+    FROM engagements e
+    LEFT JOIN payments p ON p.engagement_id = e.engagement_id
+    WHERE n.recipient_type = 'customer'
+      AND n.recipient_id = $1
+      AND n.read_at IS NULL
+      AND n.type = $2
+      AND n.engagement_id = e.engagement_id
+      AND (
+        p.payment_id IS NULL
+        OR UPPER(COALESCE(p.status, '')) NOT IN ('PENDING', '')
+        OR UPPER(COALESCE(e.task_status, '')) = 'CANCELLED'
+        OR UPPER(COALESCE(e.engagement_status, '')) NOT IN ('PAYMENT_PENDING', 'CREATED', '')
+      )
+    `,
+    [cid, InAppTypes.PAYMENT_PENDING_REMINDER]
+  );
+
+  const orphaned = await pool.query(
+    `
+    UPDATE in_app_notifications n
+    SET read_at = COALESCE(n.read_at, NOW())
+    WHERE n.recipient_type = 'customer'
+      AND n.recipient_id = $1
+      AND n.read_at IS NULL
+      AND n.type = $2
+      AND (
+        n.engagement_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM engagements e WHERE e.engagement_id = n.engagement_id
+        )
+      )
+    `,
+    [cid, InAppTypes.PAYMENT_PENDING_REMINDER]
   );
 
   return { updated: (r.rowCount ?? 0) + (orphaned.rowCount ?? 0) };
