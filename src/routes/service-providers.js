@@ -127,6 +127,53 @@ function normalizeYmd(dateLike) {
   return parsed.isValid() ? parsed.format("YYYY-MM-DD") : null;
 }
 
+function isRecurringBookingType(bookingType) {
+  const t = String(bookingType ?? "").trim().toUpperCase();
+  return t === "MONTHLY" || t === "SHORT_TERM";
+}
+
+function bookingTypeLabel(bookingType) {
+  const t = String(bookingType ?? "").trim().toUpperCase();
+  if (t === "MONTHLY") return "Monthly";
+  if (t === "SHORT_TERM") return "Short-term";
+  if (t === "ON_DEMAND") return "On-demand";
+  return t || "Booking";
+}
+
+function buildScheduleSummary(row, dates) {
+  const bt = String(row.booking_type ?? "").trim().toUpperCase();
+  const time = epochToTime(row.start_epoch) || "";
+  const start = dates.startDate || dates.start_date;
+  const end = dates.endDate || dates.end_date || start;
+  if (!start) return bookingTypeLabel(bt);
+
+  if (bt === "ON_DEMAND") {
+    const endTime = epochToTime(row.end_epoch);
+    const window =
+      time && endTime && endTime !== time ? `${time}–${endTime}` : time;
+    return `One visit · ${start}${window ? ` · ${window}` : ""}`;
+  }
+  if (bt === "MONTHLY") {
+    return `Monthly contract · ${start} – ${end}${time ? ` · ~${time}/day` : ""}`;
+  }
+  if (bt === "SHORT_TERM") {
+    const dayCount =
+      dayjs(end).diff(dayjs(start), "day") + 1;
+    return `Short-term · ${dayCount} day${dayCount === 1 ? "" : "s"} · ${start} – ${end}${time ? ` · ~${time}/day` : ""}`;
+  }
+  return `${start} – ${end}`;
+}
+
+function emptyEngagementBuckets() {
+  return { current: [], upcoming: [], past: [] };
+}
+
+function pushEngagementBucket(buckets, bucket, item) {
+  if (bucket === "current") buckets.current.push(item);
+  if (bucket === "upcoming") buckets.upcoming.push(item);
+  if (bucket === "past") buckets.past.push(item);
+}
+
 /* -------------------------------------------------------------------------- */
 /*              TODAY'S BOOKED VISITS (IST calendar day, by start time)       */
 /* -------------------------------------------------------------------------- */
@@ -477,12 +524,19 @@ router.get("/:providerId/engagements", ...providerOwnerRead, async (req, res) =>
       params.push(status);
     }
 
+    let monthFilter = null;
     if (month) {
       if (!/^\d{4}-\d{2}$/.test(month)) {
         return res.status(400).json({ success: false, error: "Invalid month format" });
       }
-      query += ` AND TO_CHAR(e.start_date,'YYYY-MM') = $${idx++}`;
-      params.push(month);
+      monthFilter = month;
+      const monthStart = dayjs
+        .tz(`${month}-01`, "YYYY-MM-DD", "Asia/Kolkata")
+        .startOf("month");
+      const monthEnd = monthStart.endOf("month");
+      // Include contracts that overlap this month, not only those that start in it.
+      query += ` AND e.start_date <= $${idx++}::date AND e.end_date >= $${idx++}::date`;
+      params.push(monthEnd.format("YYYY-MM-DD"), monthStart.format("YYYY-MM-DD"));
     }
 
     query += " ORDER BY e.start_date ASC, e.start_epoch ASC NULLS LAST, e.engagement_id ASC";
@@ -493,13 +547,51 @@ router.get("/:providerId/engagements", ...providerOwnerRead, async (req, res) =>
       return res.json({
         success: true,
         serviceproviderid: providerId,
+        month: monthFilter,
+        summary: {
+          total: 0,
+          current: 0,
+          upcoming: 0,
+          past: 0,
+          recurringContracts: 0,
+          oneOffVisits: 0,
+          bookedVisitDaysInMonth: 0,
+        },
         current: [],
         upcoming: [],
-        past: []
+        past: [],
+        recurring: emptyEngagementBuckets(),
+        oneOff: emptyEngagementBuckets(),
       });
     }
 
     const engagementIds = result.rows.map(r => r.engagement_id);
+
+    const visitStatsByEngagement = {};
+    if (monthFilter) {
+      const visitRes = await pool.query(
+        `
+        SELECT
+          pa.engagement_id,
+          COUNT(*)::int AS total_days,
+          COUNT(*) FILTER (WHERE UPPER(TRIM(COALESCE(pa.status::text, ''))) = 'BOOKED')::int AS booked_days,
+          COUNT(*) FILTER (WHERE UPPER(TRIM(COALESCE(pa.status::text, ''))) = 'FREE')::int AS free_days
+        FROM provider_availability pa
+        WHERE pa.serviceproviderid = $1
+          AND pa.engagement_id = ANY($2::bigint[])
+          AND TO_CHAR(pa.date, 'YYYY-MM') = $3
+        GROUP BY pa.engagement_id
+        `,
+        [providerId, engagementIds, monthFilter]
+      );
+      for (const v of visitRes.rows) {
+        visitStatsByEngagement[String(v.engagement_id)] = {
+          total: v.total_days,
+          booked: v.booked_days,
+          free: v.free_days,
+        };
+      }
+    }
 
     await repairTodayServiceDays(pool, engagementIds);
 
@@ -547,6 +639,8 @@ const todayDate = dayjs().tz("Asia/Kolkata").startOf("day");
 const current = [];
 const upcoming = [];
 const past = [];
+const recurring = emptyEngagementBuckets();
+const oneOff = emptyEngagementBuckets();
 
 result.rows.forEach(row => {
   const dates = resolveEngagementDates(row);
@@ -595,6 +689,9 @@ result.rows.forEach(row => {
 
   const effectiveTaskStatus = deriveTaskStatusForProvider(row, todayService);
 
+  const visitStats = visitStatsByEngagement[String(row.engagement_id)];
+  const recurringContract = isRecurringBookingType(row.booking_type);
+
   const enriched = redactEngagementForProvider({
     ...row,
     id: row.engagement_id,
@@ -611,7 +708,14 @@ result.rows.forEach(row => {
     duration_minutes:
       row.duration_minutes != null ? Number(row.duration_minutes) : null,
     today_service,
+    engagementKind: recurringContract ? "RECURRING" : "ONE_OFF",
+    bookingTypeLabel: bookingTypeLabel(row.booking_type),
+    scheduleSummary: buildScheduleSummary(row, dates),
   });
+
+  if (visitStats) {
+    enriched.visitsInMonth = visitStats;
+  }
 
   // ---- Engagement lifecycle bucket (IMPORTANT) ----
   let bucket;
@@ -642,21 +746,63 @@ result.rows.forEach(row => {
     bucket = "past";
   }
 
+  pushEngagementBucket(
+    recurringContract ? recurring : oneOff,
+    bucket,
+    enriched
+  );
   if (bucket === "current") current.push(enriched);
   if (bucket === "upcoming") upcoming.push(enriched);
   if (bucket === "past") past.push(enriched);
 });
 
-    sortProviderEngagementBucket(current, { order: "asc" });
-    sortProviderEngagementBucket(upcoming, { order: "asc" });
-    sortProviderEngagementBucket(past, { order: "desc", useEnd: true });
+    for (const bucket of [
+      current,
+      upcoming,
+      past,
+      recurring.current,
+      recurring.upcoming,
+      recurring.past,
+      oneOff.current,
+      oneOff.upcoming,
+      oneOff.past,
+    ]) {
+      sortProviderEngagementBucket(bucket, {
+        order: bucket === past || bucket === recurring.past || bucket === oneOff.past
+          ? "desc"
+          : "asc",
+        useEnd:
+          bucket === past || bucket === recurring.past || bucket === oneOff.past,
+      });
+    }
+
+    const bookedVisitDaysInMonth = Object.values(visitStatsByEngagement).reduce(
+      (sum, v) => sum + (v.booked || 0),
+      0
+    );
 
     return res.json({
       success: true,
       serviceproviderid: providerId,
+      month: monthFilter,
+      summary: {
+        total: result.rows.length,
+        current: current.length,
+        upcoming: upcoming.length,
+        past: past.length,
+        recurringContracts: result.rows.filter((r) =>
+          isRecurringBookingType(r.booking_type)
+        ).length,
+        oneOffVisits: result.rows.filter(
+          (r) => !isRecurringBookingType(r.booking_type)
+        ).length,
+        bookedVisitDaysInMonth,
+      },
       current,
       upcoming,
-      past
+      past,
+      recurring,
+      oneOff,
     });
 
   } catch (err) {

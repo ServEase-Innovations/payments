@@ -48,11 +48,32 @@ export function calendarYmd(value) {
   return dayjs(value).tz("Asia/Kolkata").format("YYYY-MM-DD");
 }
 
-/** Real visit window for overlap checks (clips bad end_epoch / contract-length duration). */
-export function visitWindowFromEngagement(engagement) {
-  const startEpoch = Number(engagement.start_epoch);
-  if (!Number.isFinite(startEpoch)) {
-    return null;
+/** Per-visit duration in seconds (not the full contract span). */
+export function visitDurationSecondsFromEngagement(engagement, opts = {}) {
+  const startTimeStr =
+    opts.startTime ??
+    (Number.isFinite(Number(engagement.start_epoch))
+      ? dayjs.unix(Number(engagement.start_epoch)).tz("Asia/Kolkata").format("HH:mm")
+      : null);
+  const endTimeStr = opts.endTime ?? null;
+
+  if (startTimeStr && endTimeStr) {
+    const ref =
+      calendarYmd(engagement.start_date) ||
+      (Number.isFinite(Number(engagement.start_epoch))
+        ? dayjs.unix(Number(engagement.start_epoch)).tz("Asia/Kolkata").format("YYYY-MM-DD")
+        : null);
+    if (ref) {
+      const s = dayjs
+        .tz(`${ref} ${startTimeStr}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata")
+        .unix();
+      const e = dayjs
+        .tz(`${ref} ${endTimeStr}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata")
+        .unix();
+      if (Number.isFinite(s) && Number.isFinite(e) && e > s && e - s <= 86400) {
+        return e - s;
+      }
+    }
   }
 
   const rawDur = Number(engagement.duration_minutes);
@@ -60,7 +81,17 @@ export function visitWindowFromEngagement(engagement) {
     Math.max(Number.isFinite(rawDur) ? rawDur : 60, 15),
     MAX_SERVICE_DURATION_MINUTES
   );
-  const durationSec = durationMin * 60;
+  return durationMin * 60;
+}
+
+/** Real visit window for overlap checks (clips bad end_epoch / contract-length duration). */
+export function visitWindowFromEngagement(engagement) {
+  const startEpoch = Number(engagement.start_epoch);
+  if (!Number.isFinite(startEpoch)) {
+    return null;
+  }
+
+  const durationSec = visitDurationSecondsFromEngagement(engagement);
 
   let endEpoch = Number(engagement.end_epoch);
   if (
@@ -107,6 +138,11 @@ export async function findProviderBookedConflict(
   const excludeEid =
     excludeEngagementId != null ? Number(excludeEngagementId) : null;
 
+  const visitTime = dayjs
+    .unix(window.startEpoch)
+    .tz("Asia/Kolkata")
+    .format("HH:mm");
+
   let current = dayjs
     .tz(window.startDate, "YYYY-MM-DD", "Asia/Kolkata")
     .startOf("day");
@@ -116,28 +152,24 @@ export async function findProviderBookedConflict(
 
   while (!current.isAfter(last, "day")) {
     const day = current.format("YYYY-MM-DD");
-    const dayWindowStart = current.unix();
-    const dayWindowEnd = dayWindowStart + 86400;
+    const dayStartEpoch = dayjs
+      .tz(`${day} ${visitTime}`, "YYYY-MM-DD HH:mm", "Asia/Kolkata")
+      .unix();
+    const dayEndEpoch = dayStartEpoch + window.durationSec;
 
-    const dayStartEpoch = Math.max(window.startEpoch, dayWindowStart);
-    const dayEndEpoch = Math.min(window.endEpoch, dayWindowEnd);
-
-    if (dayStartEpoch >= dayEndEpoch) {
+    if (
+      !Number.isFinite(dayStartEpoch) ||
+      !Number.isFinite(dayEndEpoch) ||
+      dayEndEpoch <= dayStartEpoch
+    ) {
       current = current.add(1, "day");
       continue;
     }
 
-    const params = [
-      spid,
-      day,
-      dayStartEpoch,
-      dayEndEpoch,
-      dayWindowStart,
-      dayWindowEnd,
-    ];
+    const params = [spid, day, dayStartEpoch, dayEndEpoch];
     let excludeClause = "";
     if (Number.isFinite(excludeEid) && excludeEid > 0) {
-      excludeClause = "AND pa.engagement_id IS DISTINCT FROM $7";
+      excludeClause = "AND pa.engagement_id IS DISTINCT FROM $5";
       params.push(excludeEid);
     }
 
@@ -154,9 +186,8 @@ export async function findProviderBookedConflict(
         AND ${activeEngagementStatusSql("e")}
         AND ${completedServiceDayConflictExclusionSql("pa", "e")}
         ${excludeClause}
-        AND GREATEST(pa.slot_start_epoch, $5::bigint) < LEAST(pa.slot_end_epoch, $6::bigint)
-        AND $3::bigint < LEAST(pa.slot_end_epoch, $6::bigint)
-        AND $4::bigint > GREATEST(pa.slot_start_epoch, $5::bigint)
+        AND $3::bigint < pa.slot_end_epoch
+        AND $4::bigint > pa.slot_start_epoch
       LIMIT 1
       `,
       params

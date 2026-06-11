@@ -8,6 +8,7 @@ import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { activeEngagementStatusSql } from "../../services/providerAvailabilityOverlap.js";
+import { customerHasSchedulableConflict } from "../../services/customerBookingOverlap.js";
 import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
 import { resolvePricingForEngagement } from "../../services/pricing/engagementPricing.js";
@@ -25,6 +26,10 @@ import {
   handlePaymentSuccess,
   runPostPaymentSuccessEffects,
 } from "../../services/paymentLifecycle.service.js";
+import {
+  initiateScheduleModification,
+  verifyScheduleModificationPayment,
+} from "../../services/scheduleModification.service.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -460,7 +465,18 @@ router.post("/", async (req, res) => {
     // multi-day spans from bad duration_minutes; raw epoch overlap then falsely blocks bookings.
     if (!isOnDemand && serviceproviderid) {
       const sameCustomerOverlap = await client.query(
-        `SELECT e.engagement_id
+        `SELECT
+           e.engagement_id,
+           e.start_date,
+           e.end_date,
+           e.start_epoch,
+           e.duration_minutes,
+           e.vacation_start_date,
+           e.vacation_end_date,
+           e.service_type,
+           e.active,
+           e.engagement_status,
+           e.task_status
          FROM engagements e
          WHERE e.customerid = $1
            AND e.serviceproviderid = $2
@@ -468,17 +484,26 @@ router.post("/", async (req, res) => {
            AND e.start_date <= $4::date
            AND e.end_date >= $3::date
            AND UPPER(COALESCE(e.booking_type, '')) IN ('MONTHLY', 'SHORT_TERM')
-           AND ${activeEngagementStatusSql("e")}
-         LIMIT 1`,
+           AND ${activeEngagementStatusSql("e")}`,
         [customerid, serviceproviderid, resolvedStartDate, effectiveEndDate]
       );
-      if (sameCustomerOverlap.rows.length) {
+      const blockingPrior = sameCustomerOverlap.rows.find((row) =>
+        customerHasSchedulableConflict(
+          row,
+          resolvedStartDate,
+          effectiveEndDate,
+          resolvedStartTime,
+          durationSec,
+          service_type
+        )
+      );
+      if (blockingPrior) {
         await client.query("ROLLBACK");
         return res.status(409).json({
           error:
             "You already have an active booking with this provider for overlapping dates",
           code: "CUSTOMER_OVERLAPPING_BOOKING",
-          existing_engagement_id: sameCustomerOverlap.rows[0].engagement_id,
+          existing_engagement_id: blockingPrior.engagement_id,
         });
       }
 
@@ -880,6 +905,99 @@ router.post("/resume-payment", async (req, res) => {
     return res.status(500).json({
       success: false,
       error: err.message || "Internal server error",
+    });
+  }
+});
+
+/**
+ * Verify Razorpay payment for a pending schedule modification (6% platform charge).
+ * POST /api/v2/createEngagements/modify-schedule/verify
+ */
+router.post("/modify-schedule/verify", async (req, res) => {
+  try {
+    const {
+      engagementId,
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    } = req.body || {};
+
+    if (!engagementId || !razorpay_order_id || !razorpay_payment_id) {
+      return res.status(400).json({
+        success: false,
+        error: "engagementId, razorpay_order_id, and razorpay_payment_id are required",
+      });
+    }
+
+    const result = await verifyScheduleModificationPayment({
+      engagementId,
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    });
+
+    return res.json({
+      success: true,
+      message: "Modification payment verified and schedule updated",
+      ...result,
+    });
+  } catch (err) {
+    const code = err.statusCode || 500;
+    console.error("modify-schedule verify error:", err);
+    return res.status(code).json({
+      success: false,
+      error: err.message || "Failed to verify modification payment",
+      conflict: err.conflict,
+    });
+  }
+});
+
+/**
+ * Reschedule a MONTHLY / SHORT_TERM engagement after paying 6% platform charge.
+ * POST /api/v2/createEngagements/:engagementId/modify-schedule
+ */
+router.post("/:engagementId/modify-schedule", async (req, res) => {
+  try {
+    const engagementId = Number(req.params.engagementId);
+    if (!Number.isFinite(engagementId) || engagementId < 1) {
+      return res.status(400).json({ success: false, error: "Invalid engagementId" });
+    }
+
+    const { start_date, end_date, start_time, end_time, modified_by_id, modified_by_role } =
+      req.body || {};
+    if (!start_date || !start_time) {
+      return res.status(400).json({
+        success: false,
+        error: "start_date and start_time are required",
+      });
+    }
+
+    const result = await initiateScheduleModification(engagementId, req.body);
+
+    if (result.applied) {
+      return res.json({
+        success: true,
+        message: "Booking schedule updated",
+        applied: true,
+        wallet_only: result.wallet_only === true,
+        engagement: result.engagement,
+        fee: result.fee,
+        wallet_amount: result.wallet_amount ?? 0,
+      });
+    }
+
+    return res.json({
+      success: true,
+      requires_payment: true,
+      ...result,
+    });
+  } catch (err) {
+    const code = err.statusCode || 500;
+    console.error("modify-schedule initiate error:", err);
+    return res.status(code).json({
+      success: false,
+      error: err.message || "Failed to initiate schedule modification",
+      conflict: err.conflict,
     });
   }
 });

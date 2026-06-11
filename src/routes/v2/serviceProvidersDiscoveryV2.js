@@ -1,6 +1,11 @@
 import express from "express";
 import pool from "../../config/db.js";
 import { activeEngagementStatusSql } from "../../services/providerAvailabilityOverlap.js";
+import {
+  customerHasSchedulableConflict,
+  isActiveBlockingEngagement,
+  rolesMatchForSearch,
+} from "../../services/customerBookingOverlap.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -60,34 +65,6 @@ function isDateInEngagementVacation(dateYmd, vacationStart, vacationEnd) {
   const b = calendarYmdKolkata(vacationEnd);
   if (!d || !a || !b) return false;
   return d >= a && d <= b;
-}
-
-function rolesMatchForSearch(serviceType, roleNorm) {
-  const service = String(serviceType ?? "").trim().toLowerCase();
-  const role = String(roleNorm ?? "").trim().toLowerCase();
-  if (!service || !role) return true;
-  if (service === role) return true;
-  if (service.includes("cook") && role.includes("cook")) return true;
-  if (service.includes("maid") && role.includes("maid")) return true;
-  if (service.includes("nanny") && role.includes("nanny")) return true;
-  return false;
-}
-
-function isActiveBlockingEngagement(prev) {
-  if (!prev || prev.active === false) return false;
-  const life = String(prev.engagementStatus ?? "").toUpperCase();
-  const task = String(prev.taskStatus ?? "NOT_STARTED").toUpperCase();
-  if (["CANCELLED", "COMPLETED", "CLOSED", "EXPIRED"].includes(life)) {
-    return false;
-  }
-  if (["CANCELLED", "COMPLETED"].includes(task)) return false;
-  return true;
-}
-
-function customerHasOverlappingActiveBooking(prev, rangeStartStr, rangeEndStr, roleNorm) {
-  if (!isActiveBlockingEngagement(prev)) return false;
-  if (!rolesMatchForSearch(prev.serviceType, roleNorm)) return false;
-  return engagementOverlapsSearchWindow(prev, rangeStartStr, rangeEndStr);
 }
 
 /**
@@ -524,6 +501,13 @@ router.post("/nearby-monthly", async (req, res) => {
         FROM engagements e
         WHERE e."customerid" = $1
           AND e."serviceproviderid" = ANY($2::bigint[])
+          AND e.active = true
+          AND UPPER(COALESCE(e.engagement_status, '')) NOT IN (
+            'CANCELLED', 'COMPLETED', 'CLOSED', 'EXPIRED'
+          )
+          AND UPPER(COALESCE(e.task_status, 'NOT_STARTED')) NOT IN (
+            'CANCELLED', 'COMPLETED'
+          )
         ORDER BY
           e."serviceproviderid",
           e."end_date" DESC NULLS LAST,
@@ -827,107 +811,6 @@ router.post("/nearby-monthly", async (req, res) => {
         ? previousBookingByProvider.get(pidKey)
         : null;
 
-      const customerOverlapConflict =
-        hasCustomerID &&
-        customerHasOverlappingActiveBooking(
-          prevForSp,
-          startDate,
-          endDate,
-          roleSearchNorm
-        );
-
-      if (customerOverlapConflict) {
-        const rangeEvalStart = dayjs
-          .tz(calendarYmdKolkata(startDate), "YYYY-MM-DD", "Asia/Kolkata")
-          .startOf("day");
-        const rangeEvalEnd = dayjs
-          .tz(calendarYmdKolkata(endDate), "YYYY-MM-DD", "Asia/Kolkata")
-          .startOf("day");
-        let overlapTotalDays = 0;
-        for (
-          let c0 = rangeEvalStart.clone();
-          !c0.isAfter(rangeEvalEnd, "day");
-          c0 = c0.add(1, "day")
-        ) {
-          overlapTotalDays++;
-        }
-
-        const {
-          startEpoch: _se,
-          durationMinutes: _dm,
-          ...prevForApi
-        } = prevForSp;
-
-        evaluatedProviders.push({
-          serviceproviderid: p.serviceproviderid,
-          firstName: p.firstName,
-          lastName: p.lastName,
-          gender: p.gender,
-          experience: p.experience,
-          rating: p.rating,
-          diet: p.diet,
-          cookingSpeciality: p.cookingSpeciality,
-          languageKnown: languageKnownToArray(p.languageknown),
-          languageknown: p.languageknown ?? null,
-          locality: p.locality,
-          location: p.location,
-          pincode: p.pincode,
-          latitude: p.latitude,
-          longitude: p.longitude,
-          age: p.dob != null ? getAge(p.dob) : null,
-          housekeepingRole: p.housekeepingRole,
-          housekeepingRoles: (() => {
-            const fromJunction = rolesBySpId[pidKey];
-            if (fromJunction?.length) {
-              const seen = new Set(
-                fromJunction.map((r) => String(r).trim().toLowerCase())
-              );
-              const out = [...fromJunction];
-              const leg =
-                p.housekeepingRole != null ? String(p.housekeepingRole).trim() : "";
-              if (leg && !seen.has(leg.toLowerCase())) {
-                out.push(p.housekeepingRole);
-              }
-              return out;
-            }
-            return p.housekeepingRole ? [String(p.housekeepingRole).trim()] : [];
-          })(),
-          distance_km: Number(p.distance_km.toFixed(2)),
-          distanceKm: Number(p.distance_km.toFixed(2)),
-          bestMatch: false,
-          hasCustomerOverlap: true,
-          monthlyAvailability: {
-            preferredTime: preferredStartTime,
-            fullyAvailable: false,
-            summary: {
-              totalDays: overlapTotalDays,
-              daysAtPreferredTime: 0,
-              daysWithDifferentTime: overlapTotalDays,
-              unavailableDays: 0,
-            },
-            exceptions: [
-              {
-                date: startDate,
-                reason: "CUSTOMER_OVERLAPPING_BOOKING",
-                suggestedTime: null,
-              },
-            ],
-          },
-          availabilityFromDb: {
-            weeklySlotsSource: weeklySlotSourceByProvider[pidKey] || "none",
-            bookedRowsProviderAvailabilityInRange: paBookedCountBySp[pidKey] || 0,
-            engagementsMonthlyOrShortTermInRange:
-              engMonthlyShortTermBySp[pidKey] || 0,
-            engagementsOnDemandInRange: engOnDemandBySp[pidKey] || 0,
-            mergedBookedIntervalsUsedForOverlapCheck: 0,
-            clearedContractVisitDaysInRange: 0,
-          },
-          previouslyBooked: true,
-          previousBookingDetails: prevForApi,
-        });
-        continue;
-      }
-
       const fromPrevEngagement = previousEngagementBusyIntervals(
         prevForSp,
         startDate,
@@ -996,22 +879,6 @@ router.post("/nearby-monthly", async (req, res) => {
 
         /* Contract not running this calendar day (vacation / PA FREE) — skip generic BOOKED checks */
         if (spDayClearedForVisit.has(`${pidKey}:${dateStr}`)) {
-          if (
-            hasCustomerID &&
-            prevForSp &&
-            rolesMatchForSearch(prevForSp.serviceType, roleSearchNorm) &&
-            isActiveBlockingEngagement(prevForSp) &&
-            calendarDayInPriorEngagement(prevForSp, dateStr)
-          ) {
-            daysWithDifferentTime++;
-            exceptions.push({
-              date: dateStr,
-              reason: "EXISTING_CUSTOMER_BOOKING",
-              suggestedTime: null,
-            });
-            continue;
-          }
-
           const preferredEpochEarly = epochInIST(dateStr, preferredStartTime);
           const isInside = todaysSlots.some((slot) => {
             const s0 = epochInIST(dateStr, slot.slot_start);
@@ -1194,6 +1061,16 @@ router.post("/nearby-monthly", async (req, res) => {
         distance_km: Number(p.distance_km.toFixed(2)),
         distanceKm: Number(p.distance_km.toFixed(2)),
         bestMatch: false,
+        hasCustomerOverlap:
+          hasCustomerID &&
+          customerHasSchedulableConflict(
+            prevForSp,
+            startDate,
+            endDate,
+            preferredStartTime,
+            durationSec,
+            roleSearchNorm
+          ),
         monthlyAvailability: {
           preferredTime: preferredStartTime,
           fullyAvailable:

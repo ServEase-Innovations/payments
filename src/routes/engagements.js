@@ -20,7 +20,10 @@ import {
 } from "../services/inAppNotification.service.js";
 import { deriveTaskStatusForCustomer } from "../utils/engagementTaskStatus.js";
 import { resolvePricingForEngagement } from "../services/pricing/engagementPricing.js";
-import { findProviderBookedConflict } from "../services/providerAvailabilityOverlap.js";
+import {
+  findProviderBookedConflict,
+  visitDurationSecondsFromEngagement,
+} from "../services/providerAvailabilityOverlap.js";
 import {
   redactEngagementForCustomer,
   redactEngagementForProvider,
@@ -36,6 +39,7 @@ import {
   requireOwnCustomerId,
   requireEngagementParticipant,
 } from "../middleware/resourceAccess.js";
+import { getModificationFeeQuote } from "../services/scheduleModification.service.js";
 
 const customerOwnerRead = [
   authenticateRead,
@@ -447,6 +451,25 @@ router.post("/", async (req, res) => {
   }
 });
 
+// GET modification platform charge quote (6% of booking base, no extra GST)
+router.get("/:id/modification-fee", ...engagementParticipantRead, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id == null || String(id).trim() === "" || !/^\d+$/.test(String(id).trim())) {
+      return res.status(400).json({ error: "Invalid engagement id" });
+    }
+    const quote = await getModificationFeeQuote(Number(id));
+    return res.json({ success: true, ...quote });
+  } catch (err) {
+    const code = err.statusCode || 500;
+    console.error("modification-fee quote error:", err);
+    return res.status(code).json({
+      success: false,
+      error: err.message || "Failed to load modification fee",
+    });
+  }
+});
+
 // GET modification history for one engagement (audit: who changed what, when)
 router.get("/:id/modifications", ...engagementParticipantRead, async (req, res) => {
   try {
@@ -830,7 +853,14 @@ WHERE sp.serviceproviderid = ANY($1)`,
     });
 
     const paymentByEng = {};
-    paymentsRes.rows.forEach(p => paymentByEng[p.engagement_id] = p);
+    paymentsRes.rows.forEach((p) => {
+      const existing = paymentByEng[p.engagement_id];
+      const pStatus = String(p.status || "").toUpperCase();
+      const existingStatus = existing ? String(existing.status || "").toUpperCase() : "";
+      if (!existing || (existingStatus !== "SUCCESS" && pStatus === "SUCCESS")) {
+        paymentByEng[p.engagement_id] = p;
+      }
+    });
 
     const paymentTimeoutCancelByEng = {};
     paymentTimeoutCancelRes.rows.forEach((row) => {
@@ -863,6 +893,17 @@ WHERE sp.serviceproviderid = ANY($1)`,
           ? JSON.parse(mod.modified_fields)
           : mod.modified_fields;
 
+      const modType = String(
+        mod.modification_type || parsed?.modification_type || ""
+      ).toUpperCase();
+
+      if (
+        modType === "SCHEDULE_MODIFICATION_PENDING" ||
+        modType === "SCHEDULE_MODIFICATION_CANCELLED"
+      ) {
+        return;
+      }
+
       if (!modsByEng[mod.engagement_id]) modsByEng[mod.engagement_id] = [];
       if (!vacationsByEng[mod.engagement_id]) vacationsByEng[mod.engagement_id] = [];
 
@@ -870,13 +911,35 @@ WHERE sp.serviceproviderid = ANY($1)`,
       if (parsed?.modification_type === "VACATION_ADDED") action = "Vacation Applied";
       if (parsed?.modification_type === "VACATION_MODIFIED") action = "Vacation Updated";
       if (parsed?.modification_type === "VACATION_CANCELLED") action = "Vacation Cancelled";
+      if (modType === "SCHEDULE_MODIFIED" || parsed?.modification_type === "SCHEDULE_MODIFIED") {
+        action = "Schedule Rescheduled";
+      }
 
-      modsByEng[mod.engagement_id].push({
+      const modEntry = {
         date: mod.modified_at,
         action,
         refund: parsed?.updated?.refund ?? parsed?.wallet_effect?.customer_credit ?? null,
         penalty: parsed?.wallet_effect?.customer_debit ?? parsed?.updated?.penalty ?? null,
-      });
+      };
+
+      if (modType === "SCHEDULE_MODIFIED" && parsed?.previous && parsed?.updated) {
+        modEntry.changes = {
+          start_date:
+            parsed.previous.start_date !== parsed.updated.start_date
+              ? { from: parsed.previous.start_date, to: parsed.updated.start_date }
+              : undefined,
+          end_date:
+            parsed.previous.end_date !== parsed.updated.end_date
+              ? { from: parsed.previous.end_date, to: parsed.updated.end_date }
+              : undefined,
+          start_time:
+            parsed.previous.start_time !== parsed.updated.start_time
+              ? { from: parsed.previous.start_time, to: parsed.updated.start_time }
+              : undefined,
+        };
+      }
+
+      modsByEng[mod.engagement_id].push(modEntry);
 
       if (parsed?.modification_type?.startsWith("VACATION")) {
         vacationsByEng[mod.engagement_id].push({
@@ -1061,6 +1124,7 @@ router.put("/:id", async (req, res) => {
       start_date,
       end_date,
       start_time,
+      end_time,
       start_epoch,
       end_epoch,
       start_date_epoch,
@@ -1184,6 +1248,17 @@ router.put("/:id", async (req, res) => {
         newEndEpoch = startForNew + origDur;
       }
 
+      if (end_time && newStartEpoch) {
+        const endDateForEpoch =
+          newEndDate ||
+          normalizeDateToIST(oldEng.end_date) ||
+          normalizeDateToIST(oldEng.start_date);
+        const endFromTime = toEpochSeconds(endDateForEpoch, end_time);
+        if (endFromTime > newStartEpoch) {
+          newEndEpoch = endFromTime;
+        }
+      }
+
       // If provider changed, validate new provider
       if (newProviderId && newProviderId !== providerBefore) {
         const provCheck = await client.query(`SELECT 1 FROM serviceprovider WHERE serviceproviderid=$1`, [newProviderId]);
@@ -1197,28 +1272,40 @@ router.put("/:id", async (req, res) => {
       const endDateOnly = newEndDate ? new Date(newEndDate) : new Date(oldEng.end_date);
       const dateList = enumerateDates(startDateOnly, endDateOnly);
 
-      // compute representative daily slot times (HH:mm) from newStartEpoch
       const dailyStartTime = epochToTimeHM(newStartEpoch);
-      const dailyEndTime = epochToTimeHM(newEndEpoch);
+      const visitDurSec = visitDurationSecondsFromEngagement(
+        {
+          ...oldEng,
+          start_epoch: newStartEpoch,
+          start_date: newStartDate,
+        },
+        {
+          startTime: dailyStartTime,
+          endTime: end_time || null,
+        }
+      );
 
-      // check conflicts for each day if provider assigned
       if (newProviderId) {
-        for (const day of dateList) {
-          const dayStart = toEpochSeconds(day, dailyStartTime);
-          const dayEnd = dayStart + (Number(newEndEpoch) - Number(newStartEpoch));
-          const conflict = await client.query(
-            `SELECT engagement_id FROM provider_availability
-             WHERE serviceproviderid=$1
-               AND $2 < slot_end_epoch
-               AND $3 > slot_start_epoch
-               AND engagement_id != $4
-             LIMIT 1`,
-            [newProviderId, dayStart, dayEnd, id]
-          );
-          if (conflict.rows.length > 0) {
-            await client.query("ROLLBACK");
-            return res.status(409).json({ error: "Time overlap with another engagement for the provider", conflict: conflict.rows[0] });
-          }
+        const prospectiveEng = {
+          ...oldEng,
+          start_epoch: newStartEpoch,
+          end_epoch: newEndEpoch,
+          start_date: newStartDate,
+          end_date: newEndDate,
+          duration_minutes: Math.round(visitDurSec / 60),
+        };
+        const conflictRow = await findProviderBookedConflict(
+          client,
+          newProviderId,
+          prospectiveEng,
+          id
+        );
+        if (conflictRow) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            error: "Time overlap with another engagement for the provider",
+            conflict: { engagement_id: conflictRow.engagement_id },
+          });
         }
       }
 
@@ -1230,11 +1317,9 @@ router.put("/:id", async (req, res) => {
 
       // Insert/Update availability for new provider (daily)
       if (newProviderId) {
-        const origDur = (oldEng.end_epoch && oldEng.start_epoch) ? (Number(oldEng.end_epoch) - Number(oldEng.start_epoch)) : 3600;
-        // clear any existing rows for engagement for new provider's dates (defensive)
         for (const day of dateList) {
           const ds = toEpochSeconds(day, dailyStartTime);
-          const de = ds + origDur;
+          const de = ds + visitDurSec;
           // if a row exists for this engagement & day -> update, else insert
           const exists = await client.query(
             `SELECT 1 FROM provider_availability WHERE engagement_id=$1 AND date=$2::date LIMIT 1`,
