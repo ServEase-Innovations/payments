@@ -1,5 +1,34 @@
 export const ON_DEMAND_PROVIDER_RADIUS_KM = 5;
 
+/** SQL fragment: provider matches the requested service role ($3). */
+export const ON_DEMAND_ROLE_MATCH_SQL = `
+  (
+    EXISTS (
+      SELECT 1
+      FROM serviceprovider_roles r
+      WHERE r.serviceproviderid = sp.serviceproviderid
+        AND LOWER(TRIM(r.role::text)) = LOWER(TRIM($3::text))
+    )
+    OR (
+      NOT EXISTS (
+        SELECT 1
+        FROM serviceprovider_roles r2
+        WHERE r2.serviceproviderid = sp.serviceproviderid
+      )
+      AND LOWER(TRIM(COALESCE(sp.housekeepingrole, ''::text))) = LOWER(TRIM($3::text))
+    )
+    OR (
+      LOWER(TRIM(COALESCE(sp.housekeepingrole, ''::text))) = LOWER(TRIM($3::text))
+      AND NOT EXISTS (
+        SELECT 1
+        FROM serviceprovider_roles r3
+        WHERE r3.serviceproviderid = sp.serviceproviderid
+          AND LOWER(TRIM(r3.role::text)) = LOWER(TRIM($3::text))
+      )
+    )
+  )
+`;
+
 export const ON_DEMAND_NO_PROVIDERS_MESSAGE =
   "No service providers are currently available in your area. Please try again later or choose a different location.";
 

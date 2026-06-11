@@ -48,6 +48,8 @@ import { setSocketServer } from "./src/utils/socketIoRef.js";
 import { startOverdueStartReminderScheduler } from "./src/services/overdueStartReminder.service.js";
 import { startPaymentPendingReminderScheduler } from "./src/services/paymentPendingReminder.service.js";
 import { startOnDemandUnassignedCancelScheduler } from "./src/services/onDemandUnassignedCancel.service.js";
+import { startOnDemandCrmEscalationScheduler } from "./src/services/onDemandCrmEscalation.service.js";
+import { startOnDemandCustomerOutreachScheduler } from "./src/services/onDemandCustomerOutreach.service.js";
 import { startPaymentPendingExpiryScheduler } from "./src/services/paymentPendingExpiry.service.js";
 
 const app = express();
@@ -245,6 +247,8 @@ server.listen(httpPort, () => {
   startPaymentPendingReminderScheduler(io);
   startPaymentPendingExpiryScheduler(io);
   startOnDemandUnassignedCancelScheduler(io);
+  startOnDemandCrmEscalationScheduler(io);
+  startOnDemandCustomerOutreachScheduler(io);
 });
 
 export { io };

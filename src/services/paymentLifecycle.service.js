@@ -1,6 +1,6 @@
 import pool from "../config/db.js";
-import geolib from "geolib";
 import dayjs from "dayjs";
+import { broadcastOnDemandToProviders } from "./onDemandProviderBroadcast.js";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import { transitionEngagement } from "./engagementLifecycle.js";
@@ -15,10 +15,6 @@ import { dismissPaymentPendingRemindersForEngagement } from "./paymentPendingRem
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
-
-/** Max distance (m) to notify providers of a paid on-demand booking. */
-const ON_DEMAND_NOTIFY_RADIUS_M = 12_000;
-const ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M = 30_000;
 
 async function notifyOnDemandProvider(socketServer, engagement, providerRow, distanceM) {
   const spid = Number(providerRow.serviceproviderid);
@@ -254,55 +250,16 @@ export async function handlePaymentSuccess({
       return { success: true };
     }
 
-    const providers = await pool.query(`
-      SELECT serviceproviderid, latitude, longitude
-      FROM serviceprovider
-      WHERE isactive = true
-        AND latitude IS NOT NULL
-        AND longitude IS NOT NULL
-    `);
-
     console.log(
-      `Broadcasting new ON_DEMAND engagement ${engagement.engagement_id} to nearby providers...`
+      `Broadcasting new ON_DEMAND engagement ${engagement.engagement_id} to eligible nearby providers...`
     );
 
-    const customerPoint = {
-      latitude: engagement.latitude,
-      longitude: engagement.longitude,
-    };
-    const distances = providers.rows.map((p) => ({
-      row: p,
-      distance: geolib.getDistance(customerPoint, {
-        latitude: p.latitude,
-        longitude: p.longitude,
-      }),
-    }));
+    const notified = await broadcastOnDemandToProviders({
+      engagement,
+      notifyProvider: (row, distance) =>
+        notifyOnDemandProvider(socketServer, engagement, row, distance),
+    });
 
-    let notified = 0;
-    const notifiedIds = new Set();
-
-    const notifyWithin = async (maxM) => {
-      for (const { row, distance } of distances) {
-        if (distance > maxM) continue;
-        const spid = Number(row.serviceproviderid);
-        if (!Number.isFinite(spid) || spid < 1 || notifiedIds.has(spid)) continue;
-        /* eslint-disable no-await-in-loop */
-        const ok = await notifyOnDemandProvider(socketServer, engagement, row, distance);
-        /* eslint-enable no-await-in-loop */
-        if (ok) {
-          notifiedIds.add(spid);
-          notified += 1;
-        }
-      }
-    };
-
-    await notifyWithin(ON_DEMAND_NOTIFY_RADIUS_M);
-    if (notified === 0) {
-      console.warn(
-        `No providers within ${ON_DEMAND_NOTIFY_RADIUS_M}m for engagement ${engagement.engagement_id} — widening to ${ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M}m`
-      );
-      await notifyWithin(ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M);
-    }
     console.log(
       `ON_DEMAND engagement ${engagement.engagement_id}: notified ${notified} provider(s)`
     );

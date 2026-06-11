@@ -345,6 +345,8 @@ router.get("/engagements", async (req, res) => {
       to,
       start_date_epoch,
       end_date_epoch,
+      crm_escalated,
+      engagement_status,
       limit = 200,
       offset = 0,
     } = req.query;
@@ -392,6 +394,18 @@ router.get("/engagements", async (req, res) => {
       where += ` AND e.end_date <= $${params.length}`;
     }
 
+    if (engagement_status) {
+      params.push(String(engagement_status).toUpperCase());
+      where += ` AND UPPER(COALESCE(e.engagement_status, '')) = $${params.length}`;
+    }
+
+    if (crm_escalated === "true" || crm_escalated === true) {
+      where += `
+        AND UPPER(COALESCE(e.engagement_status, '')) = 'CRM_ESCALATED'
+        AND e.serviceproviderid IS NULL
+      `;
+    }
+
     // Main query — one row per engagement (latest payment only, avoids duplicate joins)
     const query = `
       SELECT
@@ -399,12 +413,14 @@ router.get("/engagements", async (req, res) => {
         e.booking_type,
         e.service_type,
         e.assignment_status,
+        e.engagement_status,
         e.task_status,
         e.start_date,
         e.end_date,
         e.start_epoch,
         e.end_epoch,
         e.base_amount,
+        e.address,
         e.active,
         e.created_at,
 
@@ -461,6 +477,7 @@ router.get("/engagements", async (req, res) => {
         booking_type: r.booking_type,
         service_type: r.service_type,
         assignment_status: r.assignment_status,
+        engagement_status: r.engagement_status,
         task_status: r.task_status,
         active: r.active,
         start_date: r.start_date
@@ -474,6 +491,7 @@ router.get("/engagements", async (req, res) => {
           ? new Date(r.end_epoch * 1000).toISOString().slice(11, 16)
           : null,
         base_amount: Number(r.base_amount),
+        address: r.address || null,
 
         customer: {
           customerid: r.customerid,

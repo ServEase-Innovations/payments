@@ -42,7 +42,26 @@ export async function transitionEngagement(client, {
   const engagement = res.rows[0];
   const currentStatus = engagement.engagement_status;
 
-  if (currentStatus === newStatus) return;
+  if (currentStatus === newStatus) {
+    if (eventType) {
+      await client.query(
+        `INSERT INTO engagement_events
+         (engagement_id, from_status, to_status,
+          event_type, actor_type, actor_id, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          engagementId,
+          currentStatus,
+          newStatus,
+          eventType,
+          actorType,
+          actorId,
+          JSON.stringify(metadata),
+        ]
+      );
+    }
+    return;
+  }
 
   // 1️⃣ Update status (+ sync task_status when the visit clearly starts / ends)
   if (newStatus === "IN_PROGRESS") {

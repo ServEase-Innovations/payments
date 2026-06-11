@@ -296,6 +296,8 @@ router.get("/on-demand-availability", async (req, res) => {
       success: true,
       available: availability.available,
       count: availability.count ?? 0,
+      broadcastEligibleCount: availability.broadcastEligibleCount ?? availability.count ?? 0,
+      strictCount: availability.strictCount ?? availability.count ?? 0,
       radiusKm: availability.radiusKm ?? ON_DEMAND_PROVIDER_RADIUS_KM,
       role: availability.role,
       code: availability.code,
@@ -424,6 +426,8 @@ router.post("/", async (req, res) => {
           error: availability.message,
           code: availability.code,
           availableProviders: availability.count ?? 0,
+          broadcastEligibleCount: availability.broadcastEligibleCount ?? 0,
+          strictCount: availability.strictCount ?? 0,
         });
       }
     }

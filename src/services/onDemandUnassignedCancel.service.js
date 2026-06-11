@@ -108,7 +108,7 @@ export async function findUnassignedOnDemandPastStart({ limit = 25, nowEpoch } =
     WHERE UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
       AND e.serviceproviderid IS NULL
       AND UPPER(COALESCE(e.assignment_status, 'UNASSIGNED')) = 'UNASSIGNED'
-      AND UPPER(COALESCE(e.engagement_status, '')) IN ('OPEN_FOR_ACCEPTANCE', 'UNASSIGNED')
+      AND UPPER(COALESCE(e.engagement_status, '')) IN ('OPEN_FOR_ACCEPTANCE', 'UNASSIGNED', 'CRM_ESCALATED')
       AND UPPER(COALESCE(e.task_status, 'NOT_STARTED')) NOT IN ('CANCELLED', 'COMPLETED', 'IN_PROGRESS')
       AND e.start_epoch IS NOT NULL
       AND e.start_epoch <= $1

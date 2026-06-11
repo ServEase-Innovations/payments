@@ -213,6 +213,7 @@ router.get("/:id/history", async (req, res) => {
 const ON_DEMAND_ACCEPTABLE_ENGAGEMENT_STATUSES = new Set([
   "OPEN_FOR_ACCEPTANCE",
   "UNASSIGNED",
+  "CRM_ESCALATED",
 ]);
 
 /**

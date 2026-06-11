@@ -43,6 +43,7 @@ const NEW_BOOKING_TYPES = ["NEW_BOOKING_OPPORTUNITY", "NEW_BOOKING_REQUEST"];
 const OPEN_FOR_ACCEPTANCE_STATUSES = new Set([
   "OPEN_FOR_ACCEPTANCE",
   "UNASSIGNED",
+  "CRM_ESCALATED",
   "",
 ]);
 
@@ -373,6 +374,8 @@ export const InAppTypes = {
   PAYMENT_PENDING_REMINDER: "PAYMENT_PENDING_REMINDER",
   /** Customer: paid on-demand booking auto-cancelled — no provider before start */
   BOOKING_AUTO_CANCELLED_NO_PROVIDER: "BOOKING_AUTO_CANCELLED_NO_PROVIDER",
+  /** Customer: CRM escalated but provider not yet assigned before start */
+  ON_DEMAND_ASSIGNMENT_PENDING: "ON_DEMAND_ASSIGNMENT_PENDING",
   /** Customer: unpaid booking auto-cancelled after payment window elapsed */
   BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT: "BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT",
   SUPPORT_TICKET_UPDATE: "SUPPORT_TICKET_UPDATE",
