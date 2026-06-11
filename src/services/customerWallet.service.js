@@ -81,3 +81,87 @@ export async function deductWalletForPayment(
 
   return debit;
 }
+
+export const WALLET_TOPUP_MIN_INR = 100;
+export const WALLET_TOPUP_MAX_INR = 50000;
+
+/**
+ * Ensure a customer wallet row exists and return it locked for update.
+ */
+export async function ensureCustomerWalletForUpdate(client, customerId) {
+  let walletRes = await client.query(
+    `SELECT wallet_id, balance
+     FROM customer_wallets
+     WHERE customerid = $1
+     FOR UPDATE`,
+    [customerId]
+  );
+
+  if (!walletRes.rows.length) {
+    await client.query(
+      `INSERT INTO customer_wallets (customerid, balance)
+       VALUES ($1, 0)
+       ON CONFLICT (customerid) DO NOTHING`,
+      [customerId]
+    );
+    walletRes = await client.query(
+      `SELECT wallet_id, balance
+       FROM customer_wallets
+       WHERE customerid = $1
+       FOR UPDATE`,
+      [customerId]
+    );
+  }
+
+  if (!walletRes.rows.length) {
+    const err = new Error("Could not open customer wallet");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  return {
+    wallet_id: walletRes.rows[0].wallet_id,
+    balance: roundInr(walletRes.rows[0].balance),
+  };
+}
+
+/**
+ * Credit customer wallet inside an open transaction (wallet top-up, refunds, etc.).
+ */
+export async function creditWalletForTopUp(
+  client,
+  { customerId, amount, description, topupId }
+) {
+  const credit = roundInr(amount);
+  if (!Number.isFinite(credit) || credit <= 0) {
+    const err = new Error("Invalid top-up amount");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const wallet = await ensureCustomerWalletForUpdate(client, customerId);
+  const balanceAfter = roundInr(wallet.balance + credit);
+
+  await client.query(
+    `UPDATE customer_wallets
+     SET balance = $1,
+         updated_at = NOW()
+     WHERE wallet_id = $2`,
+    [balanceAfter, wallet.wallet_id]
+  );
+
+  const label = description || "Wallet top-up";
+
+  await client.query(
+    `INSERT INTO wallet_transaction
+       (wallet_id, customerid, engagement_id, amount, transaction_type, description, balance_after)
+     VALUES ($1, $2, NULL, $3, 'CREDIT', $4, $5)`,
+    [wallet.wallet_id, customerId, credit, label, balanceAfter]
+  );
+
+  return {
+    wallet_id: wallet.wallet_id,
+    balance_after: balanceAfter,
+    topup_id: topupId ?? null,
+  };
+}
