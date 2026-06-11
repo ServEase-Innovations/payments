@@ -1,5 +1,6 @@
 import express from "express";
 import pool from "../../config/db.js";
+import { activeEngagementStatusSql } from "../../services/providerAvailabilityOverlap.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -61,6 +62,34 @@ function isDateInEngagementVacation(dateYmd, vacationStart, vacationEnd) {
   return d >= a && d <= b;
 }
 
+function rolesMatchForSearch(serviceType, roleNorm) {
+  const service = String(serviceType ?? "").trim().toLowerCase();
+  const role = String(roleNorm ?? "").trim().toLowerCase();
+  if (!service || !role) return true;
+  if (service === role) return true;
+  if (service.includes("cook") && role.includes("cook")) return true;
+  if (service.includes("maid") && role.includes("maid")) return true;
+  if (service.includes("nanny") && role.includes("nanny")) return true;
+  return false;
+}
+
+function isActiveBlockingEngagement(prev) {
+  if (!prev || prev.active === false) return false;
+  const life = String(prev.engagementStatus ?? "").toUpperCase();
+  const task = String(prev.taskStatus ?? "NOT_STARTED").toUpperCase();
+  if (["CANCELLED", "COMPLETED", "CLOSED", "EXPIRED"].includes(life)) {
+    return false;
+  }
+  if (["CANCELLED", "COMPLETED"].includes(task)) return false;
+  return true;
+}
+
+function customerHasOverlappingActiveBooking(prev, rangeStartStr, rangeEndStr, roleNorm) {
+  if (!isActiveBlockingEngagement(prev)) return false;
+  if (!rolesMatchForSearch(prev.serviceType, roleNorm)) return false;
+  return engagementOverlapsSearchWindow(prev, rangeStartStr, rangeEndStr);
+}
+
 /**
  * Daily busy intervals from this customer's existing engagement with this provider,
  * intersected with the search range. Ensures overlap checks match the booked wall-clock
@@ -74,9 +103,8 @@ function previousEngagementBusyIntervals(
   roleNorm,
   fallbackDurationSec
 ) {
-  if (!prev || prev.active === false) return [];
-  const st = prev.serviceType != null ? String(prev.serviceType).trim().toLowerCase() : "";
-  if (!st || st !== String(roleNorm).trim().toLowerCase()) return [];
+  if (!isActiveBlockingEngagement(prev)) return [];
+  if (!rolesMatchForSearch(prev.serviceType, roleNorm)) return [];
 
   const startEp = Number(prev.startEpoch);
   let timeStr;
@@ -127,7 +155,7 @@ function previousEngagementBusyIntervals(
 }
 
 function engagementOverlapsSearchWindow(prev, rangeStartStr, rangeEndStr) {
-  if (!prev || prev.active === false) return false;
+  if (!prev) return false;
   const engStart = dayjs(prev.startDate).tz("Asia/Kolkata").startOf("day");
   const engEnd = dayjs(prev.endDate).tz("Asia/Kolkata").startOf("day");
   const reqStart = dayjs.tz(rangeStartStr, "YYYY-MM-DD", "Asia/Kolkata").startOf(
@@ -505,6 +533,7 @@ router.post("/nearby-monthly", async (req, res) => {
       );
       for (const row of prevRes.rows) {
         const id = String(row.serviceproviderid);
+        if (previousBookingByProvider.has(id)) continue;
         previousBookingByProvider.set(id, {
           engagementId: row.engagementId != null ? String(row.engagementId) : null,
           bookingType: row.bookingType,
@@ -580,12 +609,14 @@ router.post("/nearby-monthly", async (req, res) => {
         pa.slot_start_epoch,
         pa.slot_end_epoch
       FROM provider_availability pa
+      INNER JOIN engagements e ON e.engagement_id = pa.engagement_id
       WHERE
         pa.serviceproviderid = ANY($1)
         AND pa.status = 'BOOKED'
         AND pa.date BETWEEN $2::date AND $3::date
         AND pa.slot_start_epoch IS NOT NULL
         AND pa.slot_end_epoch IS NOT NULL
+        AND ${activeEngagementStatusSql("e")}
       `,
       [providerIds, startDate, endDate]
     );
@@ -611,10 +642,14 @@ router.post("/nearby-monthly", async (req, res) => {
         AND e.start_date <= $3::date
         AND e.end_date >= $2::date
         AND e.booking_type IN ('MONTHLY', 'SHORT_TERM', 'ON_DEMAND')
-        AND (e.engagement_status = 'ASSIGNED' OR e.assignment_status = 'ASSIGNED')
+        AND ${activeEngagementStatusSql("e")}
         AND (
           e.service_type IS NULL
           OR LOWER(TRIM(e.service_type::text)) = LOWER(TRIM($4::text))
+          OR (
+            LOWER(TRIM($4::text)) LIKE '%cook%'
+            AND LOWER(TRIM(e.service_type::text)) LIKE '%cook%'
+          )
         )
       `,
       [providerIds, startDate, endDate, roleSearchNorm]
@@ -791,6 +826,108 @@ router.post("/nearby-monthly", async (req, res) => {
       const prevForSp = hasCustomerID
         ? previousBookingByProvider.get(pidKey)
         : null;
+
+      const customerOverlapConflict =
+        hasCustomerID &&
+        customerHasOverlappingActiveBooking(
+          prevForSp,
+          startDate,
+          endDate,
+          roleSearchNorm
+        );
+
+      if (customerOverlapConflict) {
+        const rangeEvalStart = dayjs
+          .tz(calendarYmdKolkata(startDate), "YYYY-MM-DD", "Asia/Kolkata")
+          .startOf("day");
+        const rangeEvalEnd = dayjs
+          .tz(calendarYmdKolkata(endDate), "YYYY-MM-DD", "Asia/Kolkata")
+          .startOf("day");
+        let overlapTotalDays = 0;
+        for (
+          let c0 = rangeEvalStart.clone();
+          !c0.isAfter(rangeEvalEnd, "day");
+          c0 = c0.add(1, "day")
+        ) {
+          overlapTotalDays++;
+        }
+
+        const {
+          startEpoch: _se,
+          durationMinutes: _dm,
+          ...prevForApi
+        } = prevForSp;
+
+        evaluatedProviders.push({
+          serviceproviderid: p.serviceproviderid,
+          firstName: p.firstName,
+          lastName: p.lastName,
+          gender: p.gender,
+          experience: p.experience,
+          rating: p.rating,
+          diet: p.diet,
+          cookingSpeciality: p.cookingSpeciality,
+          languageKnown: languageKnownToArray(p.languageknown),
+          languageknown: p.languageknown ?? null,
+          locality: p.locality,
+          location: p.location,
+          pincode: p.pincode,
+          latitude: p.latitude,
+          longitude: p.longitude,
+          age: p.dob != null ? getAge(p.dob) : null,
+          housekeepingRole: p.housekeepingRole,
+          housekeepingRoles: (() => {
+            const fromJunction = rolesBySpId[pidKey];
+            if (fromJunction?.length) {
+              const seen = new Set(
+                fromJunction.map((r) => String(r).trim().toLowerCase())
+              );
+              const out = [...fromJunction];
+              const leg =
+                p.housekeepingRole != null ? String(p.housekeepingRole).trim() : "";
+              if (leg && !seen.has(leg.toLowerCase())) {
+                out.push(p.housekeepingRole);
+              }
+              return out;
+            }
+            return p.housekeepingRole ? [String(p.housekeepingRole).trim()] : [];
+          })(),
+          distance_km: Number(p.distance_km.toFixed(2)),
+          distanceKm: Number(p.distance_km.toFixed(2)),
+          bestMatch: false,
+          hasCustomerOverlap: true,
+          monthlyAvailability: {
+            preferredTime: preferredStartTime,
+            fullyAvailable: false,
+            summary: {
+              totalDays: overlapTotalDays,
+              daysAtPreferredTime: 0,
+              daysWithDifferentTime: overlapTotalDays,
+              unavailableDays: 0,
+            },
+            exceptions: [
+              {
+                date: startDate,
+                reason: "CUSTOMER_OVERLAPPING_BOOKING",
+                suggestedTime: null,
+              },
+            ],
+          },
+          availabilityFromDb: {
+            weeklySlotsSource: weeklySlotSourceByProvider[pidKey] || "none",
+            bookedRowsProviderAvailabilityInRange: paBookedCountBySp[pidKey] || 0,
+            engagementsMonthlyOrShortTermInRange:
+              engMonthlyShortTermBySp[pidKey] || 0,
+            engagementsOnDemandInRange: engOnDemandBySp[pidKey] || 0,
+            mergedBookedIntervalsUsedForOverlapCheck: 0,
+            clearedContractVisitDaysInRange: 0,
+          },
+          previouslyBooked: true,
+          previousBookingDetails: prevForApi,
+        });
+        continue;
+      }
+
       const fromPrevEngagement = previousEngagementBusyIntervals(
         prevForSp,
         startDate,
@@ -801,6 +938,7 @@ router.post("/nearby-monthly", async (req, res) => {
       let providerBookingsMerged = [...baseBookings, ...fromPrevEngagement];
       if (spDayClearedForVisit.size) {
         providerBookingsMerged = providerBookingsMerged.filter((b) => {
+          if (b._fromCustomerPriorEngagement) return true;
           const t = Number(b.slot_start_epoch);
           if (!Number.isFinite(t)) return true;
           const dKey = dayjs.unix(t).tz("Asia/Kolkata").format("YYYY-MM-DD");
@@ -856,8 +994,24 @@ router.post("/nearby-monthly", async (req, res) => {
           continue;
         }
 
-        /* Contract not running this calendar day (vacation / PA FREE) — do not require working-hours or booking checks */
+        /* Contract not running this calendar day (vacation / PA FREE) — skip generic BOOKED checks */
         if (spDayClearedForVisit.has(`${pidKey}:${dateStr}`)) {
+          if (
+            hasCustomerID &&
+            prevForSp &&
+            rolesMatchForSearch(prevForSp.serviceType, roleSearchNorm) &&
+            isActiveBlockingEngagement(prevForSp) &&
+            calendarDayInPriorEngagement(prevForSp, dateStr)
+          ) {
+            daysWithDifferentTime++;
+            exceptions.push({
+              date: dateStr,
+              reason: "EXISTING_CUSTOMER_BOOKING",
+              suggestedTime: null,
+            });
+            continue;
+          }
+
           const preferredEpochEarly = epochInIST(dateStr, preferredStartTime);
           const isInside = todaysSlots.some((slot) => {
             const s0 = epochInIST(dateStr, slot.slot_start);
@@ -908,15 +1062,9 @@ router.post("/nearby-monthly", async (req, res) => {
         }
 
         /* Same customer + provider already engaged for another service in this period (e.g. MAID vs NANNY search) */
-        if (hasCustomerID && prevForSp && prevForSp.active !== false) {
-          const st =
-            prevForSp.serviceType != null
-              ? String(prevForSp.serviceType).trim().toLowerCase()
-              : "";
-          const roleL = String(roleSearchNorm).trim().toLowerCase();
+        if (hasCustomerID && prevForSp && isActiveBlockingEngagement(prevForSp)) {
           if (
-            st &&
-            st !== roleL &&
+            !rolesMatchForSearch(prevForSp.serviceType, roleSearchNorm) &&
             engagementOverlapsSearchWindow(prevForSp, startDate, endDate) &&
             calendarDayInPriorEngagement(prevForSp, dateStr)
           ) {
@@ -1104,16 +1252,11 @@ router.post("/nearby-monthly", async (req, res) => {
 
     available.sort((a, b) => a.distance_km - b.distance_km);
 
-    if (available.length > 0) {
-      available[0].bestMatch = true;
-    }
-
     const ordered = [...available, ...notAvailable];
 
     // When a customer is searching, prioritize providers they booked before.
     // This ensures previouslyBooked providers are visible in the first page.
     if (hasCustomerID) {
-      for (const p of ordered) p.bestMatch = false;
       ordered.sort((a, b) => {
         const ap = a.previouslyBooked ? 1 : 0;
         const bp = b.previouslyBooked ? 1 : 0;
@@ -1125,8 +1268,15 @@ router.post("/nearby-monthly", async (req, res) => {
 
         return a.distance_km - b.distance_km;
       });
+    }
 
-      if (ordered.length > 0) ordered[0].bestMatch = true;
+    const bestMatchCandidate = ordered.find(
+      (p) =>
+        p.monthlyAvailability.fullyAvailable &&
+        !p.hasCustomerOverlap
+    );
+    if (bestMatchCandidate) {
+      bestMatchCandidate.bestMatch = true;
     }
 
     /* ---------- STEP 6: Pagination ---------- */

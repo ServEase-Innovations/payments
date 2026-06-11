@@ -459,6 +459,29 @@ router.post("/", async (req, res) => {
     // Overlap check: clip existing slots to this calendar day (IST). Rows sometimes store
     // multi-day spans from bad duration_minutes; raw epoch overlap then falsely blocks bookings.
     if (!isOnDemand && serviceproviderid) {
+      const sameCustomerOverlap = await client.query(
+        `SELECT e.engagement_id
+         FROM engagements e
+         WHERE e.customerid = $1
+           AND e.serviceproviderid = $2
+           AND e.active = true
+           AND e.start_date <= $4::date
+           AND e.end_date >= $3::date
+           AND UPPER(COALESCE(e.booking_type, '')) IN ('MONTHLY', 'SHORT_TERM')
+           AND ${activeEngagementStatusSql("e")}
+         LIMIT 1`,
+        [customerid, serviceproviderid, resolvedStartDate, effectiveEndDate]
+      );
+      if (sameCustomerOverlap.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error:
+            "You already have an active booking with this provider for overlapping dates",
+          code: "CUSTOMER_OVERLAPPING_BOOKING",
+          existing_engagement_id: sameCustomerOverlap.rows[0].engagement_id,
+        });
+      }
+
       const startD = new Date(resolvedStartDate);
       const endD = new Date(effectiveEndDate);
       for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
