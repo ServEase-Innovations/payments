@@ -16,6 +16,15 @@ import {
   assertOnDemandProvidersAvailable,
   ON_DEMAND_PROVIDER_RADIUS_KM,
 } from "../../services/onDemandProviderAvailability.js";
+import {
+  computeWalletApplication,
+  deductWalletForPayment,
+  getCustomerWalletBalance,
+} from "../../services/customerWallet.service.js";
+import {
+  handlePaymentSuccess,
+  runPostPaymentSuccessEffects,
+} from "../../services/paymentLifecycle.service.js";
 
 /**
  * V2 SP-backed engagement → calendar booking
@@ -335,8 +344,12 @@ router.post("/", async (req, res) => {
       latitude,
       longitude,
       payment_mode = "razorpay",
-      duration_minutes
+      duration_minutes,
+      use_wallet,
+      useWallet,
     } = req.body;
+
+    const useWalletBalance = Boolean(use_wallet ?? useWallet);
 
     const isOnDemand = booking_type === "ON_DEMAND";
     const resolvedStartEpoch =
@@ -567,18 +580,41 @@ router.post("/", async (req, res) => {
     const gst = Math.round(platform_fee * 0.18 * 100) / 100;
     const total_amount = Math.round((base_amount + platform_fee + gst) * 100) / 100;
 
-    const razorpayOrder = await razorpay.orders.create({
-      amount: Math.round(total_amount * 100),
-      currency: "INR",
-      receipt: `eng_${engagement.engagement_id}`,
-    });
+    const walletBalance = await getCustomerWalletBalance(client, customerid);
+    const { wallet_amount, razorpay_amount } = computeWalletApplication(
+      walletBalance,
+      total_amount,
+      useWalletBalance
+    );
+
+    let razorpay_order_id = null;
+    let wallet_only = false;
+
+    if (razorpay_amount > 0) {
+      const razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(razorpay_amount * 100),
+        currency: "INR",
+        receipt: `eng_${engagement.engagement_id}`,
+      });
+      razorpay_order_id = razorpayOrder.id;
+    } else {
+      wallet_only = true;
+      razorpay_order_id = `wallet_${engagement.engagement_id}_${Date.now()}`;
+    }
+
+    const effectivePaymentMode =
+      wallet_only && wallet_amount > 0
+        ? "wallet"
+        : wallet_amount > 0
+          ? "wallet+razorpay"
+          : payment_mode;
 
     await client.query(
       `
       INSERT INTO payments
-      (engagement_id, base_amount, platform_fee, gst, total_amount,
-       payment_mode, status, razorpay_order_id, created_at)
-      VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,NOW())
+      (engagement_id, base_amount, platform_fee, gst, total_amount, wallet_amount,
+       payment_mode, status, razorpay_order_id, wallet_deducted, created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING',$8,$9,NOW())
       `,
       [
         engagement.engagement_id,
@@ -586,21 +622,72 @@ router.post("/", async (req, res) => {
         platform_fee,
         gst,
         total_amount,
-        payment_mode,
-        razorpayOrder.id,
+        wallet_amount,
+        effectivePaymentMode,
+        razorpay_order_id,
+        false,
       ]
     );
 
+    if (wallet_only) {
+      if (wallet_amount <= 0) {
+        throw new Error("Wallet balance is insufficient for this booking");
+      }
+
+      await deductWalletForPayment(client, {
+        customerId: customerid,
+        engagementId: engagement.engagement_id,
+        amount: wallet_amount,
+      });
+
+      await client.query(
+        `
+        UPDATE payments
+        SET status = 'SUCCESS',
+            wallet_deducted = true,
+            transaction_id = $1,
+            updated_at = NOW()
+        WHERE engagement_id = $2
+        `,
+        [razorpay_order_id, engagement.engagement_id]
+      );
+
+      const nextStatus =
+        engagement.booking_type === "ON_DEMAND"
+          ? "OPEN_FOR_ACCEPTANCE"
+          : "ASSIGNED";
+
+      await transitionEngagement(client, {
+        engagementId: engagement.engagement_id,
+        newStatus: nextStatus,
+        eventType: "PAYMENT_COMPLETED",
+        actorType: "SYSTEM",
+        metadata: {
+          source: "WALLET_ONLY",
+          wallet_amount,
+        },
+      });
+    }
+
     await client.query("COMMIT");
 
-    // ON_DEMAND: providers are notified only after payment succeeds (see paymentLifecycle.service.js).
+    if (wallet_only) {
+      try {
+        await runPostPaymentSuccessEffects(engagement.engagement_id, req.io);
+      } catch (notifyErr) {
+        console.error("post wallet-only payment notify failed", notifyErr);
+      }
+    }
 
     return res.status(201).json({
       success: true,
       engagement_id: engagement.engagement_id,
-      razorpay_order_id: razorpayOrder.id,
-      razorpay_key_id: getRazorpayKeyId(),
+      razorpay_order_id,
+      razorpay_key_id: wallet_only ? null : getRazorpayKeyId(),
       total_amount,
+      wallet_amount,
+      razorpay_amount,
+      wallet_only,
     });
 
   } catch (err) {
@@ -636,6 +723,7 @@ router.post("/resume-payment", async (req, res) => {
         p.payment_id,
         p.razorpay_order_id,
         p.total_amount,
+        p.wallet_amount,
         p.status AS payment_status,
         e.engagement_id,
         e.customerid,
@@ -709,7 +797,20 @@ router.post("/resume-payment", async (req, res) => {
       }
     }
 
-    const amountPaise = Math.round(totalInr * 100);
+    const walletInr = Math.max(0, Number(row.wallet_amount ?? 0));
+    const razorpayInr = Math.round((totalInr - walletInr) * 100) / 100;
+
+    if (!Number.isFinite(razorpayInr) || razorpayInr <= 0) {
+      return res.status(400).json({
+        success: false,
+        error:
+          walletInr > 0
+            ? "This booking is payable from wallet only. Use checkout with wallet enabled."
+            : "Invalid payment amount on record",
+      });
+    }
+
+    const amountPaise = Math.round(razorpayInr * 100);
 
     // Fresh order on each resume so amount always matches DB and Checkout key matches server account.
     const razorpayOrder = await razorpay.orders.create({
@@ -733,7 +834,9 @@ router.post("/resume-payment", async (req, res) => {
         razorpay_order_id,
         razorpay_key_id: getRazorpayKeyId(),
         amount: amountPaise,
-        amount_inr: totalInr,
+        amount_inr: razorpayInr,
+        total_amount_inr: totalInr,
+        wallet_amount_inr: walletInr,
         currency: "INR",
         engagement_id: engagementId,
         booking_type: row.booking_type,
@@ -837,7 +940,6 @@ router.post("/:engagementId/vacation", async (req, res) => {
   }
 });
 
-import { handlePaymentSuccess } from "../../services/paymentLifecycle.service.js";
 import { handleRazorpayPaymentWebhook } from "../../services/razorpayWebhook.service.js";
 
 router.post("/verify", async (req, res) => {

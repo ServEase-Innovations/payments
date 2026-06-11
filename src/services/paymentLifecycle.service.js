@@ -12,6 +12,7 @@ import {
 } from "./inAppNotification.service.js";
 import { getSocketServer } from "../utils/socketIoRef.js";
 import { dismissPaymentPendingRemindersForEngagement } from "./paymentPendingReminder.service.js";
+import { deductWalletForPayment } from "./customerWallet.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -98,113 +99,13 @@ async function notifyOnDemandProvider(socketServer, engagement, providerRow, dis
   return true;
 }
 
-export async function handlePaymentSuccess({
-  engagementId,
-  razorpay_order_id,
-  razorpay_payment_id,
-  rawEvent = null,
-  io
-}) {
-  const client = await pool.connect();
-
-  let engagement;
-
-  try {
-    await client.query("BEGIN");
-
-    // 🔒 Lock payment row
-    const paymentRes = await client.query(
-      `SELECT * FROM payments
-       WHERE razorpay_order_id = $1
-       FOR UPDATE`,
-      [razorpay_order_id]
-    );
-
-    if (!paymentRes.rows.length) {
-      throw new Error("Payment not found");
-    }
-
-    const payment = paymentRes.rows[0];
-
-    // 🛑 Idempotent check — still clear stale payment-pending reminders
-    if (payment.status === "SUCCESS") {
-      await client.query("COMMIT");
-      try {
-        await dismissPaymentPendingRemindersForEngagement(engagementId);
-      } catch (eDismissPending) {
-        console.error(
-          "dismiss payment-pending reminders failed (already processed)",
-          eDismissPending
-        );
-      }
-      return { alreadyProcessed: true };
-    }
-
-    // 🔒 Lock engagement row
-    const engRes = await client.query(
-      `SELECT * FROM engagements
-       WHERE engagement_id = $1
-       FOR UPDATE`,
-      [engagementId]
-    );
-
-    if (!engRes.rows.length) {
-      throw new Error("Engagement not found");
-    }
-
-    engagement = engRes.rows[0];
-
-    // ✅ Update payment
-    await client.query(
-      `
-      UPDATE payments
-      SET status='SUCCESS',
-          transaction_id=$1,
-          updated_at=NOW()
-      WHERE razorpay_order_id=$2
-      `,
-      [razorpay_payment_id, razorpay_order_id]
-    );
-
-    // 🎯 Decide next engagement state (align with webhook: ON_DEMAND → OPEN_FOR_ACCEPTANCE)
-    let nextStatus =
-      engagement.booking_type === "ON_DEMAND"
-        ? "OPEN_FOR_ACCEPTANCE"
-        : "ASSIGNED";
-
-    // 🔁 Lifecycle transition
-    await transitionEngagement(client, {
-      engagementId,
-      newStatus: nextStatus,
-      eventType: "PAYMENT_COMPLETED",
-      actorType: "SYSTEM",
-      metadata: {
-        source: rawEvent ? "WEBHOOK" : "VERIFY",
-        razorpay_order_id,
-        razorpay_payment_id
-      }
-    });
-
-    await client.query("COMMIT");
-
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-
-  // =================================================
-  // AFTER COMMIT → realtime + in-app notifications
-  // =================================================
-
+export async function runPostPaymentSuccessEffects(engagementId, io) {
   const freshEng = await pool.query(
     `SELECT * FROM engagements WHERE engagement_id = $1`,
     [engagementId]
   );
-  if (freshEng.rows.length) {
-    engagement = freshEng.rows[0];
-  }
+  if (!freshEng.rows.length) return { success: false };
+  const engagement = freshEng.rows[0];
 
   const socketServer = io != null ? io : getSocketServer();
   console.log(`Payment successful for engagement ${engagementId}.`);
@@ -346,4 +247,108 @@ export async function handlePaymentSuccess({
   }
 
   return { success: true };
+}
+
+export async function handlePaymentSuccess({
+  engagementId,
+  razorpay_order_id,
+  razorpay_payment_id,
+  rawEvent = null,
+  io
+}) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const paymentRes = await client.query(
+      `SELECT * FROM payments
+       WHERE razorpay_order_id = $1
+       FOR UPDATE`,
+      [razorpay_order_id]
+    );
+
+    if (!paymentRes.rows.length) {
+      throw new Error("Payment not found");
+    }
+
+    const payment = paymentRes.rows[0];
+
+    if (payment.status === "SUCCESS") {
+      await client.query("COMMIT");
+      try {
+        await dismissPaymentPendingRemindersForEngagement(engagementId);
+      } catch (eDismissPending) {
+        console.error(
+          "dismiss payment-pending reminders failed (already processed)",
+          eDismissPending
+        );
+      }
+      return { alreadyProcessed: true };
+    }
+
+    const engRes = await client.query(
+      `SELECT * FROM engagements
+       WHERE engagement_id = $1
+       FOR UPDATE`,
+      [engagementId]
+    );
+
+    if (!engRes.rows.length) {
+      throw new Error("Engagement not found");
+    }
+
+    const engagement = engRes.rows[0];
+    const walletAmount = Number(payment.wallet_amount ?? 0);
+
+    if (walletAmount > 0 && !payment.wallet_deducted) {
+      await deductWalletForPayment(client, {
+        customerId: engagement.customerid,
+        engagementId,
+        amount: walletAmount,
+      });
+      await client.query(
+        `UPDATE payments SET wallet_deducted = true WHERE payment_id = $1`,
+        [payment.payment_id]
+      );
+    }
+
+    await client.query(
+      `
+      UPDATE payments
+      SET status='SUCCESS',
+          transaction_id=$1,
+          updated_at=NOW()
+      WHERE razorpay_order_id=$2
+      `,
+      [razorpay_payment_id, razorpay_order_id]
+    );
+
+    const nextStatus =
+      engagement.booking_type === "ON_DEMAND"
+        ? "OPEN_FOR_ACCEPTANCE"
+        : "ASSIGNED";
+
+    await transitionEngagement(client, {
+      engagementId,
+      newStatus: nextStatus,
+      eventType: "PAYMENT_COMPLETED",
+      actorType: "SYSTEM",
+      metadata: {
+        source: rawEvent ? "WEBHOOK" : "VERIFY",
+        razorpay_order_id,
+        razorpay_payment_id,
+        wallet_amount: walletAmount > 0 ? walletAmount : undefined,
+      },
+    });
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return runPostPaymentSuccessEffects(engagementId, io);
 }
