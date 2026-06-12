@@ -818,8 +818,8 @@ router.get("/:customerId/engagements", ...customerOwnerRead, async (req, res) =>
       [engagementIds]
     );
 
-    // ---- Payment-timeout cancellations (system auto-cancel) ----
-    const paymentTimeoutCancelRes = await pool.query(
+    // ---- System auto-cancellations (payment timeout, no provider, etc.) ----
+    const autoCancelEventsRes = await pool.query(
       `
       SELECT DISTINCT ON (engagement_id)
         engagement_id,
@@ -827,7 +827,7 @@ router.get("/:customerId/engagements", ...customerOwnerRead, async (req, res) =>
         metadata
       FROM engagement_events
       WHERE engagement_id = ANY($1)
-        AND event_type = 'PAYMENT_TIMEOUT'
+        AND event_type IN ('PAYMENT_TIMEOUT', 'ON_DEMAND_AUTO_CANCELLED_NO_PROVIDER')
         AND to_status = 'CANCELLED'
       ORDER BY engagement_id, created_at DESC
       `,
@@ -868,8 +868,8 @@ WHERE sp.serviceproviderid = ANY($1)`,
       }
     });
 
-    const paymentTimeoutCancelByEng = {};
-    paymentTimeoutCancelRes.rows.forEach((row) => {
+    const autoCancelByEng = {};
+    autoCancelEventsRes.rows.forEach((row) => {
       let metadata = row.metadata;
       if (typeof metadata === "string") {
         try {
@@ -879,14 +879,32 @@ WHERE sp.serviceproviderid = ANY($1)`,
         }
       }
       const meta = metadata && typeof metadata === "object" ? metadata : {};
-      paymentTimeoutCancelByEng[row.engagement_id] = {
+      const eventType = String(row.event_type || "").toUpperCase();
+      const defaultReason =
+        eventType === "ON_DEMAND_AUTO_CANCELLED_NO_PROVIDER"
+          ? "No Provider Available / Provider Not Assigned"
+          : "Payment Timeout";
+
+      autoCancelByEng[row.engagement_id] = {
         event_type: row.event_type,
-        reason: meta.cancellation_reason || "Payment Timeout",
+        reason: meta.cancellation_reason || defaultReason,
         payment_timeout_minutes:
           meta.payment_timeout_minutes != null
             ? Number(meta.payment_timeout_minutes)
-            : 20,
-        auto_cancelled: Boolean(meta.auto_cancelled),
+            : eventType === "PAYMENT_TIMEOUT"
+              ? 20
+              : undefined,
+        auto_cancelled: meta.auto_cancelled !== false,
+        refund_amount_inr:
+          meta.refund_amount_inr != null ? Number(meta.refund_amount_inr) : undefined,
+        wallet_refund_amount_inr:
+          meta.wallet_refund_amount_inr != null
+            ? Number(meta.wallet_refund_amount_inr)
+            : undefined,
+        razorpay_refund_amount_inr:
+          meta.razorpay_refund_amount_inr != null
+            ? Number(meta.razorpay_refund_amount_inr)
+            : undefined,
       };
     });
 
@@ -1065,7 +1083,7 @@ WHERE sp.serviceproviderid = ANY($1)`,
         end_time: safeEndTime,
         provider: providerById[e.serviceproviderid] || null,
         payment: normalizePaymentTimestamps(paymentRow),
-        cancellation: paymentTimeoutCancelByEng[e.engagement_id] || null,
+        cancellation: autoCancelByEng[e.engagement_id] || null,
         modifications: modsByEng[e.engagement_id] || [],
         vacations: vacationsByEng[e.engagement_id] || [],
         vacation:
