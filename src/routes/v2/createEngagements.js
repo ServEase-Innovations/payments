@@ -9,7 +9,12 @@ import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import { activeEngagementStatusSql } from "../../services/providerAvailabilityOverlap.js";
 import { customerHasSchedulableConflict } from "../../services/customerBookingOverlap.js";
-import { applyVacationForEngagement } from "../../services/vacationApply.service.js";
+import {
+  applyVacationForEngagement,
+  cancelVacationForEngagement,
+  notifyVacationApplyResult,
+  notifyVacationCancelResult,
+} from "../../services/vacationApply.service.js";
 import { createHmac } from "crypto";
 import { resolvePricingForEngagement } from "../../services/pricing/engagementPricing.js";
 import { buildResumeCheckoutResponse } from "../../utils/responseRedaction.js";
@@ -1053,6 +1058,8 @@ router.post("/:engagementId/vacation", async (req, res) => {
 
     await client.query("COMMIT");
 
+    await notifyVacationApplyResult(result);
+
     return res.json({
       success: true,
       message: "Vacation applied successfully",
@@ -1070,6 +1077,66 @@ router.post("/:engagementId/vacation", async (req, res) => {
     }
     const code = err.statusCode || 500;
     console.error("V2 createEngagements vacation error:", err);
+    return res.status(code).json({
+      success: false,
+      error: err.message,
+      conflicts: err.conflicts,
+      conflict: err.conflict,
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Cancel vacation for a MONTHLY / SHORT_TERM engagement.
+ * Restores provider_availability, reverses wallet refund, clears vacation columns.
+ *
+ * POST /api/v2/createEngagements/:engagementId/vacation/cancel
+ */
+router.post("/:engagementId/vacation/cancel", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const engagementId = Number(req.params.engagementId);
+    const { customerid, modified_by_id, modified_by_role } = req.body || {};
+
+    if (!Number.isFinite(engagementId) || engagementId < 1) {
+      return res.status(400).json({ success: false, error: "Invalid engagementId" });
+    }
+    if (!customerid) {
+      return res.status(400).json({ success: false, error: "customerid is required" });
+    }
+
+    await client.query("BEGIN");
+
+    const result = await cancelVacationForEngagement(client, {
+      engagementId,
+      customerId: customerid,
+      modifiedById: modified_by_id != null ? modified_by_id : customerid,
+      modifiedByRole: modified_by_role || "CUSTOMER",
+    });
+
+    await client.query("COMMIT");
+
+    await notifyVacationCancelResult(result);
+
+    return res.json({
+      success: true,
+      message: "Vacation cancelled",
+      engagement: result.engagement,
+      refund_reversed: result.refund_reversed,
+      wallet_balance: result.wallet_balance,
+      audit: result.audit,
+    });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
+    const code = err.statusCode || 500;
+    console.error("V2 createEngagements vacation cancel error:", err);
     return res.status(code).json({
       success: false,
       error: err.message,

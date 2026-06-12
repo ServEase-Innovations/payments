@@ -25,6 +25,12 @@ import {
   visitDurationSecondsFromEngagement,
 } from "../services/providerAvailabilityOverlap.js";
 import {
+  applyVacationForEngagement,
+  cancelVacationForEngagement,
+  notifyVacationApplyResult,
+  notifyVacationCancelResult,
+} from "../services/vacationApply.service.js";
+import {
   redactEngagementForCustomer,
   redactEngagementForProvider,
 } from "../utils/responseRedaction.js";
@@ -941,10 +947,15 @@ WHERE sp.serviceproviderid = ANY($1)`,
 
       modsByEng[mod.engagement_id].push(modEntry);
 
-      if (parsed?.modification_type?.startsWith("VACATION")) {
+      if (
+        parsed?.modification_type?.startsWith("VACATION") &&
+        parsed?.modification_type !== "VACATION_CANCELLED" &&
+        parsed?.updated?.vacation_start_date &&
+        parsed?.updated?.vacation_end_date
+      ) {
         vacationsByEng[mod.engagement_id].push({
-          start_date: parsed?.updated?.vacation_start_date,
-          end_date: parsed?.updated?.vacation_end_date,
+          start_date: parsed.updated.vacation_start_date,
+          end_date: parsed.updated.vacation_end_date,
           leave_days: parsed?.updated?.leave_days,
           refund: parsed?.updated?.refund,
           penalty: parsed?.updated?.penalty,
@@ -952,6 +963,14 @@ WHERE sp.serviceproviderid = ANY($1)`,
           applied_on: mod.modified_at,
         });
       }
+    });
+
+    // API order: oldest → newest (last entry = latest modification)
+    Object.keys(modsByEng).forEach((engId) => {
+      modsByEng[engId].reverse();
+    });
+    Object.keys(vacationsByEng).forEach((engId) => {
+      vacationsByEng[engId].reverse();
     });
 
     // ---- Group engagements ----
@@ -1401,169 +1420,74 @@ router.put("/:id", async (req, res) => {
     const prevVacEnd = oldEng.vacation_end_date ? new Date(oldEng.vacation_end_date) : null;
     const prevDates = (prevVacStart && prevVacEnd) ? enumerateDates(prevVacStart, prevVacEnd) : [];
 
-    // CANCEL vacation
+    // CANCEL vacation (delegates to shared v2 service — IST dates, active-engagement conflict rules)
     if (cancel_vacation) {
-      if (prevDates.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "No existing vacation to cancel" }); }
-
-      // compute refund revert (customer to be debited, provider credited)
-      const dailyRate = computeDailyRate(oldEng.base_amount, oldEng.start_date, oldEng.end_date);
-      const refundToRevert = (oldEng.leave_days || prevDates.length) * dailyRate;
-
-      // ensure provider has availability free on those dates (no other engagements)
-      await client.query(`SELECT 1 FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) FOR UPDATE`, [providerBefore, prevDates]);
-      const conflicts = await client.query(
-        `SELECT engagement_id, date FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) AND engagement_id != $3 AND status='BOOKED'`,
-        [providerBefore, prevDates, id]
-      );
-      if (conflicts.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Cannot cancel vacation; provider is booked on some previously-vacation dates", conflicts: conflicts.rows }); }
-
-      // wallet ops: debit customer, credit provider
-      await client.query(`UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`, [refundToRevert, customerWalletId]);
-      await client.query(`INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type) VALUES ($1,$2,$3,'DEBIT')`, [customerWalletId, id, refundToRevert]);
-
-      await client.query(`UPDATE provider_wallets SET balance = balance + $1 WHERE serviceproviderid=$2`, [refundToRevert, providerBefore]);
-      await client.query(`UPDATE payouts SET net_amount = net_amount + $1 WHERE engagement_id=$2`, [refundToRevert, id]);
-
-      // restore provider availability rows (set to BOOKED)
-      await client.query(`UPDATE provider_availability SET status='BOOKED' WHERE engagement_id=$1 AND date = ANY($2)`, [id, prevDates]);
-
-      // update engagement
-      await client.query(`UPDATE engagements SET vacation_start_date=NULL, vacation_end_date=NULL, leave_days=0 WHERE engagement_id=$1`, [id]);
-
-      // audit
-      const audit = {
-        modification_type: "VACATION_CANCELLED",
-        previous: { vacation_start_date: prevVacStart ? prevVacStart.toISOString().slice(0,10) : null, vacation_end_date: prevVacEnd ? prevVacEnd.toISOString().slice(0,10) : null, leave_days: prevDates.length },
-        updated: null,
-        wallet_effect: { customer_debit: refundToRevert, provider_credit: refundToRevert }
-      };
-      await client.query(`INSERT INTO engagement_modifications (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at) VALUES ($1,$2::jsonb,$3,$4,NOW())`, [id, JSON.stringify(audit), modified_by_id || null, modified_by_role || null]);
+      const result = await cancelVacationForEngagement(client, {
+        engagementId: Number(id),
+        customerId,
+        modifiedById: modified_by_id != null ? modified_by_id : customerId,
+        modifiedByRole: modified_by_role || "CUSTOMER",
+      });
 
       await client.query("COMMIT");
-      const updated = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+      await notifyVacationCancelResult(result);
+      const updated = result.engagement;
       updated.start_date = normalizeDateToIST(updated.start_date);
       updated.end_date = normalizeDateToIST(updated.end_date);
       updated.start_time = epochToTimeHM(updated.start_epoch);
       updated.end_time = epochToTimeHM(updated.end_epoch);
-      return res.json({ message: "Vacation cancelled", engagement: updated });
+      return res.json({
+        message: "Vacation cancelled",
+        engagement: updated,
+        refund_reversed: result.refund_reversed,
+        audit: result.audit,
+      });
     }
 
-    // APPLY or MODIFY vacation
-      if (!vacationStartDateResolved || !vacationEndDateResolved) {
-      await client.query("ROLLBACK"); return res.status(400).json({ error: "Both vacation_start_date and vacation_end_date are required" });
+    // APPLY or MODIFY vacation (shared v2 service)
+    if (!vacationStartDateResolved || !vacationEndDateResolved) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Both vacation_start_date and vacation_end_date are required" });
     }
 
-    const vacStart = new Date(vacationStartDateResolved);
-    const vacEnd = new Date(vacationEndDateResolved);
-    if (vacStart > vacEnd) { await client.query("ROLLBACK"); return res.status(400).json({ error: "vacation_start_date must be <= vacation_end_date" }); }
-
-    // ensure vacation within engagement bounds
-    const engStart = new Date(oldEng.start_date);
-    const engEnd = new Date(oldEng.end_date);
-    if (vacStart < engStart || vacEnd > engEnd) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Vacation dates must fall within engagement start/end dates" }); }
-
-    const newDates = enumerateDates(vacStart, vacEnd);
-    const restoredDates = prevDates.filter(d => !newDates.includes(d)); // dates being restored (previously vacation, now active)
-    const freedDates = newDates.filter(d => !prevDates.includes(d)); // dates that become vacation (become free)
-
-    // If restoredDates exist -> check provider availability conflicts & time overlaps
-    if (restoredDates.length > 0) {
-      // compute daily start time (HH:mm) from engagement epochs
-      const checkStartTime = epochToTimeHM(oldEng.start_epoch);
-      const checkEndTime = epochToTimeHM(oldEng.end_epoch);
-      if (!checkStartTime || !checkEndTime) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Missing start/end time for overlap checks" }); }
-
-      // lock candidate rows
-      await client.query(`SELECT 1 FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) FOR UPDATE`, [providerBefore, restoredDates]);
-
-      // check for booked conflicts
-      const availConflicts = await client.query(
-        `SELECT date, engagement_id FROM provider_availability WHERE serviceproviderid=$1 AND date = ANY($2) AND engagement_id != $3 AND status='BOOKED'`,
-        [providerBefore, restoredDates, id]
-      );
-      if (availConflicts.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Provider is already booked on some restored dates", conflicts: availConflicts.rows }); }
-
-      // time overlap check using epoch math per day
-      for (const day of restoredDates) {
-        const dayStartEpoch = toEpochSeconds(day, checkStartTime);
-        const dayEndEpoch = toEpochSeconds(day, checkEndTime);
-        if (!dayStartEpoch || !dayEndEpoch || dayStartEpoch >= dayEndEpoch) { await client.query("ROLLBACK"); return res.status(400).json({ error: `Invalid computed time range for date ${day}` }); }
-
-        const timeConflict = await client.query(
-          `SELECT engagement_id, date FROM provider_availability WHERE serviceproviderid=$1 AND date=$2::date AND engagement_id != $3 AND $4 < slot_end_epoch AND $5 > slot_start_epoch LIMIT 1`,
-          [providerBefore, day, id, dayStartEpoch, dayEndEpoch]
-        );
-        if (timeConflict.rows.length > 0) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Time overlap with other engagements on restored dates", conflict: timeConflict.rows[0] }); }
-      }
-    }
-
-    // compute refund and penalty
-    const dailyRate = computeDailyRate(oldEng.base_amount, oldEng.start_date, oldEng.end_date);
-    const prevLeaveDays = oldEng.leave_days || prevDates.length || 0;
-    const newLeaveDays = newDates.length;
-    const refundAmount = newLeaveDays * dailyRate;
-    let penalty = 0;
-    if (prevLeaveDays > 0) penalty = 400; // business rule confirmed
-
-    // apply penalty (debit customer)
-    if (penalty > 0) {
-      await client.query(`UPDATE customer_wallets SET balance = balance - $1 WHERE wallet_id=$2`, [penalty, customerWalletId]);
-      await client.query(`INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type) VALUES ($1,$2,$3,'DEBIT')`, [customerWalletId, id, penalty]);
-    }
-
-    // credit refund to customer
-    await client.query(`UPDATE customer_wallets SET balance = balance + $1 WHERE wallet_id=$2`, [refundAmount, customerWalletId]);
-    await client.query(`INSERT INTO wallet_transaction (wallet_id, engagement_id, amount, transaction_type) VALUES ($1,$2,$3,'CREDIT')`, [customerWalletId, id, refundAmount]);
-
-    // deduct provider payout & adjust payouts
-    await client.query(`UPDATE provider_wallets SET balance = balance - $1 WHERE serviceproviderid=$2`, [refundAmount, providerBefore]);
-    await client.query(`UPDATE payouts SET net_amount = net_amount - $1 WHERE engagement_id=$2`, [refundAmount, id]);
-
-    // Update provider_availability rows:
-    // restoredDates -> BOOKED (update slot epochs as required), freedDates -> FREE
-    if (restoredDates.length > 0) {
-      // compute representative day epoch times
-      const repStartTime = epochToTimeHM(oldEng.start_epoch);
-      const repEndTime = epochToTimeHM(oldEng.end_epoch);
-      for (const day of restoredDates) {
-        const ds = toEpochSeconds(day, repStartTime);
-        const de = toEpochSeconds(day, repEndTime);
-        await client.query(`UPDATE provider_availability SET status='BOOKED', slot_start_epoch=$1, slot_end_epoch=$2 WHERE engagement_id=$3 AND date=$4::date`, [ds, de, id, day]);
-      }
-    }
-    if (freedDates.length > 0) {
-      for (const day of freedDates) {
-        await client.query(`UPDATE provider_availability SET status='FREE', slot_start_epoch=NULL, slot_end_epoch=NULL WHERE engagement_id=$1 AND date=$2::date`, [id, day]);
-      }
-    }
-
-    // Update engagement row with vacation info
-    await client.query(`UPDATE engagements SET vacation_start_date=$1::date, vacation_end_date=$2::date, leave_days=$3 WHERE engagement_id=$4`, [vacationStartDateResolved, vacationEndDateResolved, newLeaveDays, id]);
-
-    // Audit
-    const auditEntry = {
-      modification_type: prevDates.length === 0 ? "VACATION_ADDED" : "VACATION_MODIFIED",
-      previous: prevDates.length > 0 ? { vacation_start_date: prevVacStart ? prevVacStart.toISOString().slice(0,10) : null, vacation_end_date: prevVacEnd ? prevVacEnd.toISOString().slice(0,10) : null, leave_days: prevDates.length } : null,
-      updated: { vacation_start_date: vacationStartDateResolved, vacation_end_date: vacationEndDateResolved, leave_days: newLeaveDays, refund: refundAmount },
-      difference: { days_added: Math.max(0, newLeaveDays - prevLeaveDays), days_removed: Math.max(0, prevLeaveDays - newLeaveDays), refund_change: refundAmount - (oldEng.refund || 0), penalty },
-      wallet_effect: { customer_credit: refundAmount, customer_debit: penalty, provider_debit: refundAmount, payout_adjustment: -refundAmount },
-      availability_changes: { dates_freed: freedDates, dates_rebooked: restoredDates }
-    };
-
-    await client.query(`INSERT INTO engagement_modifications (engagement_id, modified_fields, modified_by_id, modified_by_role, modified_at) VALUES ($1,$2::jsonb,$3,$4,NOW())`, [id, JSON.stringify(auditEntry), modified_by_id || null, modified_by_role || null]);
+    const result = await applyVacationForEngagement(client, {
+      engagementId: Number(id),
+      customerId,
+      vacationStartDate: vacationStartDateResolved,
+      vacationEndDate: vacationEndDateResolved,
+      modifiedById: modified_by_id != null ? modified_by_id : customerId,
+      modifiedByRole: modified_by_role || "CUSTOMER",
+    });
 
     await client.query("COMMIT");
-    const updatedEng = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+    await notifyVacationApplyResult(result);
+
+    const updatedEng = result.engagement;
     updatedEng.start_date = normalizeDateToIST(updatedEng.start_date);
     updatedEng.end_date = normalizeDateToIST(updatedEng.end_date);
     updatedEng.start_time = epochToTimeHM(updatedEng.start_epoch);
     updatedEng.end_time = epochToTimeHM(updatedEng.end_epoch);
 
-    return res.json({ message: "Vacation applied/modified successfully", engagement: updatedEng, audit: auditEntry });
+    return res.json({
+      message: "Vacation applied/modified successfully",
+      engagement: updatedEng,
+      audit: result.audit,
+      refund_amount: result.refund_amount,
+      penalty: result.penalty,
+      wallet_balance: result.wallet_balance,
+    });
 
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch (e) {}
     console.error("Error updating engagement:", err);
+    const code = err.statusCode || 500;
+    if (code !== 500) {
+      return res.status(code).json({
+        error: err.message,
+        conflicts: err.conflicts,
+        conflict: err.conflict,
+      });
+    }
     return res.status(500).json({ error: "Failed to update engagement", detail: err.message });
   } finally {
     client.release();

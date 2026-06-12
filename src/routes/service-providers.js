@@ -33,10 +33,10 @@ function epochToTime(epoch) {
   return dayjs.unix(Number(epoch)).tz("Asia/Kolkata").format("HH:mm");
 }
 
-// Convert PG date → YYYY-MM-DD
+// Convert PG date → YYYY-MM-DD (IST calendar day; avoids UTC drift on DATE columns)
 function normalizeDate(dateVal) {
   if (!dateVal) return null;
-  return new Date(dateVal).toISOString().slice(0, 10);
+  return dayjs(dateVal).tz("Asia/Kolkata").format("YYYY-MM-DD");
 }
 
 /** Ensure start/end calendar dates are always present for API consumers. */
@@ -261,6 +261,12 @@ router.get("/:providerId/today-bookings", ...providerOwnerRead, async (req, res)
           AND pa.date = t.d
           AND pa.status = 'BOOKED'
           AND pa.engagement_id IS NOT NULL
+          AND NOT (
+            e.vacation_start_date IS NOT NULL
+            AND e.vacation_end_date IS NOT NULL
+            AND pa.date >= e.vacation_start_date::date
+            AND pa.date <= e.vacation_end_date::date
+          )
       ),
       assigned_without_slot AS (
         SELECT
@@ -301,6 +307,12 @@ router.get("/:providerId/today-bookings", ...providerOwnerRead, async (req, res)
           AND e.end_date >= t.d
           AND UPPER(COALESCE(e.engagement_status, '')) NOT IN ('CANCELLED')
           AND UPPER(COALESCE(e.task_status, '')) NOT IN ('CANCELLED')
+          AND NOT (
+            e.vacation_start_date IS NOT NULL
+            AND e.vacation_end_date IS NOT NULL
+            AND t.d >= e.vacation_start_date::date
+            AND t.d <= e.vacation_end_date::date
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM provider_availability pa2
@@ -823,17 +835,20 @@ router.get("/:providerId/calendar", ...providerOwnerRead, async (req, res) => {
   try {
     let query = `
       SELECT 
-        id,
-        serviceproviderid,
-        engagement_id,
-        date,
-        slot_start_epoch,
-        slot_end_epoch,
-        status,
-        created_at,
-        updated_at
-      FROM provider_availability
-      WHERE serviceproviderid = $1
+        pa.id,
+        pa.serviceproviderid,
+        pa.engagement_id,
+        pa.date,
+        pa.slot_start_epoch,
+        pa.slot_end_epoch,
+        pa.status,
+        pa.created_at,
+        pa.updated_at,
+        e.vacation_start_date,
+        e.vacation_end_date
+      FROM provider_availability pa
+      LEFT JOIN engagements e ON e.engagement_id = pa.engagement_id
+      WHERE pa.serviceproviderid = $1
     `;
 
     const params = [providerId];
@@ -860,15 +875,33 @@ router.get("/:providerId/calendar", ...providerOwnerRead, async (req, res) => {
 
     const result = await pool.query(query, params);
 
-    const calendar = result.rows.map((r) => ({
-      ...r,
-      date: normalizeDate(r.date),
-      date_epoch: ymdToIstStartEpoch(normalizeDate(r.date)),
-      start_epoch: r.slot_start_epoch != null ? Number(r.slot_start_epoch) : null,
-      end_epoch: r.slot_end_epoch != null ? Number(r.slot_end_epoch) : null,
-      start_time: epochToTime(r.slot_start_epoch),
-      end_time: epochToTime(r.slot_end_epoch),
-    }));
+    const calendar = result.rows.map((r) => {
+      const dateYmd = normalizeDate(r.date);
+      const vacStart = r.vacation_start_date ? normalizeDate(r.vacation_start_date) : null;
+      const vacEnd = r.vacation_end_date ? normalizeDate(r.vacation_end_date) : null;
+      const onVacation =
+        vacStart &&
+        vacEnd &&
+        dateYmd &&
+        dateYmd >= vacStart &&
+        dateYmd <= vacEnd;
+      let displayStatus = String(r.status || "").toUpperCase();
+      if (onVacation && displayStatus === "BOOKED") {
+        displayStatus = "VACATION";
+      }
+
+      return {
+        ...r,
+        date: dateYmd,
+        date_epoch: ymdToIstStartEpoch(dateYmd),
+        start_epoch: r.slot_start_epoch != null ? Number(r.slot_start_epoch) : null,
+        end_epoch: r.slot_end_epoch != null ? Number(r.slot_end_epoch) : null,
+        start_time: epochToTime(r.slot_start_epoch),
+        end_time: epochToTime(r.slot_end_epoch),
+        status: displayStatus,
+        on_vacation: Boolean(onVacation),
+      };
+    });
 
     return res.json({
       success: true,
