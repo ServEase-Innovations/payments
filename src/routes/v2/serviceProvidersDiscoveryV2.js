@@ -67,6 +67,76 @@ function isDateInEngagementVacation(dateYmd, vacationStart, vacationEnd) {
   return d >= a && d <= b;
 }
 
+function dateRangesOverlapYmd(rangeAStart, rangeAEnd, rangeBStart, rangeBEnd) {
+  const a0 = calendarYmdKolkata(rangeAStart);
+  const a1 = calendarYmdKolkata(rangeAEnd);
+  const b0 = calendarYmdKolkata(rangeBStart);
+  const b1 = calendarYmdKolkata(rangeBEnd);
+  if (!a0 || !a1 || !b0 || !b1) return false;
+  return a0 <= b1 && b0 <= a1;
+}
+
+function buildVacationAvailabilityPayload(row, searchStart, searchEnd) {
+  const vacationStartDate = calendarYmdKolkata(row.vacation_start_date);
+  const vacationEndDate = calendarYmdKolkata(row.vacation_end_date);
+  if (!vacationStartDate || !vacationEndDate) return null;
+  const leaveDays = Number(row.leave_days) || 0;
+  if (leaveDays <= 0) return null;
+  return {
+    status: "ACTIVE",
+    engagementId: row.engagement_id != null ? String(row.engagement_id) : null,
+    leaveDays,
+    vacationStartDate,
+    vacationEndDate,
+    engagementStartDate: calendarYmdKolkata(row.start_date),
+    engagementEndDate: calendarYmdKolkata(row.end_date),
+    overlapsSearchWindow: dateRangesOverlapYmd(
+      vacationStartDate,
+      vacationEndDate,
+      searchStart,
+      searchEnd
+    ),
+  };
+}
+
+async function fetchActiveVacationByProvider(providerIds) {
+  if (!providerIds?.length) return new Map();
+  const res = await pool.query(
+    `
+    SELECT DISTINCT ON (e.serviceproviderid)
+      e.serviceproviderid,
+      e.engagement_id,
+      e.leave_days,
+      e.vacation_start_date,
+      e.vacation_end_date,
+      e.start_date,
+      e.end_date
+    FROM engagements e
+    WHERE e.serviceproviderid = ANY($1::bigint[])
+      AND e.active = true
+      AND COALESCE(e.leave_days, 0) > 0
+      AND e.vacation_start_date IS NOT NULL
+      AND e.vacation_end_date IS NOT NULL
+      AND UPPER(COALESCE(e.engagement_status, '')) NOT IN (
+        'CANCELLED', 'COMPLETED', 'CLOSED', 'EXPIRED'
+      )
+      AND UPPER(COALESCE(e.task_status, 'NOT_STARTED')) NOT IN (
+        'CANCELLED', 'COMPLETED'
+      )
+    ORDER BY
+      e.serviceproviderid,
+      e.end_date DESC NULLS LAST,
+      e.created_at DESC NULLS LAST
+    `,
+    [providerIds]
+  );
+  const map = new Map();
+  for (const row of res.rows) {
+    map.set(String(row.serviceproviderid), row);
+  }
+  return map;
+}
+
 /**
  * Daily busy intervals from this customer's existing engagement with this provider,
  * intersected with the search range. Ensures overlap checks match the booked wall-clock
@@ -457,6 +527,7 @@ router.post("/nearby-monthly", async (req, res) => {
     }
 
     const providerIds = providersRes.rows.map(p => p.serviceproviderid);
+    const activeVacationByProvider = await fetchActiveVacationByProvider(providerIds);
 
     const rolesRes = await pool.query(
       `
@@ -492,6 +563,7 @@ router.post("/nearby-monthly", async (req, res) => {
           e."duration_minutes" AS "durationMinutes",
           e."vacation_start_date" AS "vacationStartDate",
           e."vacation_end_date" AS "vacationEndDate",
+          e."leave_days" AS "leaveDays",
           e."engagement_status" AS "engagementStatus",
           e."assignment_status" AS "assignmentStatus",
           e."task_status" AS "taskStatus",
@@ -529,6 +601,7 @@ router.post("/nearby-monthly", async (req, res) => {
             row.durationMinutes != null ? Number(row.durationMinutes) : null,
           vacationStartDate: row.vacationStartDate,
           vacationEndDate: row.vacationEndDate,
+          leaveDays: row.leaveDays != null ? Number(row.leaveDays) : 0,
           engagementStatus: row.engagementStatus,
           assignmentStatus: row.assignmentStatus,
           taskStatus: row.taskStatus,
@@ -1097,7 +1170,13 @@ router.post("/nearby-monthly", async (req, res) => {
           clearedContractVisitDaysInRange
         },
         previouslyBooked: false,
-        previousBookingDetails: null
+        previousBookingDetails: null,
+        vacationAvailability: (() => {
+          const vacRow = activeVacationByProvider.get(pidKey);
+          return vacRow
+            ? buildVacationAvailabilityPayload(vacRow, startDate, endDate)
+            : null;
+        })(),
       };
 
       if (hasCustomerID) {
@@ -1111,6 +1190,28 @@ router.post("/nearby-monthly", async (req, res) => {
             ...prevForApi
           } = prev;
           providerRow.previousBookingDetails = prevForApi;
+          if (
+            !providerRow.vacationAvailability &&
+            prev.leaveDays > 0 &&
+            prev.vacationStartDate &&
+            prev.vacationEndDate
+          ) {
+            providerRow.vacationAvailability = {
+              status: "ACTIVE",
+              engagementId: prev.engagementId,
+              leaveDays: prev.leaveDays,
+              vacationStartDate: calendarYmdKolkata(prev.vacationStartDate),
+              vacationEndDate: calendarYmdKolkata(prev.vacationEndDate),
+              engagementStartDate: calendarYmdKolkata(prev.startDate),
+              engagementEndDate: calendarYmdKolkata(prev.endDate),
+              overlapsSearchWindow: dateRangesOverlapYmd(
+                prev.vacationStartDate,
+                prev.vacationEndDate,
+                startDate,
+                endDate
+              ),
+            };
+          }
         }
       }
 

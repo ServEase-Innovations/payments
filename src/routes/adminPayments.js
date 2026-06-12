@@ -538,4 +538,266 @@ router.get("/engagements", async (req, res) => {
 
 
 
+/**
+ * GET /api/admin/dashboard
+ * Aggregated metrics, trends, charts, and recent activity for the admin dashboard.
+ */
+/**
+ * GET /api/admin/alert-reads?admin_user_id=
+ * Returns alert keys this admin user has marked read.
+ */
+router.get("/alert-reads", async (req, res) => {
+  try {
+    const adminUserId = String(req.query.admin_user_id || "").trim();
+    if (!adminUserId) {
+      return res.status(400).json({ success: false, error: "admin_user_id is required" });
+    }
+    const { rows } = await pool.query(
+      `SELECT alert_key, read_at
+       FROM admin_alert_reads
+       WHERE admin_user_id = $1
+       ORDER BY read_at DESC
+       LIMIT 500`,
+      [adminUserId]
+    );
+    return res.json({
+      success: true,
+      admin_user_id: adminUserId,
+      readKeys: rows.map((r) => r.alert_key),
+    });
+  } catch (err) {
+    console.error("Admin alert-reads list error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+/**
+ * POST /api/admin/alert-reads
+ * Body: { admin_user_id, alertKeys: string[] }
+ */
+router.post("/alert-reads", async (req, res) => {
+  try {
+    const adminUserId = String(req.body?.admin_user_id || "").trim();
+    const alertKeys = Array.isArray(req.body?.alertKeys)
+      ? req.body.alertKeys.map((k) => String(k).trim()).filter(Boolean)
+      : [];
+    if (!adminUserId) {
+      return res.status(400).json({ success: false, error: "admin_user_id is required" });
+    }
+    if (alertKeys.length === 0) {
+      return res.status(400).json({ success: false, error: "alertKeys is required" });
+    }
+    const unique = [...new Set(alertKeys)].slice(0, 200);
+    await pool.query(
+      `
+      INSERT INTO admin_alert_reads (admin_user_id, alert_key, read_at)
+      SELECT $1, k, NOW()
+      FROM UNNEST($2::text[]) AS k
+      ON CONFLICT (admin_user_id, alert_key)
+      DO UPDATE SET read_at = EXCLUDED.read_at
+      `,
+      [adminUserId, unique]
+    );
+    return res.json({ success: true, saved: unique.length });
+  } catch (err) {
+    console.error("Admin alert-reads save error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+router.get("/dashboard", async (req, res) => {
+  try {
+    const days = Math.min(Math.max(Number.parseInt(String(req.query.days), 10) || 14, 7), 90);
+
+    const [
+      countsRes,
+      bookingsChartRes,
+      revenueChartRes,
+      recentCustomersRes,
+      recentEngagementsRes,
+      paymentSummaryRes,
+    ] = await Promise.all([
+      pool.query(`
+        SELECT
+          (SELECT COUNT(*)::bigint FROM customer) AS customers_total,
+          (SELECT COUNT(*)::bigint FROM customer WHERE isactive = true) AS customers_active,
+          (SELECT COUNT(*)::bigint FROM customer WHERE enrolleddate >= NOW() - INTERVAL '30 days') AS customers_last_30,
+          (SELECT COUNT(*)::bigint FROM customer
+            WHERE enrolleddate >= NOW() - INTERVAL '60 days'
+              AND enrolleddate < NOW() - INTERVAL '30 days') AS customers_prev_30,
+
+          (SELECT COUNT(*)::bigint FROM serviceprovider) AS providers_total,
+          (SELECT COUNT(*)::bigint FROM serviceprovider WHERE isactive = true) AS providers_active,
+          (SELECT COUNT(*)::bigint FROM serviceprovider WHERE enrolleddate >= NOW() - INTERVAL '30 days') AS providers_last_30,
+          (SELECT COUNT(*)::bigint FROM serviceprovider
+            WHERE enrolleddate >= NOW() - INTERVAL '60 days'
+              AND enrolleddate < NOW() - INTERVAL '30 days') AS providers_prev_30,
+
+          (SELECT COUNT(*)::bigint FROM engagements) AS engagements_total,
+          (SELECT COUNT(*)::bigint FROM engagements WHERE active = true) AS engagements_active,
+          (SELECT COUNT(*)::bigint FROM engagements
+            WHERE active = true
+              AND UPPER(COALESCE(assignment_status, 'UNASSIGNED')) = 'UNASSIGNED') AS engagements_unassigned,
+          (SELECT COUNT(*)::bigint FROM engagements WHERE created_at >= NOW() - INTERVAL '30 days') AS engagements_last_30,
+          (SELECT COUNT(*)::bigint FROM engagements
+            WHERE created_at >= NOW() - INTERVAL '60 days'
+              AND created_at < NOW() - INTERVAL '30 days') AS engagements_prev_30
+      `),
+      pool.query(
+        `
+        SELECT
+          to_char(d::date, 'YYYY-MM-DD') AS date,
+          COALESCE(COUNT(e.engagement_id), 0)::int AS count
+        FROM generate_series(
+          (CURRENT_DATE - ($1::int - 1)),
+          CURRENT_DATE,
+          '1 day'::interval
+        ) AS d
+        LEFT JOIN engagements e ON e.created_at::date = d::date
+        GROUP BY d::date
+        ORDER BY d::date
+      `,
+        [days]
+      ),
+      pool.query(
+        `
+        SELECT
+          to_char(d::date, 'YYYY-MM-DD') AS date,
+          COALESCE(
+            SUM(p.total_amount) FILTER (WHERE UPPER(COALESCE(p.status, '')) = 'SUCCESS'),
+            0
+          )::numeric AS amount
+        FROM generate_series(
+          (CURRENT_DATE - ($1::int - 1)),
+          CURRENT_DATE,
+          '1 day'::interval
+        ) AS d
+        LEFT JOIN payments p ON p.created_at::date = d::date
+        GROUP BY d::date
+        ORDER BY d::date
+      `,
+        [days]
+      ),
+      pool.query(`
+        SELECT customerid, firstname, lastname, enrolleddate
+        FROM customer
+        ORDER BY enrolleddate DESC NULLS LAST, customerid DESC
+        LIMIT 6
+      `),
+      pool.query(`
+        SELECT
+          e.engagement_id,
+          e.booking_type,
+          e.service_type,
+          e.assignment_status,
+          e.task_status,
+          e.created_at,
+          c.firstname AS customer_firstname,
+          c.lastname AS customer_lastname
+        FROM engagements e
+        LEFT JOIN customer c ON c.customerid = e.customerid
+        ORDER BY e.created_at DESC NULLS LAST, e.engagement_id DESC
+        LIMIT 6
+      `),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS')::bigint AS success_count,
+          COALESCE(SUM(total_amount) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'), 0) AS total_collected,
+          COALESCE(SUM((platform_fee - gst)) FILTER (WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'), 0) AS net_revenue,
+          COALESCE(
+            SUM(total_amount) FILTER (
+              WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'
+                AND created_at >= NOW() - INTERVAL '30 days'
+            ),
+            0
+          ) AS revenue_last_30,
+          COALESCE(
+            SUM(total_amount) FILTER (
+              WHERE UPPER(COALESCE(status, '')) = 'SUCCESS'
+                AND created_at >= NOW() - INTERVAL '60 days'
+                AND created_at < NOW() - INTERVAL '30 days'
+            ),
+            0
+          ) AS revenue_prev_30
+        FROM payments
+      `),
+    ]);
+
+    const c = countsRes.rows[0] || {};
+    const pay = paymentSummaryRes.rows[0] || {};
+
+    const pctChange = (current, previous) => {
+      const cur = Number(current) || 0;
+      const prev = Number(previous) || 0;
+      if (prev === 0) return cur > 0 ? 100 : 0;
+      return Math.round(((cur - prev) / prev) * 100);
+    };
+
+    return res.json({
+      success: true,
+      generated_at: new Date().toISOString(),
+      period_days: days,
+      counts: {
+        customers: {
+          total: Number(c.customers_total) || 0,
+          active: Number(c.customers_active) || 0,
+          last_30_days: Number(c.customers_last_30) || 0,
+        },
+        providers: {
+          total: Number(c.providers_total) || 0,
+          active: Number(c.providers_active) || 0,
+          last_30_days: Number(c.providers_last_30) || 0,
+        },
+        engagements: {
+          total: Number(c.engagements_total) || 0,
+          active: Number(c.engagements_active) || 0,
+          unassigned: Number(c.engagements_unassigned) || 0,
+          last_30_days: Number(c.engagements_last_30) || 0,
+        },
+        payments: {
+          success_count: Number(pay.success_count) || 0,
+          total_collected: Number(pay.total_collected) || 0,
+          net_revenue: Number(pay.net_revenue) || 0,
+        },
+      },
+      changes: {
+        customers_pct: pctChange(c.customers_last_30, c.customers_prev_30),
+        providers_pct: pctChange(c.providers_last_30, c.providers_prev_30),
+        engagements_pct: pctChange(c.engagements_last_30, c.engagements_prev_30),
+        revenue_pct: pctChange(pay.revenue_last_30, pay.revenue_prev_30),
+      },
+      charts: {
+        bookings_by_day: bookingsChartRes.rows.map((r) => ({
+          date: r.date,
+          count: Number(r.count) || 0,
+        })),
+        revenue_by_day: revenueChartRes.rows.map((r) => ({
+          date: r.date,
+          amount: Number(r.amount) || 0,
+        })),
+      },
+      recent: {
+        customers: recentCustomersRes.rows.map((r) => ({
+          customerid: Number(r.customerid),
+          firstname: r.firstname,
+          lastname: r.lastname,
+          enrolleddate: r.enrolleddate ? new Date(r.enrolleddate).toISOString() : null,
+        })),
+        engagements: recentEngagementsRes.rows.map((r) => ({
+          engagement_id: Number(r.engagement_id),
+          booking_type: r.booking_type,
+          service_type: r.service_type,
+          assignment_status: r.assignment_status,
+          task_status: r.task_status,
+          created_at: r.created_at ? new Date(r.created_at).toISOString() : null,
+          customer_name: [r.customer_firstname, r.customer_lastname].filter(Boolean).join(" ").trim() || null,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error("Admin dashboard error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 export default router;
