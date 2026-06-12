@@ -266,6 +266,8 @@ router.get("/on-demand-availability", async (req, res) => {
       start_epoch,
       end_epoch,
       duration_minutes,
+      provider_id,
+      serviceproviderid,
     } = req.query;
 
     const resolvedLat = latitude ?? lat;
@@ -302,6 +304,12 @@ router.get("/on-demand-availability", async (req, res) => {
     const endEp =
       toFiniteEpoch(end_epoch) ?? startEp + durationMinutes * 60;
 
+    const providerIdRaw = provider_id ?? serviceproviderid;
+    const providerId =
+      providerIdRaw != null && Number.isFinite(Number(providerIdRaw))
+        ? Number(providerIdRaw)
+        : undefined;
+
     const availability = await assertOnDemandProvidersAvailable({
       latitude: resolvedLat,
       longitude: resolvedLng,
@@ -309,6 +317,7 @@ router.get("/on-demand-availability", async (req, res) => {
       visitDateYmd: normalizeYmdInput(start_date) ?? ymdFromEpoch(startEp),
       startEpoch: startEp,
       endEpoch: endEp,
+      providerId,
     });
 
     return res.json({

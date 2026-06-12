@@ -10,7 +10,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 /** YYYY-MM-DD calendar day in Asia/Kolkata (same convention as vacationApply / API date strings). */
-function engagementCalendarYmd(value) {
+export function engagementCalendarYmd(value) {
   if (value == null) return null;
   if (typeof value === "string") {
     const s = value.trim().slice(0, 10);

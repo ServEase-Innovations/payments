@@ -77,6 +77,11 @@ async function queryOnDemandProvidersInArea(params, db = pool) {
   const resolved = resolveVisitParams(params);
   if (!resolved.ok) return resolved;
 
+  const providerId =
+    params.providerId != null && Number.isFinite(Number(params.providerId))
+      ? Number(params.providerId)
+      : null;
+
   const { rows } = await db.query(
     `
     SELECT sp.serviceproviderid, sp.timeslot
@@ -84,6 +89,7 @@ async function queryOnDemandProvidersInArea(params, db = pool) {
     WHERE sp.isactive = true
       AND sp.latitude IS NOT NULL
       AND sp.longitude IS NOT NULL
+      AND ($10::int IS NULL OR sp.serviceproviderid = $10::int)
       AND ${ON_DEMAND_ROLE_MATCH_SQL}
       AND (
         6371 * acos(
@@ -120,10 +126,11 @@ async function queryOnDemandProvidersInArea(params, db = pool) {
       resolved.dayWindowEnd,
       resolved.startEp,
       resolved.slotEnd,
+      providerId,
     ]
   );
 
-  return { ok: true, rows, ...resolved };
+  return { ok: true, rows, ...resolved, providerId };
 }
 
 /**
@@ -187,13 +194,17 @@ export async function assertOnDemandProvidersAvailable(params, db = pool) {
   const strictCount = strict.ok ? strict.count : 0;
 
   if (broadcast.count < 1) {
+    const singleProvider =
+      params.providerId != null && Number.isFinite(Number(params.providerId));
     return {
       available: false,
       count: 0,
       broadcastEligibleCount: 0,
       strictCount,
-      message: ON_DEMAND_NO_PROVIDERS_MESSAGE,
-      code: "NO_PROVIDERS_NEARBY",
+      message: singleProvider
+        ? "This provider is not available for your selected date, time, or location."
+        : ON_DEMAND_NO_PROVIDERS_MESSAGE,
+      code: singleProvider ? "PROVIDER_UNAVAILABLE" : "NO_PROVIDERS_NEARBY",
     };
   }
 

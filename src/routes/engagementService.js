@@ -5,7 +5,10 @@ import { PG_IST_TODAY_DATE } from "../config/istDateSql.js";
 import twilio from "twilio";
 import { createInAppNotification, InAppTypes } from "../services/inAppNotification.service.js";
 import { dismissOverdueRemindersForEngagement } from "../services/overdueStartReminder.service.js";
-import { transitionEngagement } from "../services/engagementLifecycle.js";
+import {
+  engagementCalendarYmd,
+  transitionEngagement,
+} from "../services/engagementLifecycle.js";
 
 function getTwilioClient() {
   const sid = process.env.TWILIO_ACCOUNT_SID;
@@ -362,11 +365,11 @@ router.post("/service-days/:id/complete", async (req, res) => {
     );
 
     const bookingType = String(sd.booking_type || "").toUpperCase();
-    const startYmd = String(sd.start_date ?? "").slice(0, 10);
-    const endYmd = String(sd.end_date ?? sd.start_date ?? "").slice(0, 10);
-    const singleDay = startYmd && endYmd && startYmd === endYmd;
+    const startYmd = engagementCalendarYmd(sd.start_date);
+    const endYmd = engagementCalendarYmd(sd.end_date ?? sd.start_date);
+    const singleDay = Boolean(startYmd && endYmd && startYmd === endYmd);
 
-    const visitYmd = String(sd.service_date ?? "").slice(0, 10);
+    const visitYmd = engagementCalendarYmd(sd.service_date);
 
     if (bookingType === "ON_DEMAND" || singleDay) {
       await transitionEngagement(client, {
