@@ -13,6 +13,10 @@ import {
 import { getSocketServer } from "../utils/socketIoRef.js";
 import { dismissPaymentPendingRemindersForEngagement } from "./paymentPendingReminder.service.js";
 import { deductWalletForPayment } from "./customerWallet.service.js";
+import {
+  completePaidScheduleModification,
+  isScheduleModificationPayment,
+} from "./scheduleModification.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -273,6 +277,17 @@ export async function handlePaymentSuccess({
     }
 
     const payment = paymentRes.rows[0];
+
+    if (isScheduleModificationPayment(payment)) {
+      const result = await completePaidScheduleModification(client, {
+        engagementId,
+        razorpay_order_id,
+        razorpay_payment_id,
+        payment,
+      });
+      await client.query("COMMIT");
+      return result;
+    }
 
     if (payment.status === "SUCCESS") {
       await client.query("COMMIT");

@@ -81,7 +81,7 @@ export async function transitionEngagement(client, {
   } else if (newStatus === "CANCELLED") {
     await client.query(
       `UPDATE engagements
-       SET engagement_status=$1, task_status='CANCELLED'
+       SET engagement_status=$1, task_status='CANCELLED', active=false
        WHERE engagement_id=$2`,
       [newStatus, engagementId]
     );

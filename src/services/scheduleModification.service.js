@@ -163,12 +163,44 @@ async function cleanupAbandonedScheduleModificationAttempts(client, engagementId
   }
 
   await client.query(
-    `UPDATE engagement_modifications
+    `UPDATE engagement_modifications em
      SET modification_type = 'SCHEDULE_MODIFICATION_CANCELLED'
-     WHERE engagement_id = $1
-       AND modification_type = 'SCHEDULE_MODIFICATION_PENDING'`,
+     FROM payments p
+     WHERE em.engagement_id = $1
+       AND em.modification_type = 'SCHEDULE_MODIFICATION_PENDING'
+       AND (em.modified_fields->>'modification_payment_id')::bigint = p.payment_id
+       AND UPPER(COALESCE(p.status, '')) = 'PENDING'
+       AND COALESCE(p.base_amount, 0) = 0
+       AND COALESCE(p.platform_fee, 0) > 0`,
     [engagementId]
   );
+}
+
+export function isScheduleModificationPayment(payment) {
+  return (
+    Number(payment?.base_amount ?? 0) === 0 && Number(payment?.platform_fee ?? 0) > 0
+  );
+}
+
+function parseModifiedFields(modifiedFields) {
+  return typeof modifiedFields === "string" ? JSON.parse(modifiedFields) : modifiedFields;
+}
+
+function scheduleAlreadyMatches(eng, schedulePayload) {
+  if (!schedulePayload || !eng) return false;
+  const expectedStart = normalizeYmdInput(schedulePayload.start_date);
+  const expectedEnd = normalizeYmdInput(schedulePayload.end_date);
+  const currentStart = normalizeYmdInput(eng.start_date);
+  const currentEnd = normalizeYmdInput(eng.end_date);
+  if (expectedStart && currentStart !== expectedStart) return false;
+  if (expectedEnd && currentEnd !== expectedEnd) return false;
+  if (schedulePayload.start_time && epochToTimeHM(eng.start_epoch) !== schedulePayload.start_time) {
+    return false;
+  }
+  if (schedulePayload.end_time && epochToTimeHM(eng.end_epoch) !== schedulePayload.end_time) {
+    return false;
+  }
+  return true;
 }
 
 export async function getModificationFeeQuote(engagementId) {
@@ -474,13 +506,17 @@ export async function applyEngagementScheduleUpdate(client, engagementId, body) 
     updateFields.push(`end_epoch = $${uIdx++}`);
     updateVals.push(newEndEpoch);
   }
-  if (newStartDate && newStartDate !== oldEng.start_date) {
+  const oldStartYmd = normalizeYmdInput(oldEng.start_date);
+  const oldEndYmd = normalizeYmdInput(oldEng.end_date);
+  const newStartYmd = normalizeYmdInput(newStartDate);
+  const newEndYmd = normalizeYmdInput(newEndDate);
+  if (newStartYmd && newStartYmd !== oldStartYmd) {
     updateFields.push(`start_date = $${uIdx++}::date`);
-    updateVals.push(newStartDate);
+    updateVals.push(newStartYmd);
   }
-  if (newEndDate && newEndDate !== oldEng.end_date) {
+  if (newEndYmd && newEndYmd !== oldEndYmd) {
     updateFields.push(`end_date = $${uIdx++}::date`);
-    updateVals.push(newEndDate);
+    updateVals.push(newEndYmd);
   }
   if (newProviderId !== providerBefore) {
     updateFields.push(`serviceproviderid = $${uIdx++}`);
@@ -539,18 +575,94 @@ export async function applyEngagementScheduleUpdate(client, engagementId, body) 
   return updated;
 }
 
-async function findPendingModificationByOrder(client, razorpayOrderId) {
+async function findScheduleModificationByOrder(client, razorpayOrderId) {
   const res = await client.query(
-    `SELECT modification_id, engagement_id, modified_fields
+    `SELECT modification_id, engagement_id, modified_fields, modification_type
      FROM engagement_modifications
-     WHERE modified_fields->>'modification_type' = 'SCHEDULE_MODIFICATION_PENDING'
-       AND modified_fields->>'razorpay_order_id' = $1
+     WHERE modified_fields->>'razorpay_order_id' = $1
+       AND modification_type IN (
+         'SCHEDULE_MODIFICATION_PENDING',
+         'SCHEDULE_MODIFICATION_CANCELLED'
+       )
      ORDER BY modified_at DESC
      LIMIT 1
      FOR UPDATE`,
     [razorpayOrderId]
   );
   return res.rows[0] || null;
+}
+
+/**
+ * Mark a paid modification payment SUCCESS and apply the pending schedule (idempotent).
+ * Used by modify-schedule/verify and Razorpay webhooks.
+ */
+export async function completePaidScheduleModification(
+  client,
+  { engagementId, razorpay_order_id, razorpay_payment_id, payment = null }
+) {
+  const mod = await findScheduleModificationByOrder(client, razorpay_order_id);
+  if (!mod) {
+    const err = new Error("No pending schedule modification for this payment");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (Number(mod.engagement_id) !== Number(engagementId)) {
+    const err = new Error("Engagement mismatch for modification payment");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const fields = parseModifiedFields(mod.modified_fields);
+  if (!payment) {
+    const paymentRes = await client.query(
+      `SELECT * FROM payments WHERE payment_id = $1 FOR UPDATE`,
+      [fields.modification_payment_id]
+    );
+    if (!paymentRes.rows.length) {
+      const err = new Error("Modification payment not found");
+      err.statusCode = 404;
+      throw err;
+    }
+    payment = paymentRes.rows[0];
+  }
+
+  const engRes = await client.query(
+    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+    [engagementId]
+  );
+  const eng = engRes.rows[0];
+  const schedulePayload = fields.schedule || {};
+
+  if (scheduleAlreadyMatches(eng, schedulePayload)) {
+    return { alreadyApplied: true, engagement: eng, payment_id: payment.payment_id };
+  }
+
+  const walletAmount = Number(payment.wallet_amount ?? 0);
+  if (payment.status !== "SUCCESS") {
+    if (walletAmount > 0 && !payment.wallet_deducted) {
+      await deductWalletForPayment(client, {
+        customerId: eng.customerid,
+        engagementId,
+        amount: walletAmount,
+        description: `Modification platform charge (wallet) for booking #${engagementId}`,
+      });
+      await client.query(`UPDATE payments SET wallet_deducted = true WHERE payment_id = $1`, [
+        payment.payment_id,
+      ]);
+    }
+    await client.query(
+      `UPDATE payments SET status='SUCCESS', transaction_id=$1, updated_at=NOW() WHERE payment_id=$2`,
+      [razorpay_payment_id, payment.payment_id]
+    );
+  } else if (razorpay_payment_id && !payment.transaction_id) {
+    await client.query(
+      `UPDATE payments SET transaction_id=$1, updated_at=NOW() WHERE payment_id=$2`,
+      [razorpay_payment_id, payment.payment_id]
+    );
+  }
+
+  const updated = await applyEngagementScheduleUpdate(client, engagementId, schedulePayload);
+  return { success: true, engagement: updated, payment_id: payment.payment_id };
 }
 
 export async function initiateScheduleModification(engagementId, body) {
@@ -771,74 +883,13 @@ export async function verifyScheduleModificationPayment({
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-
-    const pending = await findPendingModificationByOrder(client, razorpay_order_id);
-    if (!pending) {
-      const err = new Error("No pending schedule modification for this payment");
-      err.statusCode = 404;
-      throw err;
-    }
-    if (Number(pending.engagement_id) !== Number(engagementId)) {
-      const err = new Error("Engagement mismatch for modification payment");
-      err.statusCode = 400;
-      throw err;
-    }
-
-    const fields =
-      typeof pending.modified_fields === "string"
-        ? JSON.parse(pending.modified_fields)
-        : pending.modified_fields;
-
-    const paymentRes = await client.query(
-      `SELECT * FROM payments WHERE payment_id = $1 FOR UPDATE`,
-      [fields.modification_payment_id]
-    );
-    if (!paymentRes.rows.length) {
-      const err = new Error("Modification payment not found");
-      err.statusCode = 404;
-      throw err;
-    }
-    const payment = paymentRes.rows[0];
-    if (payment.status === "SUCCESS") {
-      await client.query("COMMIT");
-      const updated = (
-        await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [engagementId])
-      ).rows[0];
-      return { alreadyProcessed: true, engagement: updated };
-    }
-
-    const walletAmount = Number(payment.wallet_amount ?? 0);
-    if (walletAmount > 0 && !payment.wallet_deducted) {
-      const eng = (
-        await client.query(`SELECT customerid FROM engagements WHERE engagement_id=$1`, [
-          engagementId,
-        ])
-      ).rows[0];
-      await deductWalletForPayment(client, {
-        customerId: eng.customerid,
-        engagementId,
-        amount: walletAmount,
-        description: `Modification platform charge (wallet) for booking #${engagementId}`,
-      });
-      await client.query(`UPDATE payments SET wallet_deducted = true WHERE payment_id = $1`, [
-        payment.payment_id,
-      ]);
-    }
-
-    await client.query(
-      `UPDATE payments SET status='SUCCESS', transaction_id=$1, updated_at=NOW() WHERE payment_id=$2`,
-      [razorpay_payment_id, payment.payment_id]
-    );
-
-    const schedulePayload = fields.schedule || {};
-    const updated = await applyEngagementScheduleUpdate(
-      client,
+    const result = await completePaidScheduleModification(client, {
       engagementId,
-      schedulePayload
-    );
-
+      razorpay_order_id,
+      razorpay_payment_id,
+    });
     await client.query("COMMIT");
-    return { success: true, engagement: updated, payment_id: payment.payment_id };
+    return result;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
