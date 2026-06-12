@@ -1,4 +1,4 @@
-function roundInr(value) {
+export function roundInr(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
@@ -128,6 +128,57 @@ export async function ensureCustomerWalletForUpdate(client, customerId) {
 /**
  * Credit customer wallet inside an open transaction (wallet top-up, refunds, etc.).
  */
+/**
+ * Credit wallet for a booking cancellation/refund. Idempotent per engagement + description.
+ */
+export async function creditWalletForBookingRefund(
+  client,
+  { customerId, engagementId, amount, description }
+) {
+  const credit = roundInr(amount);
+  if (!Number.isFinite(credit) || credit <= 0) return null;
+
+  const label =
+    description ||
+    (engagementId != null
+      ? `Refund for cancelled booking #${engagementId}`
+      : "Booking refund");
+
+  const existing = await client.query(
+    `SELECT balance_after
+     FROM wallet_transaction
+     WHERE engagement_id = $1
+       AND transaction_type = 'CREDIT'
+       AND description = $2
+     ORDER BY transaction_id DESC
+     LIMIT 1`,
+    [engagementId, label]
+  );
+  if (existing.rows.length) {
+    return roundInr(existing.rows[0].balance_after);
+  }
+
+  const wallet = await ensureCustomerWalletForUpdate(client, customerId);
+  const balanceAfter = roundInr(wallet.balance + credit);
+
+  await client.query(
+    `UPDATE customer_wallets
+     SET balance = $1,
+         updated_at = NOW()
+     WHERE wallet_id = $2`,
+    [balanceAfter, wallet.wallet_id]
+  );
+
+  await client.query(
+    `INSERT INTO wallet_transaction
+       (wallet_id, customerid, engagement_id, amount, transaction_type, description, balance_after)
+     VALUES ($1, $2, $3, $4, 'CREDIT', $5, $6)`,
+    [wallet.wallet_id, customerId, engagementId, credit, label, balanceAfter]
+  );
+
+  return balanceAfter;
+}
+
 export async function creditWalletForTopUp(
   client,
   { customerId, amount, description, topupId }

@@ -3,7 +3,10 @@ import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
 import { transitionEngagement } from "./engagementLifecycle.js";
-import { refundRazorpayPaymentFull } from "./razorpayRefund.service.js";
+import {
+  buildAutoCancelRefundNotificationBody,
+  refundPaidBookingToCustomer,
+} from "./bookingPaymentRefund.service.js";
 import {
   createInAppNotification,
   dismissNewBookingInAppByEngagementId,
@@ -27,10 +30,6 @@ export {
 } from "./onDemandUnassignedCancelPolicy.js";
 
 const CUSTOMER_CANCEL_TITLE = "No provider was available";
-const CUSTOMER_CANCEL_BODY =
-  "We could not assign a service professional before your scheduled start time. " +
-  "Your booking has been cancelled and a full refund is on its way to your original payment method " +
-  "(typically within 5–7 business days).";
 
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
@@ -138,6 +137,7 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
   let refundResult = null;
   let engagement = null;
   let payment = null;
+  let customerCancelBody = "";
 
   try {
     await client.query("BEGIN");
@@ -169,19 +169,20 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
       return { ok: false, reason: "no_longer_eligible" };
     }
 
-    const razorpayPaymentId = payment.transaction_id;
-    if (!razorpayPaymentId) {
-      await client.query("ROLLBACK");
-      return { ok: false, reason: "missing_razorpay_payment_id" };
-    }
-
-    refundResult = await refundRazorpayPaymentFull({
-      razorpayPaymentId,
-      amountInr: payment.total_amount,
-      notes: {
-        engagement_id: String(engagementId),
+    const refundDescription = `Refund for cancelled booking #${engagementId}`;
+    refundResult = await refundPaidBookingToCustomer(client, {
+      payment,
+      customerId: Number(engagement.customerid),
+      engagementId,
+      refundDescription,
+      razorpayNotes: {
         reason: ON_DEMAND_AUTO_CANCEL_REASON,
       },
+    });
+
+    customerCancelBody = buildAutoCancelRefundNotificationBody({
+      walletRefund: refundResult.walletRefund,
+      razorpayRefund: refundResult.razorpayRefund,
     });
 
     await client.query(
@@ -203,8 +204,11 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
       metadata: {
         cancellation_reason: ON_DEMAND_AUTO_CANCEL_REASON,
         refund_amount_inr: Number(payment.total_amount),
-        razorpay_payment_id: razorpayPaymentId,
-        razorpay_refund_id: refundResult?.id ?? null,
+        wallet_refund_amount_inr: refundResult.walletRefund,
+        razorpay_refund_amount_inr: refundResult.razorpayRefund,
+        razorpay_payment_id: refundResult.razorpayPaymentId,
+        razorpay_refund_id: refundResult.razorpayRefundId,
+        wallet_balance_after: refundResult.walletBalanceAfter,
         auto_cancelled: true,
       },
     });
@@ -234,19 +238,27 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
     payment?.total_amount != null
       ? Number(payment.total_amount)
       : Number(row.total_amount);
+  const walletRefundInr = Number(refundResult?.walletRefund ?? 0);
+  const razorpayRefundInr = Number(refundResult?.razorpayRefund ?? 0);
   const notificationMetadata =
     engagement != null
       ? buildBookingNotificationMetadata(engagement, {
           total_amount: refundAmountInr,
           refund_amount_inr: refundAmountInr,
+          wallet_refund_amount_inr: walletRefundInr,
+          razorpay_refund_amount_inr: razorpayRefundInr,
           cancellation_reason: ON_DEMAND_AUTO_CANCEL_REASON,
-          razorpay_refund_id: refundResult?.id ?? null,
+          razorpay_refund_id: refundResult?.razorpayRefundId ?? null,
+          wallet_balance_after: refundResult?.walletBalanceAfter ?? null,
           auto_cancelled: true,
         })
       : {
           cancellation_reason: ON_DEMAND_AUTO_CANCEL_REASON,
           refund_amount_inr: refundAmountInr,
-          razorpay_refund_id: refundResult?.id ?? null,
+          wallet_refund_amount_inr: walletRefundInr,
+          razorpay_refund_amount_inr: razorpayRefundInr,
+          razorpay_refund_id: refundResult?.razorpayRefundId ?? null,
+          wallet_balance_after: refundResult?.walletBalanceAfter ?? null,
           auto_cancelled: true,
         };
 
@@ -254,12 +266,16 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
     notificationMetadata.service_type,
     notificationMetadata.start_time_label,
     notificationMetadata.address,
-    Number.isFinite(refundAmountInr) ? `Refund ₹${refundAmountInr}` : null,
+    walletRefundInr > 0 ? `Wallet credit ₹${walletRefundInr}` : null,
+    razorpayRefundInr > 0 ? `Card refund ₹${razorpayRefundInr}` : null,
+    walletRefundInr <= 0 && razorpayRefundInr <= 0 && Number.isFinite(refundAmountInr)
+      ? `Refund ₹${refundAmountInr}`
+      : null,
   ].filter(Boolean);
   const pushBody =
     bookingSummaryParts.length > 0
-      ? `${CUSTOMER_CANCEL_BODY}\n\n${bookingSummaryParts.join(" · ")}`
-      : CUSTOMER_CANCEL_BODY;
+      ? `${customerCancelBody}\n\n${bookingSummaryParts.join(" · ")}`
+      : customerCancelBody;
 
   try {
     await createInAppNotification({
@@ -268,7 +284,7 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
       recipientId: customerId,
       type: InAppTypes.BOOKING_AUTO_CANCELLED_NO_PROVIDER,
       title: CUSTOMER_CANCEL_TITLE,
-      body: CUSTOMER_CANCEL_BODY,
+      body: customerCancelBody,
       engagementId,
       metadata: notificationMetadata,
     });
@@ -282,6 +298,8 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
       booking_type: "ON_DEMAND",
       cancellation_reason: ON_DEMAND_AUTO_CANCEL_REASON,
       refund_amount: refundAmountInr,
+      wallet_refund_amount: walletRefundInr,
+      razorpay_refund_amount: razorpayRefundInr,
       refunded: true,
       ...notificationMetadata,
     });
@@ -292,7 +310,9 @@ export async function cancelUnassignedOnDemandBooking(row, { io = null } = {}) {
   return {
     ok: true,
     engagementId,
-    refundId: refundResult?.id ?? null,
+    refundId: refundResult?.razorpayRefundId ?? null,
+    walletRefund: walletRefundInr,
+    razorpayRefund: razorpayRefundInr,
   };
 }
 
