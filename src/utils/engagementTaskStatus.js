@@ -73,8 +73,12 @@ export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
 
   // Today's visit state overrides calendar bucket (e.g. provider started before slot time)
   if (dayStatus === "IN_PROGRESS" || dayStatus === "STARTED") {
-    work_summary.phase = WORK_PHASE.ACTIVE;
-    work_summary.label = "Visit in progress";
+    work_summary.phase =
+      bucket === "past" ? WORK_PHASE.PAST : WORK_PHASE.ACTIVE;
+    work_summary.label =
+      bucket === "past"
+        ? "Service window ended — visit not marked complete"
+        : "Visit in progress";
     return { task_status: "IN_PROGRESS", work_summary };
   }
   if (
@@ -99,8 +103,34 @@ export function deriveTaskStatusForCustomer(e, bucket, todayServiceRow) {
     // Fall through to bucket rules unless same-day visit is the only activity
   }
 
-  // --- PAST: booking over → treat work as done for this engagement
+  // --- PAST: calendar window ended
   if (bucket === "past") {
+    if (life === "COMPLETED" || storedTask === "COMPLETED") {
+      work_summary.label = "Service completed";
+      return { task_status: "COMPLETED", work_summary };
+    }
+
+    if (dayStatus === "COMPLETED" || dayStatus === "DONE") {
+      work_summary.label = "Service completed";
+      return { task_status: "COMPLETED", work_summary };
+    }
+
+    // One-off visits: do not treat a past time slot as a completed service.
+    if (isOnDemandEngagement(e) || isSingleDayEngagement(e)) {
+      if (
+        dayStatus === "IN_PROGRESS" ||
+        dayStatus === "STARTED" ||
+        life === "IN_PROGRESS" ||
+        storedTask === "IN_PROGRESS"
+      ) {
+        work_summary.label = "Service window ended — visit not marked complete";
+        return { task_status: "IN_PROGRESS", work_summary };
+      }
+
+      work_summary.label = "Service window ended — visit not started";
+      return { task_status: "NOT_STARTED", work_summary };
+    }
+
     work_summary.label = "Service period ended";
     if (life === "CANCELLED" || (e.assignment_status || "").toUpperCase() === "CANCELLED") {
       work_summary.label = "Service period ended (cancelled or not completed)";

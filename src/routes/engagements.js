@@ -779,6 +779,32 @@ router.get("/:customerId/engagements", ...customerOwnerRead, async (req, res) =>
       todayServiceByEng[sd.engagement_id] = sd;
     });
 
+    // ON_DEMAND past rows need the visit service_day (start_date), not only IST today.
+    const onDemandVisitRes = await pool.query(
+      `
+      SELECT
+        sd.service_day_id,
+        sd.engagement_id,
+        sd.status,
+        sd.started_at,
+        sd.completed_at
+      FROM service_days sd
+      JOIN engagements e ON e.engagement_id = sd.engagement_id
+      WHERE sd.engagement_id = ANY($1)
+        AND UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
+        AND sd.service_date = COALESCE(
+          e.start_date,
+          (to_timestamp(NULLIF(e.start_epoch, 0)) AT TIME ZONE 'Asia/Kolkata')::date
+        )
+      `,
+      [engagementIds]
+    );
+
+    const onDemandVisitByEng = {};
+    onDemandVisitRes.rows.forEach((sd) => {
+      onDemandVisitByEng[sd.engagement_id] = sd;
+    });
+
     // ---- Fetch active OTPs ----
     const serviceDayIds = todayServiceRes.rows.map(s => s.service_day_id);
     const otpByServiceDay = {};
@@ -1053,7 +1079,13 @@ WHERE sp.serviceproviderid = ANY($1)`,
         }
       }
 
-      const { task_status, work_summary } = deriveTaskStatusForCustomer(e, bucket, todayService);
+      const visitServiceRow =
+        todayService || onDemandVisitByEng[e.engagement_id] || null;
+      const { task_status, work_summary } = deriveTaskStatusForCustomer(
+        e,
+        bucket,
+        visitServiceRow
+      );
       const { task_status: taskStatusStored, ...engCore } = e;
 
       const startEpoch = Number(e.start_epoch);
