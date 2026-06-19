@@ -713,7 +713,7 @@ router.post("/nearby-monthly", async (req, res) => {
       INNER JOIN engagements e ON e.engagement_id = pa.engagement_id
       WHERE
         pa.serviceproviderid = ANY($1)
-        AND pa.status = 'BOOKED'
+        AND pa.status IN ('BOOKED', 'VACATION_PRIORITY')
         AND pa.date BETWEEN $2::date AND $3::date
         AND pa.slot_start_epoch IS NOT NULL
         AND pa.slot_end_epoch IS NOT NULL
@@ -813,9 +813,6 @@ router.post("/nearby-monthly", async (req, res) => {
     for (const k of paFreeBySpAndCalendarDate) {
       spDayClearedForVisit.add(k);
     }
-    for (const k of engagementVacationBySpAndDate) {
-      spDayClearedForVisit.add(k);
-    }
 
     /* Synthetic MONTHLY/SHORT uses engagementsRes + PA (already loaded) */
 
@@ -892,16 +889,6 @@ router.post("/nearby-monthly", async (req, res) => {
           engIdStr &&
           paFreeEngagementDay.has(`${spid}:${engIdStr}:${dateStr}`);
         if (isPaFreeThisDay) {
-          dayCursor = dayCursor.add(1, "day");
-          continue;
-        }
-        if (
-          isDateInEngagementVacation(
-            dateStr,
-            e.vacation_start_date,
-            e.vacation_end_date
-          )
-        ) {
           dayCursor = dayCursor.add(1, "day");
           continue;
         }

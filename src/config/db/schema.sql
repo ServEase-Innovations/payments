@@ -273,6 +273,7 @@ CREATE TABLE IF NOT EXISTS public.engagements
     vacation_start_date date,
     vacation_end_date date,
     leave_days integer DEFAULT 0,
+    vacation_priority_provider_id bigint,
     start_epoch bigint,
     end_epoch bigint,
     CONSTRAINT engagements_pkey PRIMARY KEY (engagement_id)

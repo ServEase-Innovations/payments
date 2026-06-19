@@ -7,6 +7,18 @@ dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+export const PA_STATUS_BOOKED = "BOOKED";
+export const PA_STATUS_FREE = "FREE";
+export const PA_STATUS_UNAVAILABLE = "UNAVAILABLE";
+/** Customer vacation: SP stays reserved but is top priority for on-demand in this window. */
+export const PA_STATUS_VACATION_PRIORITY = "VACATION_PRIORITY";
+
+/** Statuses that block another monthly/short-term assignment on the same slot. */
+export const MONTHLY_BLOCKING_PA_STATUSES = [
+  PA_STATUS_BOOKED,
+  PA_STATUS_VACATION_PRIORITY,
+];
+
 export const MAX_SERVICE_DURATION_MINUTES = 24 * 60;
 
 /** Engagements in these states must not block provider availability. */
@@ -205,7 +217,7 @@ export async function findProviderBookedConflict(
 
 /**
  * Remove or free provider_availability rows that must not block scheduling.
- * Cleans terminal engagements, dates outside contract window, and vacation days still marked BOOKED.
+ * Cleans terminal engagements and dates outside contract window.
  */
 export async function releaseNonBlockingProviderAvailabilityOnDates(
   client,
@@ -242,22 +254,6 @@ export async function releaseNonBlockingProviderAvailabilityOnDates(
          pa.date < e.start_date::date
          OR pa.date > e.end_date::date
        )`,
-    [providerId, dates]
-  );
-
-  await client.query(
-    `UPDATE provider_availability pa
-     SET status = 'FREE', slot_start_epoch = NULL, slot_end_epoch = NULL, updated_at = NOW()
-     FROM engagements e
-     WHERE pa.engagement_id = e.engagement_id
-       AND pa.serviceproviderid = $1
-       AND pa.date = ANY($2::date[])
-       AND pa.status = 'BOOKED'
-       AND ${activeEngagementStatusSql("e")}
-       AND e.vacation_start_date IS NOT NULL
-       AND e.vacation_end_date IS NOT NULL
-       AND pa.date >= e.vacation_start_date::date
-       AND pa.date <= e.vacation_end_date::date`,
     [providerId, dates]
   );
 }

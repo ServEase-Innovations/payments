@@ -886,6 +886,9 @@ router.get("/:providerId/calendar", ...providerOwnerRead, async (req, res) => {
         dateYmd >= vacStart &&
         dateYmd <= vacEnd;
       let displayStatus = String(r.status || "").toUpperCase();
+      if (displayStatus === "VACATION_PRIORITY") {
+        displayStatus = "VACATION";
+      }
       if (onVacation && displayStatus === "BOOKED") {
         displayStatus = "VACATION";
       }

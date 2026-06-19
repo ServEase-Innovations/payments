@@ -21,6 +21,105 @@ export const ON_DEMAND_NOTIFY_RADIUS_M = 12_000;
 export const ON_DEMAND_NOTIFY_FALLBACK_RADIUS_M = 30_000;
 
 /**
+ * Providers on customer vacation (VACATION_PRIORITY) — top tier for on-demand broadcast.
+ */
+export async function fetchVacationPriorityOnDemandProviders(
+  {
+    latitude,
+    longitude,
+    serviceType,
+    visitDateYmd,
+    startEpoch,
+    endEpoch,
+    radiusKm = 30,
+  },
+  db = pool
+) {
+  const coords = normalizeBookingCoordinates(latitude, longitude);
+  if (!coords) return [];
+
+  const role = serviceTypeToRole(serviceType);
+  const startEp = Number(startEpoch);
+  const endEp = Number(endEpoch);
+  if (!Number.isFinite(startEp) || startEp <= 0) return [];
+
+  const slotEnd = Number.isFinite(endEp) && endEp > startEp ? endEp : startEp + 3600;
+  const visitDate =
+    visitDateYmd || dayjs.unix(startEp).tz("Asia/Kolkata").format("YYYY-MM-DD");
+  const dayWindowStart = dayjs
+    .tz(visitDate, "YYYY-MM-DD", "Asia/Kolkata")
+    .startOf("day")
+    .unix();
+  const dayWindowEnd = dayWindowStart + 86400;
+
+  const { rows } = await db.query(
+    `
+    SELECT DISTINCT
+      sp.serviceproviderid,
+      sp.latitude,
+      sp.longitude,
+      e.engagement_id AS vacation_engagement_id
+    FROM engagements e
+    INNER JOIN serviceprovider sp ON sp.serviceproviderid = COALESCE(
+      e.vacation_priority_provider_id,
+      e.serviceproviderid
+    )
+    INNER JOIN provider_availability pa
+      ON pa.engagement_id = e.engagement_id
+     AND pa.serviceproviderid = sp.serviceproviderid
+    WHERE sp.isactive = true
+      AND sp.latitude IS NOT NULL
+      AND sp.longitude IS NOT NULL
+      AND e.vacation_start_date IS NOT NULL
+      AND e.vacation_end_date IS NOT NULL
+      AND $5::date BETWEEN e.vacation_start_date AND e.vacation_end_date
+      AND pa.status = 'VACATION_PRIORITY'
+      AND pa.date = $5::date
+      AND ${activeEngagementStatusSql("e")}
+      AND UPPER(COALESCE(e.booking_type, '')) IN ('MONTHLY', 'SHORT_TERM')
+      AND ${ON_DEMAND_ROLE_MATCH_SQL}
+      AND (
+        6371 * acos(
+          LEAST(1.0, GREATEST(-1.0,
+            cos(radians($1)) * cos(radians(sp.latitude)) *
+            cos(radians(sp.longitude) - radians($2)) +
+            sin(radians($1)) * sin(radians(sp.latitude))
+          ))
+        )
+      ) <= $4
+      AND NOT EXISTS (
+        SELECT 1
+        FROM provider_availability pa2
+        INNER JOIN engagements e2 ON e2.engagement_id = pa2.engagement_id
+        WHERE pa2.serviceproviderid = sp.serviceproviderid
+          AND pa2.status = 'BOOKED'
+          AND pa2.date = $5::date
+          AND pa2.slot_start_epoch IS NOT NULL
+          AND pa2.slot_end_epoch IS NOT NULL
+          AND ${activeEngagementStatusSql("e2")}
+          AND ${completedServiceDayConflictExclusionSql("pa2", "e2")}
+          AND GREATEST(pa2.slot_start_epoch, $6::bigint) < LEAST(pa2.slot_end_epoch, $7::bigint)
+          AND $8::bigint < LEAST(pa2.slot_end_epoch, $7::bigint)
+          AND $9::bigint > GREATEST(pa2.slot_start_epoch, $6::bigint)
+      )
+    `,
+    [
+      coords.lat,
+      coords.lng,
+      role,
+      Number(radiusKm),
+      visitDate,
+      dayWindowStart,
+      dayWindowEnd,
+      startEp,
+      slotEnd,
+    ]
+  );
+
+  return rows;
+}
+
+/**
  * Providers eligible for post-payment broadcast: matching role, within radius,
  * no overlapping BOOKED slot — schedule/timeslot is not required.
  */
@@ -118,7 +217,7 @@ export async function broadcastOnDemandToProviders({
   const durationMin = Number(engagement.duration_minutes) || 60;
   const endEp = Number.isFinite(startEp) ? startEp + durationMin * 60 : null;
 
-  const providers = await fetchBroadcastEligibleProviders({
+  const broadcastParams = {
     latitude: engagement.latitude,
     longitude: engagement.longitude,
     serviceType: engagement.service_type,
@@ -126,20 +225,37 @@ export async function broadcastOnDemandToProviders({
     startEpoch: startEp,
     endEpoch: endEp,
     radiusKm: fallbackRadiusM / 1000,
-  });
+  };
+
+  const vacationPriority = await fetchVacationPriorityOnDemandProviders(broadcastParams);
+  const general = await fetchBroadcastEligibleProviders(broadcastParams);
 
   const customerPoint = {
     latitude: Number(engagement.latitude),
     longitude: Number(engagement.longitude),
   };
 
-  const distances = providers.map((p) => ({
+  const vacationDistances = vacationPriority.map((p) => ({
     row: p,
     distance: geolib.getDistance(customerPoint, {
       latitude: Number(p.latitude),
       longitude: Number(p.longitude),
     }),
+    vacationPriority: true,
   }));
+
+  const generalDistances = general
+    .filter((p) => !vacationPriority.some((v) => Number(v.serviceproviderid) === Number(p.serviceproviderid)))
+    .map((p) => ({
+      row: p,
+      distance: geolib.getDistance(customerPoint, {
+        latitude: Number(p.latitude),
+        longitude: Number(p.longitude),
+      }),
+      vacationPriority: false,
+    }));
+
+  const distances = [...vacationDistances, ...generalDistances];
 
   let notified = 0;
   const notifiedIds = new Set();

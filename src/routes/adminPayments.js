@@ -1,6 +1,10 @@
 import express from "express";
 import pool from "../config/db.js";
 import { requireAdminApiAuth } from "../middleware/adminApiAuth.js";
+import {
+  listActiveVacationPriorityEngagements,
+  listPendingOnDemandForVacationWindow,
+} from "../services/vacationPriority.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -537,6 +541,38 @@ router.get("/engagements", async (req, res) => {
 
 
 
+
+router.get("/vacation-providers", async (req, res) => {
+  try {
+    const { as_of, include_pending_on_demand } = req.query;
+    const vacations = await listActiveVacationPriorityEngagements(pool, {
+      asOfDate: as_of || undefined,
+    });
+
+    const withPending =
+      include_pending_on_demand === "true" || include_pending_on_demand === true
+        ? await Promise.all(
+            vacations.map(async (v) => ({
+              ...v,
+              pending_on_demand: await listPendingOnDemandForVacationWindow(pool, {
+                vacationStart: v.vacation_start_date,
+                vacationEnd: v.vacation_end_date,
+                serviceType: v.service_type,
+              }),
+            }))
+          )
+        : vacations;
+
+    return res.json({
+      success: true,
+      count: withPending.length,
+      vacations: withPending,
+    });
+  } catch (err) {
+    console.error("Admin vacation-providers error:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
 
 /**
  * GET /api/admin/dashboard

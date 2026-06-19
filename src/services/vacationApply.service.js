@@ -278,7 +278,36 @@ async function chargeVacationModificationPenalty(
   return penBal.rows[0].balance;
 }
 
-/** Free every PA row for this engagement across the vacation window (inclusive). */
+/** Mark PA rows as vacation-priority (SP reserved, eligible for on-demand) instead of FREE. */
+async function markVacationPriorityAvailabilityRange(
+  client,
+  { serviceProviderId, engagementId, startYmd, endYmd, startEpoch, endEpoch }
+) {
+  const repStartTime = epochToTimeHM(startEpoch);
+  const repEndTime = epochToTimeHM(endEpoch);
+  if (!repStartTime || !repEndTime) {
+    const err = new Error("Missing start/end time to mark vacation-priority availability");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const dates = enumerateDates(startYmd, endYmd);
+  for (const day of dates) {
+    const ds = toEpochSeconds(day, repStartTime);
+    const de = toEpochSeconds(day, repEndTime);
+    await setEngagementDayAvailability(client, {
+      serviceProviderId,
+      engagementId,
+      dayYmd: day,
+      status: "VACATION_PRIORITY",
+      slotStartEpoch: ds,
+      slotEndEpoch: de,
+    });
+  }
+  return dates;
+}
+
+/** @deprecated Use markVacationPriorityAvailabilityRange — kept for reference in audits. */
 async function freeEngagementAvailabilityRange(client, engagementId, startYmd, endYmd) {
   await client.query(
     `UPDATE provider_availability
@@ -481,11 +510,23 @@ export async function applyVacationForEngagement(client, {
     walletBalance = bal.rows[0]?.balance ?? 0;
   }
 
-  await freeEngagementAvailabilityRange(client, engagementId, vacStartYmd, vacEndYmd);
+  await markVacationPriorityAvailabilityRange(client, {
+    serviceProviderId: providerBefore,
+    engagementId,
+    startYmd: vacStartYmd,
+    endYmd: vacEndYmd,
+    startEpoch: oldEng.start_epoch,
+    endEpoch: oldEng.end_epoch,
+  });
 
   await client.query(
-    `UPDATE engagements SET vacation_start_date=$1::date, vacation_end_date=$2::date, leave_days=$3 WHERE engagement_id=$4`,
-    [vacationStartDate, vacationEndDate, newLeaveDays, engagementId]
+    `UPDATE engagements
+     SET vacation_start_date=$1::date,
+         vacation_end_date=$2::date,
+         leave_days=$3,
+         vacation_priority_provider_id=$4
+     WHERE engagement_id=$5`,
+    [vacationStartDate, vacationEndDate, newLeaveDays, providerBefore, engagementId]
   );
 
   const auditEntry = {
@@ -523,7 +564,7 @@ export async function applyVacationForEngagement(client, {
     },
     availability_changes: {
       previous_vacation_restored: isReplace ? prevDates : [],
-      new_vacation_freed: newDates,
+      new_vacation_priority: newDates,
     },
   };
 
@@ -604,9 +645,14 @@ export async function cancelVacationForEngagement(client, {
   const customerWalletId = await getCustomerWalletId(client, customerId);
   await ensureProviderWallet(client, providerBefore);
 
+  const holdProviderId =
+    oldEng.vacation_priority_provider_id != null
+      ? Number(oldEng.vacation_priority_provider_id)
+      : Number(providerBefore);
+
   const conflict = await findVacationRestoreConflict(
     client,
-    providerBefore,
+    holdProviderId,
     oldEng,
     prevDates,
     engagementId
@@ -631,14 +677,22 @@ export async function cancelVacationForEngagement(client, {
       customerWalletId,
       customerId,
       engagementId,
-      providerId: providerBefore,
+      providerId: holdProviderId,
       refundAmount: refundToRevert,
       description: "Vacation cancellation refund reversal",
     });
   }
 
+  if (Number(oldEng.serviceproviderid) !== holdProviderId) {
+    await client.query(
+      `UPDATE engagements SET serviceproviderid=$1 WHERE engagement_id=$2`,
+      [holdProviderId, engagementId]
+    );
+    oldEng.serviceproviderid = holdProviderId;
+  }
+
   await restoreEngagementAvailabilityRange(client, {
-    serviceProviderId: providerBefore,
+    serviceProviderId: holdProviderId,
     engagementId,
     startYmd: prevVacStartYmd,
     endYmd: prevVacEndYmd,
@@ -647,7 +701,12 @@ export async function cancelVacationForEngagement(client, {
   });
 
   await client.query(
-    `UPDATE engagements SET vacation_start_date=NULL, vacation_end_date=NULL, leave_days=0 WHERE engagement_id=$1`,
+    `UPDATE engagements
+     SET vacation_start_date=NULL,
+         vacation_end_date=NULL,
+         leave_days=0,
+         vacation_priority_provider_id=NULL
+     WHERE engagement_id=$1`,
     [engagementId]
   );
 
@@ -672,6 +731,7 @@ export async function cancelVacationForEngagement(client, {
       payout_adjustment: refundToRevert,
     },
     availability_changes: { dates_rebooked: prevDates },
+    provider_restored: holdProviderId,
   };
 
   await client.query(
@@ -692,6 +752,7 @@ export async function cancelVacationForEngagement(client, {
     audit: auditEntry,
     refund_reversed: refundToRevert,
     wallet_balance: balRes.rows[0]?.balance ?? 0,
+    restored_provider_id: holdProviderId,
   };
 
   return result;
