@@ -20,6 +20,14 @@ import {
   loadCancellationPolicy,
 } from "../../services/cancellationPolicy.js";
 import { redactEngagementForProvider } from "../../utils/responseRedaction.js";
+import {
+  acceptOnDemandIntoQueue,
+  adminSetProviderQueue,
+  declineOnDemandOffer,
+  fetchActiveQueueRows,
+  postAcceptNotifications,
+  withdrawFromOnDemandQueue,
+} from "../../services/onDemandProviderQueue.service.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -38,16 +46,43 @@ router.post("/:id/assign", async (req, res) => {
 
   try {
     const { id } = req.params;
-    const { providerId } = req.body;
+    const { providerId, providerIds } = req.body;
+    const ordered =
+      Array.isArray(providerIds) && providerIds.length
+        ? providerIds
+        : providerId != null
+          ? [providerId]
+          : [];
+
+    if (!ordered.length) {
+      return res.status(400).json({ error: "providerId or providerIds required" });
+    }
 
     await client.query("BEGIN");
+
+    const engRes = await client.query(
+      `SELECT booking_type FROM engagements WHERE engagement_id=$1`,
+      [id]
+    );
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+
+    if (String(engRes.rows[0].booking_type || "").toUpperCase() === "ON_DEMAND") {
+      const result = await adminSetProviderQueue(client, id, ordered, {
+        adminUserId: req.user?.id || null,
+      });
+      await client.query("COMMIT");
+      return res.json({ success: true, engagement: result.engagement, provider_queue: result.provider_queue });
+    }
 
     await client.query(
       `UPDATE engagements
        SET serviceproviderid=$1,
            assignment_status='ASSIGNED'
        WHERE engagement_id=$2`,
-      [providerId, id]
+      [ordered[0], id]
     );
 
     await transitionEngagement(client, {
@@ -56,7 +91,7 @@ router.post("/:id/assign", async (req, res) => {
       eventType: "PROVIDER_ASSIGNED",
       actorType: "ADMIN",
       actorId: req.user?.id || null,
-      metadata: { providerId }
+      metadata: { providerId: ordered[0] },
     });
 
     await client.query("COMMIT");
@@ -150,8 +185,12 @@ router.post("/:id/cancel", async (req, res) => {
 
     const engagement = engagementRes.rows[0];
     const status = String(engagement.engagement_status || "").toUpperCase();
+    const task = String(engagement.task_status || "").toUpperCase();
     if (status === "CANCELLED") {
       return res.status(400).json({ error: "Engagement is already cancelled" });
+    }
+    if (status === "IN_PROGRESS" || task === "IN_PROGRESS" || task === "STARTED") {
+      return res.status(400).json({ error: "Cannot cancel after service has started" });
     }
 
     const policy = await loadCancellationPolicy();
@@ -290,12 +329,11 @@ router.post("/:id/accept", async (req, res) => {
 
   try {
     const { id } = req.params;
-    const providerId =
-      req.body.providerId ??
-      req.body.serviceproviderid ??
-      req.user?.id;
+    const providerId = Number(
+      req.body.providerId ?? req.body.serviceproviderid ?? req.user?.id
+    );
 
-    if (!providerId) {
+    if (!Number.isFinite(providerId) || providerId < 1) {
       return res.status(400).json({ error: "Provider ID required" });
     }
 
@@ -314,97 +352,159 @@ router.post("/:id/accept", async (req, res) => {
     let e = engRes.rows[0];
     e = await repairOnDemandEngagementIfPaid(client, e);
 
-    const acceptCheck = validateProviderCanAccept(e);
-    if (!acceptCheck.ok) {
-      await client.query("ROLLBACK");
-      return res.status(acceptCheck.status).json({ error: acceptCheck.error });
-    }
-
-    if (!e.start_epoch) {
-      await client.query("ROLLBACK");
-      throw new Error("Engagement timing missing");
-    }
-
-    // 🔎 Overlap check — IST day-clipped BOOKED slots only; ignore this engagement's rows
-    const conflictRow = await findProviderBookedConflict(
-      client,
-      providerId,
-      e,
-      e.engagement_id
-    );
-
-    if (conflictRow) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({
-        error: "Provider has time conflict",
-        detail: `Conflicts with engagement #${conflictRow.engagement_id} on ${conflictRow.date}`,
+    if (String(e.booking_type || "").toUpperCase() !== "ON_DEMAND") {
+      const acceptCheck = validateProviderCanAccept(e);
+      if (!acceptCheck.ok) {
+        await client.query("ROLLBACK");
+        return res.status(acceptCheck.status).json({ error: acceptCheck.error });
+      }
+      if (!e.start_epoch) {
+        await client.query("ROLLBACK");
+        throw new Error("Engagement timing missing");
+      }
+      const conflictRow = await findProviderBookedConflict(client, providerId, e, e.engagement_id);
+      if (conflictRow) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error: "Provider has time conflict",
+          detail: `Conflicts with engagement #${conflictRow.engagement_id} on ${conflictRow.date}`,
+        });
+      }
+      await client.query(
+        `UPDATE engagements SET serviceproviderid=$1, assignment_status='ASSIGNED' WHERE engagement_id=$2`,
+        [providerId, id]
+      );
+      await transitionEngagement(client, {
+        engagementId: id,
+        newStatus: "ASSIGNED",
+        eventType: "PROVIDER_ACCEPTED",
+        actorType: "PROVIDER",
+        actorId: providerId,
+      });
+      await client.query("COMMIT");
+      const updated = (await pool.query(`SELECT * FROM engagements WHERE engagement_id=$1`, [id])).rows[0];
+      return res.json({
+        message: "Booking accepted successfully",
+        engagement: redactEngagementForProvider(updated),
       });
     }
 
-    // ✅ Assign provider
-    await client.query(
-      `UPDATE engagements
-       SET serviceproviderid=$1,
-           assignment_status='ASSIGNED'
-       WHERE engagement_id=$2`,
-      [providerId, id]
-    );
-
-    // 🔁 Lifecycle transition
-    await transitionEngagement(client, {
-      engagementId: id,
-      newStatus: "ASSIGNED",
-      eventType: "PROVIDER_ACCEPTED",
-      actorType: "PROVIDER",
-      actorId: providerId,
-    });
+    let acceptResult;
+    try {
+      acceptResult = await acceptOnDemandIntoQueue(client, e, providerId);
+    } catch (queueErr) {
+      await client.query("ROLLBACK");
+      return res.status(queueErr.statusCode || 500).json({
+        error: queueErr.message,
+        detail: queueErr.detail,
+      });
+    }
 
     await client.query("COMMIT");
 
-    try {
-      await createInAppNotification({
-        io: req.io,
-        recipientType: "customer",
-        recipientId: e.customerid,
-        type: InAppTypes.BOOKING_ACCEPTED,
-        title: "A provider accepted your booking",
-        body: `Engagement #${id} is confirmed for ${e.service_type || "your service"}.`,
-        engagementId: Number(id),
-        metadata: { service_type: e.service_type },
-      });
-    } catch (eNotif) {
-      console.error("in-app (accept) failed", eNotif);
-    }
+    const updated = acceptResult.engagement;
+    await postAcceptNotifications(id, updated, providerId, acceptResult.role, req.io);
 
-    try {
-      await dismissNewBookingInAppByEngagementId(id);
-    } catch (eDismiss) {
-      console.error("dismiss new-booking in-app (v2 accept) failed", eDismiss);
-    }
-
-    const updated = (
-      await pool.query(
-        `SELECT * FROM engagements WHERE engagement_id=$1`,
-        [id]
-      )
-    ).rows[0];
-
-    if (req.io) {
-      req.io.to(`customer_${e.customerid}`).emit("engagement-accepted", {
-        engagement_id: id,
-        serviceproviderid: Number(providerId),
-      });
-      emitBookingRequestClosed(req.io, id, "accepted");
-    }
+    const queue = await fetchActiveQueueRows(pool, id);
 
     return res.json({
-      message: "Booking accepted successfully",
+      message:
+        acceptResult.role === "primary"
+          ? "Booking accepted successfully"
+          : `Added as backup provider (#${acceptResult.queuePosition} in queue)`,
+      role: acceptResult.role,
+      queuePosition: acceptResult.queuePosition,
+      provider_queue: queue,
       engagement: redactEngagementForProvider(updated),
     });
-
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Accept engagement error:", err);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+router.post("/:id/reject", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const providerId = Number(
+      req.body.providerId ?? req.body.serviceproviderid ?? req.user?.id
+    );
+    if (!Number.isFinite(providerId) || providerId < 1) {
+      return res.status(400).json({ error: "Provider ID required" });
+    }
+
+    await client.query("BEGIN");
+    const engRes = await client.query(
+      `SELECT engagement_id, booking_type FROM engagements WHERE engagement_id=$1`,
+      [id]
+    );
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+    if (String(engRes.rows[0].booking_type || "").toUpperCase() !== "ON_DEMAND") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Reject is only for ON_DEMAND bookings" });
+    }
+
+    await declineOnDemandOffer(client, id, providerId);
+    await client.query("COMMIT");
+
+    return res.json({ success: true, message: "Booking declined" });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+router.post("/:id/provider-withdraw", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const providerId = Number(
+      req.body.providerId ?? req.body.serviceproviderid ?? req.user?.id
+    );
+    if (!Number.isFinite(providerId) || providerId < 1) {
+      return res.status(400).json({ error: "Provider ID required" });
+    }
+
+    await client.query("BEGIN");
+    const engRes = await client.query(
+      `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+      [id]
+    );
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+
+    let result;
+    try {
+      result = await withdrawFromOnDemandQueue(client, engRes.rows[0], providerId, {
+        io: req.io,
+      });
+    } catch (withdrawErr) {
+      await client.query("ROLLBACK");
+      return res.status(withdrawErr.statusCode || 500).json({ error: withdrawErr.message });
+    }
+
+    await client.query("COMMIT");
+
+    const queue = await fetchActiveQueueRows(pool, id);
+    return res.json({
+      success: true,
+      ...result,
+      provider_queue: queue,
+      engagement: redactEngagementForProvider(result.engagement),
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
     return res.status(500).json({ error: err.message });
   } finally {
     client.release();

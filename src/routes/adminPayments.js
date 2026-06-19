@@ -5,6 +5,10 @@ import {
   listActiveVacationPriorityEngagements,
   listPendingOnDemandForVacationWindow,
 } from "../services/vacationPriority.service.js";
+import {
+  adminSetProviderQueue,
+  fetchQueuesForEngagements,
+} from "../services/onDemandProviderQueue.service.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -467,6 +471,11 @@ router.get("/engagements", async (req, res) => {
 
     const { rows } = await pool.query(query, params);
 
+    const queueMap = await fetchQueuesForEngagements(
+      pool,
+      rows.map((r) => r.engagement_id)
+    );
+
     // Count (for pagination)
     const countRes = await pool.query(
       `SELECT COUNT(*) FROM engagements e ${where}`,
@@ -524,6 +533,8 @@ router.get("/engagements", async (req, res) => {
             }
           : null,
 
+        provider_queue: queueMap.get(Number(r.engagement_id)) || [],
+
         created_at: r.created_at,
       })),
     });
@@ -545,6 +556,42 @@ router.get("/engagements", async (req, res) => {
 
 
 
+
+router.put("/engagements/:id/provider-queue", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { providerIds } = req.body;
+    if (!Array.isArray(providerIds) || !providerIds.length) {
+      return res.status(400).json({ success: false, error: "providerIds array is required" });
+    }
+
+    await client.query("BEGIN");
+    const result = await adminSetProviderQueue(client, id, providerIds, {
+      adminUserId: req.adminUser?.id || null,
+    });
+    await client.query("COMMIT");
+
+    return res.json({
+      success: true,
+      engagement_id: Number(id),
+      provider_queue: (result.provider_queue || []).map((row) => ({
+        queue_position: Number(row.queue_position),
+        role: Number(row.queue_position) === 1 ? "primary" : "backup",
+        serviceproviderid: Number(row.serviceproviderid),
+        firstname: row.firstname,
+        lastname: row.lastname,
+        accepted_at: row.accepted_at,
+      })),
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    const status = err.statusCode || 500;
+    return res.status(status).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 router.get("/vacation-providers", async (req, res) => {
   try {

@@ -31,6 +31,11 @@ import {
   notifyVacationCancelResult,
 } from "../services/vacationApply.service.js";
 import {
+  declineOnDemandOffer,
+  withdrawFromOnDemandQueue,
+  fetchActiveQueueRows,
+} from "../services/onDemandProviderQueue.service.js";
+import {
   redactEngagementForCustomer,
   redactEngagementForProvider,
 } from "../utils/responseRedaction.js";
@@ -1703,6 +1708,91 @@ router.post("/:id/accept", async (req, res) => {
   }
 });
 
+
+// ----------------- Reject on-demand offer (provider declines before/during queue) -----------------
+router.post("/:id/reject", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const providerId = Number(
+      req.body.serviceproviderid ?? req.body.providerId ?? req.user?.id
+    );
+    if (!Number.isFinite(providerId) || providerId < 1) {
+      return res.status(400).json({ error: "serviceproviderid is required" });
+    }
+
+    await client.query("BEGIN");
+    const engRes = await client.query(
+      `SELECT booking_type FROM engagements WHERE engagement_id=$1`,
+      [id]
+    );
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+    if (String(engRes.rows[0].booking_type || "").toUpperCase() !== "ON_DEMAND") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Reject is only for ON_DEMAND bookings" });
+    }
+
+    await declineOnDemandOffer(client, id, providerId);
+    await client.query("COMMIT");
+    return res.json({ success: true, message: "Engagement rejected" });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ----------------- Provider withdraw from on-demand queue (primary or backup) -----------------
+router.post("/:id/provider-withdraw", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const providerId = Number(
+      req.body.serviceproviderid ?? req.body.providerId ?? req.user?.id
+    );
+    if (!Number.isFinite(providerId) || providerId < 1) {
+      return res.status(400).json({ error: "serviceproviderid is required" });
+    }
+
+    await client.query("BEGIN");
+    const engRes = await client.query(
+      `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+      [id]
+    );
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+
+    let result;
+    try {
+      result = await withdrawFromOnDemandQueue(client, engRes.rows[0], providerId, {
+        io: req.io,
+      });
+    } catch (withdrawErr) {
+      await client.query("ROLLBACK");
+      return res.status(withdrawErr.statusCode || 500).json({ error: withdrawErr.message });
+    }
+
+    await client.query("COMMIT");
+    const queue = await fetchActiveQueueRows(pool, id);
+    return res.json({
+      success: true,
+      message: "Withdrawn from booking queue",
+      ...result,
+      provider_queue: queue,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 function getDateRange(startDate, endDate) {
   const dates = [];
