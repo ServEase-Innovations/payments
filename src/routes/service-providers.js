@@ -7,6 +7,12 @@ import { isVisitOverdue } from "../services/overdueStartReminder.service.js";
 import { getProviderWalletHistory } from "../services/providerWalletHistory.service.js";
 import { redactEngagementForProvider } from "../utils/responseRedaction.js";
 import {
+  canProviderWithdrawOnDemand,
+  fetchQueuePositionMap,
+  fetchStandbyCalendarEntriesForProvider,
+  fetchStandbyEngagementRowsForProvider,
+} from "../services/onDemandProviderQueue.service.js";
+import {
   authenticateRead,
   loadActor,
   requireOwnProviderId,
@@ -555,7 +561,14 @@ router.get("/:providerId/engagements", ...providerOwnerRead, async (req, res) =>
 
     const result = await pool.query(query, params);
 
-    if (result.rows.length === 0) {
+    const standbyRows = await fetchStandbyEngagementRowsForProvider(pool, providerId, monthFilter);
+    const existingEngagementIds = new Set(result.rows.map((r) => Number(r.engagement_id)));
+    const mergedRows = [
+      ...result.rows,
+      ...standbyRows.filter((r) => !existingEngagementIds.has(Number(r.engagement_id))),
+    ];
+
+    if (mergedRows.length === 0) {
       return res.json({
         success: true,
         serviceproviderid: providerId,
@@ -577,7 +590,8 @@ router.get("/:providerId/engagements", ...providerOwnerRead, async (req, res) =>
       });
     }
 
-    const engagementIds = result.rows.map(r => r.engagement_id);
+    const engagementIds = mergedRows.map(r => r.engagement_id);
+    const queuePositionMap = await fetchQueuePositionMap(pool, providerId, engagementIds);
 
     const visitStatsByEngagement = {};
     if (monthFilter) {
@@ -654,7 +668,7 @@ const past = [];
 const recurring = emptyEngagementBuckets();
 const oneOff = emptyEngagementBuckets();
 
-result.rows.forEach(row => {
+mergedRows.forEach(row => {
   const dates = resolveEngagementDates(row);
   row.startDate = dates.startDate;
   row.endDate = dates.endDate;
@@ -704,10 +718,28 @@ result.rows.forEach(row => {
   const visitStats = visitStatsByEngagement[String(row.engagement_id)];
   const recurringContract = isRecurringBookingType(row.booking_type);
 
+  let queuePosition =
+    row.queue_position != null
+      ? Number(row.queue_position)
+      : queuePositionMap.get(Number(row.engagement_id)) ?? null;
+  if (
+    queuePosition == null &&
+    Number(row.serviceproviderid) === Number(providerId) &&
+    String(row.booking_type || "").toUpperCase() === "ON_DEMAND"
+  ) {
+    queuePosition = 1;
+  }
+  const queueRole =
+    row.is_queue_standby || (queuePosition != null && queuePosition > 1)
+      ? "backup"
+      : queuePosition === 1
+        ? "primary"
+        : null;
+
   const enriched = redactEngagementForProvider({
     ...row,
     id: row.engagement_id,
-    task_status: effectiveTaskStatus,
+    task_status: row.is_queue_standby ? "QUEUE_STANDBY" : effectiveTaskStatus,
     start_epoch: startEpoch,
     end_epoch: endEpoch,
     start_date_epoch: ymdToIstStartEpoch(dates.startDate),
@@ -723,6 +755,10 @@ result.rows.forEach(row => {
     engagementKind: recurringContract ? "RECURRING" : "ONE_OFF",
     bookingTypeLabel: bookingTypeLabel(row.booking_type),
     scheduleSummary: buildScheduleSummary(row, dates),
+    queue_position: queuePosition,
+    queue_role: queueRole,
+    is_queue_standby: Boolean(row.is_queue_standby || queueRole === "backup"),
+    can_provider_withdraw: canProviderWithdrawOnDemand(row, queuePosition),
   });
 
   if (visitStats) {
@@ -875,7 +911,8 @@ router.get("/:providerId/calendar", ...providerOwnerRead, async (req, res) => {
 
     const result = await pool.query(query, params);
 
-    const calendar = result.rows.map((r) => {
+    const standbyCalendar = await fetchStandbyCalendarEntriesForProvider(pool, providerId, month);
+    const paCalendar = result.rows.map((r) => {
       const dateYmd = normalizeDate(r.date);
       const vacStart = r.vacation_start_date ? normalizeDate(r.vacation_start_date) : null;
       const vacEnd = r.vacation_end_date ? normalizeDate(r.vacation_end_date) : null;
@@ -904,6 +941,17 @@ router.get("/:providerId/calendar", ...providerOwnerRead, async (req, res) => {
         status: displayStatus,
         on_vacation: Boolean(onVacation),
       };
+    });
+
+    const calendar = [...paCalendar, ...standbyCalendar.map((r) => ({
+      ...r,
+      date_epoch: ymdToIstStartEpoch(r.date),
+      on_vacation: false,
+    }))].sort((a, b) => {
+      const da = String(a.date || "");
+      const db = String(b.date || "");
+      if (da !== db) return da.localeCompare(db);
+      return Number(a.slot_start_epoch || 0) - Number(b.slot_start_epoch || 0);
     });
 
     return res.json({

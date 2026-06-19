@@ -6,6 +6,7 @@ import { findProviderBookedConflict, visitWindowFromEngagement } from "./provide
 import {
   createInAppNotification,
   dismissNewBookingInAppByEngagementId,
+  dismissNewBookingInAppForProvider,
   emitBookingRequestClosed,
   InAppTypes,
 } from "./inAppNotification.service.js";
@@ -608,35 +609,198 @@ export async function adminSetProviderQueue(
   };
 }
 
-export async function postAcceptNotifications(engagementId, engagement, providerId, role, io) {
-  if (role !== "primary") return;
+export async function postAcceptNotifications(
+  engagementId,
+  engagement,
+  providerId,
+  role,
+  io,
+  { queueCountAfterAccept = 1 } = {}
+) {
+  const queueFull = queueCountAfterAccept >= ON_DEMAND_QUEUE_MAX;
 
   try {
-    await createInAppNotification({
-      io,
-      recipientType: "customer",
-      recipientId: engagement.customerid,
-      type: InAppTypes.BOOKING_ACCEPTED,
-      title: "A provider accepted your booking",
-      body: `Engagement #${engagementId} is confirmed for ${engagement.service_type || "your service"}.`,
-      engagementId: Number(engagementId),
-      metadata: { service_type: engagement.service_type },
-    });
-  } catch (eNotif) {
-    console.error("in-app (accept) failed", eNotif);
-  }
-
-  try {
-    await dismissNewBookingInAppByEngagementId(engagementId);
+    await dismissNewBookingInAppForProvider(engagementId, providerId);
   } catch (eDismiss) {
-    console.error("dismiss new-booking in-app failed", eDismiss);
+    console.error("dismiss provider new-booking in-app failed", eDismiss);
   }
 
-  if (io && engagement.customerid) {
-    io.to(`customer_${engagement.customerid}`).emit("engagement-accepted", {
-      engagement_id: engagementId,
-      serviceproviderid: Number(providerId),
-    });
-    emitBookingRequestClosed(io, engagementId, "accepted");
+  if (role === "primary") {
+    try {
+      await createInAppNotification({
+        io,
+        recipientType: "customer",
+        recipientId: engagement.customerid,
+        type: InAppTypes.BOOKING_ACCEPTED,
+        title: "A provider accepted your booking",
+        body: `Engagement #${engagementId} is confirmed for ${engagement.service_type || "your service"}.`,
+        engagementId: Number(engagementId),
+        metadata: { service_type: engagement.service_type },
+      });
+    } catch (eNotif) {
+      console.error("in-app (accept) failed", eNotif);
+    }
+
+    if (io && engagement.customerid) {
+      io.to(`customer_${engagement.customerid}`).emit("engagement-accepted", {
+        engagement_id: engagementId,
+        serviceproviderid: Number(providerId),
+      });
+    }
+  }
+
+  if (queueFull) {
+    try {
+      await dismissNewBookingInAppByEngagementId(engagementId);
+    } catch (eDismissAll) {
+      console.error("dismiss all new-booking in-app failed", eDismissAll);
+    }
+    emitBookingRequestClosed(io, engagementId, queueFull ? "queue_full" : "accepted");
   }
 }
+
+function canProviderWithdrawOnDemand(engagement, queuePosition) {
+  if (queuePosition == null) return false;
+  if (String(engagement?.booking_type || "").toUpperCase() !== "ON_DEMAND") return false;
+  const life = String(engagement?.engagement_status || "").toUpperCase();
+  const task = String(engagement?.task_status || "NOT_STARTED").toUpperCase();
+  if (life === "IN_PROGRESS" || task === "IN_PROGRESS" || task === "STARTED") return false;
+  return true;
+}
+
+export async function fetchQueuePositionMap(db, providerId, engagementIds = []) {
+  const ids = [...new Set(engagementIds.map(Number).filter((n) => Number.isFinite(n) && n > 0))];
+  if (!ids.length) return new Map();
+  const { rows } = await db.query(
+    `SELECT engagement_id, queue_position
+     FROM engagement_provider_queue
+     WHERE serviceproviderid = $1 AND status = 'ACTIVE' AND engagement_id = ANY($2::bigint[])`,
+    [providerId, ids]
+  );
+  const map = new Map();
+  for (const row of rows) {
+    map.set(Number(row.engagement_id), Number(row.queue_position));
+  }
+  return map;
+}
+
+/**
+ * On-demand engagements where this provider is an active backup (queue position > 1).
+ */
+export async function fetchStandbyEngagementRowsForProvider(db, providerId, monthFilter = null) {
+  const params = [providerId];
+  let monthClause = "";
+  if (monthFilter) {
+    const monthStart = dayjs.tz(`${monthFilter}-01`, "YYYY-MM-DD", "Asia/Kolkata").startOf("month");
+    const monthEnd = monthStart.endOf("month");
+    monthClause = ` AND e.start_date <= $2::date AND e.end_date >= $3::date`;
+    params.push(monthEnd.format("YYYY-MM-DD"), monthStart.format("YYYY-MM-DD"));
+  }
+
+  const { rows } = await db.query(
+    `
+    SELECT
+      e.engagement_id,
+      e.customerid,
+      e.serviceproviderid,
+      e.start_date,
+      e.end_date,
+      e.start_epoch,
+      e.end_epoch,
+      e.responsibilities,
+      e.booking_type,
+      e.service_type,
+      e.task_status,
+      e.assignment_status,
+      e.engagement_status,
+      e.base_amount,
+      e.address,
+      e.duration_minutes,
+      e.created_at,
+      e.vacation_start_date,
+      e.vacation_end_date,
+      e.leave_days,
+      c.firstname,
+      c.lastname,
+      c.mobileno,
+      q.queue_id,
+      q.queue_position,
+      true AS is_queue_standby
+    FROM engagement_provider_queue q
+    INNER JOIN engagements e ON e.engagement_id = q.engagement_id
+    INNER JOIN customer c ON c.customerid = e.customerid
+    WHERE q.serviceproviderid = $1
+      AND q.status = 'ACTIVE'
+      AND q.queue_position > 1
+      AND UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
+      AND UPPER(COALESCE(e.engagement_status, '')) NOT IN ('CANCELLED', 'EXPIRED', 'COMPLETED')
+      AND UPPER(COALESCE(e.task_status, '')) NOT IN ('CANCELLED', 'COMPLETED')
+      ${monthClause}
+    ORDER BY e.start_epoch ASC NULLS LAST, e.engagement_id ASC
+    `,
+    params
+  );
+  return rows;
+}
+
+/**
+ * Calendar rows for backup queue slots (no provider_availability BOOKED row).
+ */
+export async function fetchStandbyCalendarEntriesForProvider(db, providerId, month) {
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) return [];
+  const monthStart = dayjs.tz(`${month}-01`, "YYYY-MM-DD", "Asia/Kolkata").startOf("month");
+  const monthEnd = monthStart.endOf("month");
+
+  const { rows } = await db.query(
+    `
+    SELECT
+      q.queue_id,
+      q.engagement_id,
+      q.queue_position,
+      e.start_epoch,
+      e.end_epoch,
+      e.start_date,
+      e.duration_minutes
+    FROM engagement_provider_queue q
+    INNER JOIN engagements e ON e.engagement_id = q.engagement_id
+    WHERE q.serviceproviderid = $1
+      AND q.status = 'ACTIVE'
+      AND q.queue_position > 1
+      AND UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
+      AND UPPER(COALESCE(e.engagement_status, '')) NOT IN ('CANCELLED', 'EXPIRED', 'COMPLETED')
+      AND e.start_date <= $3::date
+      AND COALESCE(e.end_date, e.start_date) >= $2::date
+    ORDER BY e.start_epoch ASC NULLS LAST
+    `,
+    [providerId, monthStart.format("YYYY-MM-DD"), monthEnd.format("YYYY-MM-DD")]
+  );
+
+  return rows.map((row) => {
+    const startEp = Number(row.start_epoch);
+    const durationMin = Number(row.duration_minutes) || 60;
+    const endEp =
+      Number.isFinite(Number(row.end_epoch)) && Number(row.end_epoch) > startEp
+        ? Number(row.end_epoch)
+        : startEp + durationMin * 60;
+    const dateYmd = row.start_date
+      ? dayjs(row.start_date).format("YYYY-MM-DD")
+      : dayjs.unix(startEp).tz("Asia/Kolkata").format("YYYY-MM-DD");
+
+    return {
+      id: -Number(row.queue_id),
+      serviceproviderid: Number(providerId),
+      engagement_id: Number(row.engagement_id),
+      date: dateYmd,
+      slot_start_epoch: startEp,
+      slot_end_epoch: endEp,
+      status: "QUEUE_STANDBY",
+      queue_position: Number(row.queue_position),
+      start_epoch: startEp,
+      end_epoch: endEp,
+      start_time: dayjs.unix(startEp).tz("Asia/Kolkata").format("HH:mm"),
+      end_time: dayjs.unix(endEp).tz("Asia/Kolkata").format("HH:mm"),
+    };
+  });
+}
+
+export { canProviderWithdrawOnDemand };

@@ -23,6 +23,7 @@ import { redactEngagementForProvider } from "../../utils/responseRedaction.js";
 import {
   acceptOnDemandIntoQueue,
   adminSetProviderQueue,
+  countActiveQueue,
   declineOnDemandOffer,
   fetchActiveQueueRows,
   postAcceptNotifications,
@@ -403,7 +404,10 @@ router.post("/:id/accept", async (req, res) => {
     await client.query("COMMIT");
 
     const updated = acceptResult.engagement;
-    await postAcceptNotifications(id, updated, providerId, acceptResult.role, req.io);
+    const queueCount = await countActiveQueue(pool, id);
+    await postAcceptNotifications(id, updated, providerId, acceptResult.role, req.io, {
+      queueCountAfterAccept: queueCount,
+    });
 
     const queue = await fetchActiveQueueRows(pool, id);
 

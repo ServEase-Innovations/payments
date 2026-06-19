@@ -407,6 +407,27 @@ export async function dismissNewBookingInAppByEngagementId(engagementId) {
   return { updated: r.rowCount ?? 0 };
 }
 
+/** Mark one provider's unread new-booking rows read for an engagement. */
+export async function dismissNewBookingInAppForProvider(engagementId, providerId) {
+  const eid = Number(engagementId);
+  const spid = Number(providerId);
+  if (!Number.isFinite(eid) || eid < 1 || !Number.isFinite(spid) || spid < 1) {
+    return { updated: 0 };
+  }
+  const r = await pool.query(
+    `
+    UPDATE in_app_notifications
+    SET read_at = COALESCE(read_at, NOW())
+    WHERE engagement_id = $1
+      AND recipient_type = 'provider'
+      AND recipient_id = $2
+      AND type IN ($3, $4)
+    `,
+    [eid, spid, InAppTypes.NEW_BOOKING_OPPORTUNITY, InAppTypes.NEW_BOOKING_REQUEST]
+  );
+  return { updated: r.rowCount ?? 0 };
+}
+
 /**
  * Mark unread provider "new booking" rows read when the engagement is no longer actionable
  * or the notification is too old to show as an Accept/Decline popup.
@@ -426,18 +447,47 @@ export async function autoDismissStaleProviderBookingNotifications(providerId) {
       AND n.type = ANY($2::text[])
       AND n.engagement_id = e.engagement_id
       AND (
-        e.serviceproviderid IS NOT NULL
-        OR UPPER(COALESCE(e.engagement_status, '')) IN (
+        UPPER(COALESCE(e.engagement_status, '')) IN (
           'CANCELLED', 'EXPIRED', 'COMPLETED', 'CLOSED', 'REJECTED'
         )
+        OR n.created_at < NOW() - INTERVAL '4 hours'
         OR (
           UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
-          AND UPPER(COALESCE(e.engagement_status, '')) NOT IN (
-            'OPEN_FOR_ACCEPTANCE', 'UNASSIGNED', ''
+          AND (
+            (
+              SELECT COUNT(*)::int
+              FROM engagement_provider_queue q
+              WHERE q.engagement_id = e.engagement_id AND q.status = 'ACTIVE'
+            ) >= 5
+            OR EXISTS (
+              SELECT 1 FROM engagement_provider_queue q
+              WHERE q.engagement_id = e.engagement_id
+                AND q.serviceproviderid = n.recipient_id
+                AND q.status = 'ACTIVE'
+            )
+            OR EXISTS (
+              SELECT 1 FROM engagement_provider_declines d
+              WHERE d.engagement_id = e.engagement_id
+                AND d.serviceproviderid = n.recipient_id
+            )
+            OR UPPER(COALESCE(e.engagement_status, '')) NOT IN (
+              'OPEN_FOR_ACCEPTANCE', 'UNASSIGNED', 'CRM_ESCALATED', 'ASSIGNED'
+            )
           )
         )
-        OR UPPER(COALESCE(e.assignment_status, '')) NOT IN ('UNASSIGNED', '')
-        OR n.created_at < NOW() - INTERVAL '4 hours'
+        OR (
+          UPPER(COALESCE(e.booking_type, '')) <> 'ON_DEMAND'
+          AND (
+            e.serviceproviderid IS NOT NULL
+            OR UPPER(COALESCE(e.assignment_status, '')) NOT IN ('UNASSIGNED', '')
+            OR (
+              UPPER(COALESCE(e.booking_type, '')) = 'ON_DEMAND'
+              AND UPPER(COALESCE(e.engagement_status, '')) NOT IN (
+                'OPEN_FOR_ACCEPTANCE', 'UNASSIGNED', ''
+              )
+            )
+          )
+        )
       )
     `,
     [spid, NEW_BOOKING_TYPES]
