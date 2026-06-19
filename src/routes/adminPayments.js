@@ -425,6 +425,8 @@ router.get("/engagements", async (req, res) => {
         e.end_epoch,
         e.base_amount,
         e.address,
+        e.latitude,
+        e.longitude,
         e.active,
         e.created_at,
 
@@ -496,6 +498,8 @@ router.get("/engagements", async (req, res) => {
           : null,
         base_amount: Number(r.base_amount),
         address: r.address || null,
+        latitude: r.latitude != null ? Number(r.latitude) : null,
+        longitude: r.longitude != null ? Number(r.longitude) : null,
 
         customer: {
           customerid: r.customerid,
@@ -544,9 +548,11 @@ router.get("/engagements", async (req, res) => {
 
 router.get("/vacation-providers", async (req, res) => {
   try {
-    const { as_of, include_pending_on_demand } = req.query;
+    const { as_of, include_pending_on_demand, scope, overlap_date } = req.query;
     const vacations = await listActiveVacationPriorityEngagements(pool, {
       asOfDate: as_of || undefined,
+      scope: scope === "future" ? "future" : "active",
+      overlapDate: overlap_date || undefined,
     });
 
     const withPending =

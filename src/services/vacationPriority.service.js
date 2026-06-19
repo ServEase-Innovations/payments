@@ -18,9 +18,22 @@ function calendarYmd(value) {
 
 /**
  * Active customer vacations where the SP is reserved (vacation-priority), not freed.
+ * @param {{ asOfDate?: string, scope?: 'active'|'future', overlapDate?: string }} opts
  */
-export async function listActiveVacationPriorityEngagements(db = pool, { asOfDate } = {}) {
-  const today = asOfDate || dayjs().tz("Asia/Kolkata").format("YYYY-MM-DD");
+export async function listActiveVacationPriorityEngagements(
+  db = pool,
+  { asOfDate, scope = "active", overlapDate } = {}
+) {
+  const today = dayjs().tz("Asia/Kolkata").format("YYYY-MM-DD");
+  const refDate = overlapDate || asOfDate || today;
+
+  let dateClause = "$1::date BETWEEN e.vacation_start_date AND e.vacation_end_date";
+  const params = [refDate];
+
+  if (scope === "future") {
+    dateClause = "e.vacation_end_date >= $1::date";
+    params[0] = today;
+  }
 
   const { rows } = await db.query(
     `
@@ -56,12 +69,12 @@ export async function listActiveVacationPriorityEngagements(db = pool, { asOfDat
     )
     WHERE e.vacation_start_date IS NOT NULL
       AND e.vacation_end_date IS NOT NULL
-      AND $1::date BETWEEN e.vacation_start_date AND e.vacation_end_date
+      AND ${dateClause}
       AND ${activeEngagementStatusSql("e")}
       AND UPPER(COALESCE(e.booking_type, '')) IN ('MONTHLY', 'SHORT_TERM')
     ORDER BY e.vacation_start_date ASC, e.engagement_id ASC
     `,
-    [today]
+    params
   );
 
   return rows.map((r) => ({
