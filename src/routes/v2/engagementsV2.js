@@ -19,6 +19,7 @@ import {
   assertCancellationAllowed,
   loadCancellationPolicy,
 } from "../../services/cancellationPolicy.js";
+import { refundPaidBookingToCustomer } from "../../services/bookingPaymentRefund.service.js";
 import { redactEngagementForProvider } from "../../utils/responseRedaction.js";
 import {
   acceptOnDemandIntoQueue,
@@ -174,9 +175,10 @@ router.post("/:id/cancel", async (req, res) => {
     const { reason } = req.body;
 
     const engagementRes = await client.query(
-      `SELECT booking_type, start_epoch, start_date, engagement_status
-       FROM engagements
-       WHERE engagement_id = $1`,
+      `SELECT e.*, e.customerid, e.booking_type, e.start_epoch, e.start_date, 
+              e.engagement_status, e.task_status
+       FROM engagements e
+       WHERE e.engagement_id = $1`,
       [id]
     );
 
@@ -187,6 +189,7 @@ router.post("/:id/cancel", async (req, res) => {
     const engagement = engagementRes.rows[0];
     const status = String(engagement.engagement_status || "").toUpperCase();
     const task = String(engagement.task_status || "").toUpperCase();
+    
     if (status === "CANCELLED") {
       return res.status(400).json({ error: "Engagement is already cancelled" });
     }
@@ -204,21 +207,108 @@ router.post("/:id/cancel", async (req, res) => {
 
     await client.query("BEGIN");
 
+    // Fetch payment details for refund processing
+    const paymentRes = await client.query(
+      `SELECT payment_id, engagement_id, total_amount, wallet_amount, 
+              wallet_deducted, transaction_id, status, payment_mode
+       FROM payments
+       WHERE engagement_id = $1
+       ORDER BY payment_id DESC
+       LIMIT 1`,
+      [id]
+    );
+
+    let refundResult = null;
+    let refundDescription = null;
+
+    // Process refund if payment exists and was successful
+    if (paymentRes.rows.length > 0) {
+      const payment = paymentRes.rows[0];
+      const paymentStatus = String(payment.status || "").toUpperCase();
+
+      if (paymentStatus === "SUCCESS") {
+        console.log(`[cancel-engagement] Processing refund for engagement ${id}`);
+        
+        refundDescription = `Refund for cancelled booking #${id}`;
+        
+        try {
+          refundResult = await refundPaidBookingToCustomer(client, {
+            payment,
+            customerId: Number(engagement.customerid),
+            engagementId: id,
+            refundDescription,
+            razorpayNotes: {
+              reason: reason || "User cancelled booking",
+              cancelled_by: "CUSTOMER",
+            },
+          });
+
+          console.log(`[cancel-engagement] Refund processed for engagement ${id}:`, {
+            walletRefund: refundResult.walletRefund,
+            razorpayRefund: refundResult.razorpayRefund,
+            walletBalanceAfter: refundResult.walletBalanceAfter,
+          });
+
+          // Update payment status to REFUNDED
+          await client.query(
+            `UPDATE payments
+             SET status = 'REFUNDED',
+                 updated_at = NOW()
+             WHERE payment_id = $1`,
+            [payment.payment_id]
+          );
+
+        } catch (refundErr) {
+          console.error(`[cancel-engagement] Refund failed for engagement ${id}:`, refundErr);
+          await client.query("ROLLBACK");
+          return res.status(500).json({ 
+            error: "Failed to process refund", 
+            details: refundErr.message 
+          });
+        }
+      } else {
+        console.log(`[cancel-engagement] No refund needed for engagement ${id}, payment status: ${paymentStatus}`);
+      }
+    } else {
+      console.log(`[cancel-engagement] No payment found for engagement ${id}`);
+    }
+
+    // Transition engagement to CANCELLED status
     await transitionEngagement(client, {
       engagementId: id,
       newStatus: "CANCELLED",
       eventType: "ENGAGEMENT_CANCELLED",
       actorType: "CUSTOMER",
       actorId: req.user?.id,
-      metadata: { reason }
+      metadata: {
+        reason: reason || "User cancelled booking",
+        refund_amount_inr: refundResult ? refundResult.total : null,
+        wallet_refund_amount_inr: refundResult ? refundResult.walletRefund : null,
+        razorpay_refund_amount_inr: refundResult ? refundResult.razorpayRefund : null,
+        razorpay_payment_id: refundResult ? refundResult.razorpayPaymentId : null,
+        razorpay_refund_id: refundResult ? refundResult.razorpayRefundId : null,
+        wallet_balance_after: refundResult ? refundResult.walletBalanceAfter : null,
+      }
     });
 
     await client.query("COMMIT");
 
-    res.json({ success: true });
+    res.json({ 
+      success: true,
+      refund: refundResult ? {
+        total: refundResult.total,
+        walletRefund: refundResult.walletRefund,
+        razorpayRefund: refundResult.razorpayRefund,
+        walletBalanceAfter: refundResult.walletBalanceAfter,
+        message: refundResult.razorpayRefund > 0 
+          ? `₹${refundResult.walletRefund.toFixed(2)} credited to wallet. ₹${refundResult.razorpayRefund.toFixed(2)} will be refunded to your payment method in 5-7 business days.`
+          : `₹${refundResult.walletRefund.toFixed(2)} credited to your wallet.`
+      } : null
+    });
 
   } catch (err) {
     await client.query("ROLLBACK");
+    console.error(`[cancel-engagement] Error cancelling engagement ${req.params.id}:`, err);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
