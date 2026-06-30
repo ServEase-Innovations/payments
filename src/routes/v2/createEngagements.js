@@ -366,6 +366,7 @@ router.post("/", async (req, res) => {
       duration_minutes,
       use_wallet,
       useWallet,
+      provider_gender_preference,
     } = req.body;
 
     const useWalletBalance = Boolean(use_wallet ?? useWallet);
@@ -598,11 +599,12 @@ router.post("/", async (req, res) => {
         address,
         latitude,
         longitude,
+        provider_gender_preference,
         created_at
       )
       VALUES (
         $1,$2,$3::date,$4::date,$5,$6,$7,
-        'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW()
+        'NOT_STARTED',true,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()
       )
       RETURNING *
       `,
@@ -622,7 +624,8 @@ router.post("/", async (req, res) => {
         endEpoch,
         address || null,
         latitude,
-        longitude
+        longitude,
+        provider_gender_preference || 'No Preference'
       ]
     );
 

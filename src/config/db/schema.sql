@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS public.engagements
     vacation_priority_provider_id bigint,
     start_epoch bigint,
     end_epoch bigint,
+    provider_gender_preference character varying(50) COLLATE pg_catalog."default" DEFAULT 'No Preference',
     CONSTRAINT engagements_pkey PRIMARY KEY (engagement_id)
 );
 

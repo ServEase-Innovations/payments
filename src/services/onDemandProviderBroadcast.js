@@ -32,6 +32,7 @@ export async function fetchVacationPriorityOnDemandProviders(
     startEpoch,
     endEpoch,
     radiusKm = 30,
+    genderPreference = null,
   },
   db = pool
 ) {
@@ -52,12 +53,34 @@ export async function fetchVacationPriorityOnDemandProviders(
     .unix();
   const dayWindowEnd = dayWindowStart + 86400;
 
+  // Build gender filter SQL
+  const genderFilterSql = genderPreference && genderPreference !== 'No Preference'
+    ? `AND UPPER(TRIM(COALESCE(sp.gender, ''))) = UPPER($10)`
+    : '';
+  
+  const queryParams = [
+    coords.lat,
+    coords.lng,
+    role,
+    Number(radiusKm),
+    visitDate,
+    dayWindowStart,
+    dayWindowEnd,
+    startEp,
+    slotEnd,
+  ];
+  
+  if (genderPreference && genderPreference !== 'No Preference') {
+    queryParams.push(genderPreference);
+  }
+
   const { rows } = await db.query(
     `
     SELECT DISTINCT
       sp.serviceproviderid,
       sp.latitude,
       sp.longitude,
+      sp.gender,
       e.engagement_id AS vacation_engagement_id
     FROM engagements e
     INNER JOIN serviceprovider sp ON sp.serviceproviderid = COALESCE(
@@ -78,6 +101,7 @@ export async function fetchVacationPriorityOnDemandProviders(
       AND ${activeEngagementStatusSql("e")}
       AND UPPER(COALESCE(e.booking_type, '')) IN ('MONTHLY', 'SHORT_TERM')
       AND ${ON_DEMAND_ROLE_MATCH_SQL}
+      ${genderFilterSql}
       AND (
         6371 * acos(
           LEAST(1.0, GREATEST(-1.0,
@@ -103,17 +127,7 @@ export async function fetchVacationPriorityOnDemandProviders(
           AND $9::bigint > GREATEST(pa2.slot_start_epoch, $6::bigint)
       )
     `,
-    [
-      coords.lat,
-      coords.lng,
-      role,
-      Number(radiusKm),
-      visitDate,
-      dayWindowStart,
-      dayWindowEnd,
-      startEp,
-      slotEnd,
-    ]
+    queryParams
   );
 
   return rows;
@@ -132,6 +146,7 @@ export async function fetchBroadcastEligibleProviders(
     startEpoch,
     endEpoch,
     radiusKm = 30,
+    genderPreference = null,
   },
   db = pool
 ) {
@@ -152,14 +167,36 @@ export async function fetchBroadcastEligibleProviders(
     .unix();
   const dayWindowEnd = dayWindowStart + 86400;
 
+  // Build gender filter SQL
+  const genderFilterSql = genderPreference && genderPreference !== 'No Preference'
+    ? `AND UPPER(TRIM(COALESCE(sp.gender, ''))) = UPPER($10)`
+    : '';
+  
+  const queryParams = [
+    coords.lat,
+    coords.lng,
+    role,
+    Number(radiusKm),
+    visitDate,
+    dayWindowStart,
+    dayWindowEnd,
+    startEp,
+    slotEnd,
+  ];
+  
+  if (genderPreference && genderPreference !== 'No Preference') {
+    queryParams.push(genderPreference);
+  }
+
   const { rows } = await db.query(
     `
-    SELECT sp.serviceproviderid, sp.latitude, sp.longitude
+    SELECT sp.serviceproviderid, sp.latitude, sp.longitude, sp.gender
     FROM serviceprovider sp
     WHERE sp.isactive = true
       AND sp.latitude IS NOT NULL
       AND sp.longitude IS NOT NULL
       AND ${ON_DEMAND_ROLE_MATCH_SQL}
+      ${genderFilterSql}
       AND (
         6371 * acos(
           LEAST(1.0, GREATEST(-1.0,
@@ -185,17 +222,7 @@ export async function fetchBroadcastEligibleProviders(
           AND $9::bigint > GREATEST(pa.slot_start_epoch, $6::bigint)
       )
     `,
-    [
-      coords.lat,
-      coords.lng,
-      role,
-      Number(radiusKm),
-      visitDate,
-      dayWindowStart,
-      dayWindowEnd,
-      startEp,
-      slotEnd,
-    ]
+    queryParams
   );
 
   return rows;
@@ -216,6 +243,9 @@ export async function broadcastOnDemandToProviders({
   const startEp = Number(engagement.start_epoch);
   const durationMin = Number(engagement.duration_minutes) || 60;
   const endEp = Number.isFinite(startEp) ? startEp + durationMin * 60 : null;
+  
+  // Extract gender preference from engagement
+  const genderPreference = engagement.provider_gender_preference || 'No Preference';
 
   const broadcastParams = {
     latitude: engagement.latitude,
@@ -225,6 +255,7 @@ export async function broadcastOnDemandToProviders({
     startEpoch: startEp,
     endEpoch: endEp,
     radiusKm: fallbackRadiusM / 1000,
+    genderPreference,
   };
 
   const vacationPriority = await fetchVacationPriorityOnDemandProviders(broadcastParams);
@@ -256,6 +287,11 @@ export async function broadcastOnDemandToProviders({
     }));
 
   const distances = [...vacationDistances, ...generalDistances];
+
+  // Log gender filtering results
+  if (genderPreference && genderPreference !== 'No Preference') {
+    console.log(`[Gender Filter] Engagement ${engagement.engagement_id}: filtering for ${genderPreference} providers. Found ${distances.length} eligible providers.`);
+  }
 
   let notified = 0;
   const notifiedIds = new Set();
