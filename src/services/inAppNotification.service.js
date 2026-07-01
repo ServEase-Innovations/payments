@@ -378,6 +378,8 @@ export const InAppTypes = {
   ON_DEMAND_ASSIGNMENT_PENDING: "ON_DEMAND_ASSIGNMENT_PENDING",
   /** Customer: unpaid booking auto-cancelled after payment window elapsed */
   BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT: "BOOKING_AUTO_CANCELLED_PAYMENT_TIMEOUT",
+  /** Provider: customer extended the booking duration */
+  BOOKING_EXTENDED: "BOOKING_EXTENDED",
   /** Customer / provider: customer applied vacation on a booking */
   VACATION_APPLIED: "VACATION_APPLIED",
   /** Customer / provider: customer changed vacation dates */

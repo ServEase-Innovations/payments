@@ -315,6 +315,336 @@ router.post("/:id/cancel", async (req, res) => {
   }
 });
 
+// ==================== EXTEND SERVICE HOUR ENDPOINTS ====================
+
+/**
+ * Check if booking can be extended and get available extension options
+ * GET /api/v2/engagements/:id/extension-availability
+ */
+router.get("/:id/extension-availability", async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { id } = req.params;
+    
+    // Get engagement details
+    const engRes = await client.query(
+      `SELECT e.engagement_id, e.booking_type, e.serviceproviderid, e.service_type,
+              e.end_epoch, e.end_time, e.engagement_status, e.task_status,
+              e.start_epoch, e.base_amount, e.duration_minutes
+       FROM engagements e
+       WHERE e.engagement_id = $1`,
+      [id]
+    );
+    
+    if (!engRes.rows.length) {
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+    
+    const engagement = engRes.rows[0];
+    const bookingType = String(engagement.booking_type || "").toUpperCase();
+    const taskStatus = String(engagement.task_status || "").toUpperCase();
+    const engagementStatus = String(engagement.engagement_status || "").toUpperCase();
+    
+    // Validation: Only ON_DEMAND bookings can be extended
+    if (bookingType !== "ON_DEMAND") {
+      return res.json({
+        success: true,
+        canExtend: false,
+        reason: "Only one-time bookings can be extended",
+        maxExtensionHours: 0,
+        availableSlots: []
+      });
+    }
+    
+    // Validation: Must have assigned provider
+    if (!engagement.serviceproviderid) {
+      return res.json({
+        success: true,
+        canExtend: false,
+        reason: "No provider assigned",
+        maxExtensionHours: 0,
+        availableSlots: []
+      });
+    }
+    
+    // Validation: Only active bookings can be extended
+    if (!["NOT_STARTED", "IN_PROGRESS"].includes(taskStatus)) {
+      return res.json({
+        success: true,
+        canExtend: false,
+        reason: "Booking is not active",
+        maxExtensionHours: 0,
+        availableSlots: []
+      });
+    }
+    
+    // Validation: Check if booking has ended
+    const now = dayjs();
+    const endTime = dayjs.unix(Number(engagement.end_epoch)).tz("Asia/Kolkata");
+    if (now.isAfter(endTime)) {
+      return res.json({
+        success: true,
+        canExtend: false,
+        reason: "Booking has already ended",
+        maxExtensionHours: 0,
+        availableSlots: []
+      });
+    }
+    
+    // Check provider conflicts after current end time
+    const currentEndEpoch = Number(engagement.end_epoch);
+    const maxCheckHours = 4; // Check up to 4 hours ahead
+    const maxCheckEpoch = currentEndEpoch + (maxCheckHours * 3600);
+    
+    const conflictRes = await client.query(
+      `SELECT e.engagement_id, e.start_epoch, e.end_epoch, e.task_status
+       FROM engagements e
+       WHERE e.serviceproviderid = $1
+         AND e.engagement_id != $2
+         AND e.task_status NOT IN ('CANCELLED', 'COMPLETED')
+         AND (
+           (e.start_epoch >= $3 AND e.start_epoch < $4) OR
+           (e.end_epoch > $3 AND e.end_epoch <= $4) OR
+           (e.start_epoch <= $3 AND e.end_epoch >= $4)
+         )
+       ORDER BY e.start_epoch
+       LIMIT 1`,
+      [engagement.serviceproviderid, id, currentEndEpoch, maxCheckEpoch]
+    );
+    
+    let maxExtensionHours = maxCheckHours;
+    
+    // If there's a conflict, calculate max hours until conflict
+    if (conflictRes.rows.length > 0) {
+      const nextBooking = conflictRes.rows[0];
+      const hoursDiff = (Number(nextBooking.start_epoch) - currentEndEpoch) / 3600;
+      maxExtensionHours = Math.floor(hoursDiff);
+    }
+    
+    // Calculate hourly rate
+    const durationMinutes = Number(engagement.duration_minutes) || 60;
+    const baseAmount = Number(engagement.base_amount) || 0;
+    const hourlyRate = durationMinutes > 0 ? (baseAmount / (durationMinutes / 60)) : baseAmount;
+    
+    // Generate available slots
+    const availableSlots = [];
+    for (let hours = 1; hours <= maxExtensionHours; hours++) {
+      const newEndEpoch = currentEndEpoch + (hours * 3600);
+      const newEndTime = dayjs.unix(newEndEpoch).tz("Asia/Kolkata");
+      
+      availableSlots.push({
+        hours,
+        newEndTime: newEndTime.toISOString(),
+        newEndTimeFormatted: newEndTime.format("DD MMM YYYY, hh:mm A"),
+        additionalCost: Math.round(hourlyRate * hours * 100) / 100,
+        totalCost: Math.round((baseAmount + hourlyRate * hours) * 100) / 100
+      });
+    }
+    
+    res.json({
+      success: true,
+      canExtend: maxExtensionHours > 0,
+      maxExtensionHours,
+      providerAvailable: true,
+      currentEndTime: endTime.toISOString(),
+      currentEndTimeFormatted: endTime.format("DD MMM YYYY, hh:mm A"),
+      hourlyRate: Math.round(hourlyRate * 100) / 100,
+      availableSlots,
+      reason: maxExtensionHours > 0 ? null : "Provider has conflicting bookings"
+    });
+    
+  } catch (err) {
+    console.error("[extension-availability] Error:", err);
+    res.status(500).json({ error: "Failed to check extension availability" });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Extend booking with additional hours
+ * POST /api/v2/engagements/:id/extend
+ */
+router.post("/:id/extend", async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { id } = req.params;
+    const { extensionHours, newEndTime, additionalAmount, paymentMode } = req.body;
+    
+    // Validation
+    if (!extensionHours || extensionHours < 1) {
+      return res.status(400).json({ error: "Invalid extension hours" });
+    }
+    
+    if (!newEndTime) {
+      return res.status(400).json({ error: "New end time required" });
+    }
+    
+    if (!additionalAmount || additionalAmount <= 0) {
+      return res.status(400).json({ error: "Invalid additional amount" });
+    }
+    
+    await client.query("BEGIN");
+    
+    // Get engagement with lock
+    const engRes = await client.query(
+      `SELECT e.*, p.total_amount as payment_total
+       FROM engagements e
+       LEFT JOIN payments p ON p.engagement_id = e.engagement_id AND p.status = 'SUCCESS'
+       WHERE e.engagement_id = $1
+       FOR UPDATE`,
+      [id]
+    );
+    
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+    
+    const engagement = engRes.rows[0];
+    const bookingType = String(engagement.booking_type || "").toUpperCase();
+    const taskStatus = String(engagement.task_status || "").toUpperCase();
+    
+    // Revalidate booking can be extended
+    if (bookingType !== "ON_DEMAND") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Only one-time bookings can be extended" });
+    }
+    
+    if (!["NOT_STARTED", "IN_PROGRESS"].includes(taskStatus)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Booking is not active" });
+    }
+    
+    // Check for conflicts again (prevent race conditions)
+    const newEndEpoch = dayjs(newEndTime).unix();
+    const currentEndEpoch = Number(engagement.end_epoch);
+    
+    const conflictCheck = await client.query(
+      `SELECT engagement_id FROM engagements
+       WHERE serviceproviderid = $1
+         AND engagement_id != $2
+         AND task_status NOT IN ('CANCELLED', 'COMPLETED')
+         AND start_epoch < $3
+         AND end_epoch > $4`,
+      [engagement.serviceproviderid, id, newEndEpoch, currentEndEpoch]
+    );
+    
+    if (conflictCheck.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ 
+        error: "Provider has a conflicting booking in the extended time slot" 
+      });
+    }
+    
+    // Store original end time if this is first extension
+    const originalEndEpoch = engagement.original_end_epoch || engagement.end_epoch;
+    const extensionCount = (engagement.extension_count || 0) + 1;
+    
+    // Update engagement
+    await client.query(
+      `UPDATE engagements
+       SET end_time = $1,
+           end_epoch = $2,
+           base_amount = base_amount + $3,
+           extension_count = $4,
+           original_end_epoch = $5,
+           last_extended_at = NOW(),
+           updated_at = NOW()
+       WHERE engagement_id = $6`,
+      [
+        dayjs(newEndTime).tz("Asia/Kolkata").format("HH:mm"),
+        newEndEpoch,
+        additionalAmount,
+        extensionCount,
+        originalEndEpoch,
+        id
+      ]
+    );
+    
+    // Create payment record for extension
+    await client.query(
+      `INSERT INTO payments (
+        engagement_id, customerid, total_amount, base_amount,
+        payment_mode, status, payment_type, created_at
+      ) VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 'EXTENSION', NOW())`,
+      [
+        id,
+        engagement.customerid,
+        additionalAmount,
+        additionalAmount,
+        paymentMode || 'CASH'
+      ]
+    );
+    
+    // Log extension event
+    await client.query(
+      `INSERT INTO engagement_events (
+        engagement_id, from_status, to_status, event_type,
+        actor_type, actor_id, metadata, created_at
+      ) VALUES ($1, $2, $3, 'BOOKING_EXTENDED', 'CUSTOMER', $4, $5, NOW())`,
+      [
+        id,
+        taskStatus,
+        taskStatus,
+        engagement.customerid,
+        JSON.stringify({
+          extension_hours: extensionHours,
+          additional_amount: additionalAmount,
+          new_end_time: newEndTime,
+          old_end_epoch: currentEndEpoch,
+          new_end_epoch: newEndEpoch,
+          extension_count: extensionCount
+        })
+      ]
+    );
+    
+    // Create notification for provider
+    await createInAppNotification(client, {
+      recipientType: "provider",
+      recipientId: engagement.serviceproviderid,
+      type: InAppTypes.BOOKING_EXTENDED,
+      title: "Booking Extended",
+      body: `Customer extended booking #${id} by ${extensionHours} hour${extensionHours > 1 ? 's' : ''}`,
+      engagementId: id,
+      metadata: {
+        extension_hours: extensionHours,
+        new_end_time: newEndTime,
+        additional_amount: additionalAmount
+      }
+    });
+    
+    await client.query("COMMIT");
+    
+    // Get updated engagement
+    const updatedRes = await client.query(
+      `SELECT * FROM engagements WHERE engagement_id = $1`,
+      [id]
+    );
+    
+    res.json({
+      success: true,
+      message: `Booking extended by ${extensionHours} hour${extensionHours > 1 ? 's' : ''} successfully`,
+      engagement: updatedRes.rows[0],
+      extensionDetails: {
+        hours: extensionHours,
+        additionalAmount,
+        newEndTime,
+        extensionCount
+      }
+    });
+    
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("[extend-booking] Error:", err);
+    res.status(500).json({ error: "Failed to extend booking" });
+  } finally {
+    client.release();
+  }
+});
+
 router.get("/:id/history", async (req, res) => {
   const { id } = req.params;
 
