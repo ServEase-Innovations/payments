@@ -569,25 +569,20 @@ router.post("/:id/extend", async (req, res) => {
       });
     }
     
-    // Store original end time if this is first extension
-    const originalEndEpoch = engagement.original_end_epoch || engagement.end_epoch;
-    const extensionCount = (engagement.extension_count || 0) + 1;
+    // Store original end time if this is first extension (optional tracking)
+    // Note: extension_count, original_end_epoch, last_extended_at columns don't exist yet
+    // These can be added later as database enhancements
     
-    // Update engagement
+    // Update engagement - only update core fields that exist
     await client.query(
       `UPDATE engagements
        SET end_epoch = $1,
            base_amount = base_amount + $2,
-           extension_count = $3,
-           original_end_epoch = $4,
-           last_extended_at = NOW(),
            updated_at = NOW()
-       WHERE engagement_id = $5`,
+       WHERE engagement_id = $3`,
       [
         newEndEpoch,
         additionalAmount,
-        extensionCount,
-        originalEndEpoch,
         id
       ]
     );
