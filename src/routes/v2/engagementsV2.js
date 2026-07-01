@@ -330,7 +330,7 @@ router.get("/:id/extension-availability", async (req, res) => {
     // Get engagement details
     const engRes = await client.query(
       `SELECT e.engagement_id, e.booking_type, e.serviceproviderid, e.service_type,
-              e.end_epoch, e.end_time, e.engagement_status, e.task_status,
+              e.end_epoch, e.engagement_status, e.task_status,
               e.start_epoch, e.base_amount, e.duration_minutes
        FROM engagements e
        WHERE e.engagement_id = $1`,
@@ -379,18 +379,10 @@ router.get("/:id/extension-availability", async (req, res) => {
       });
     }
     
-    // Validation: Check if booking has ended
-    const now = dayjs();
-    const endTime = dayjs.unix(Number(engagement.end_epoch)).tz("Asia/Kolkata");
-    if (now.isAfter(endTime)) {
-      return res.json({
-        success: true,
-        canExtend: false,
-        reason: "Booking has already ended",
-        maxExtensionHours: 0,
-        availableSlots: []
-      });
-    }
+    // Validation: For completed bookings, cannot extend
+    // For NOT_STARTED and IN_PROGRESS, we can extend
+    // Note: We don't check if booking has ended by time, only by status
+    // This allows extending bookings that are scheduled for the future
     
     // Check provider conflicts after current end time
     const currentEndEpoch = Number(engagement.end_epoch);
@@ -447,8 +439,8 @@ router.get("/:id/extension-availability", async (req, res) => {
       canExtend: maxExtensionHours > 0,
       maxExtensionHours,
       providerAvailable: true,
-      currentEndTime: endTime.toISOString(),
-      currentEndTimeFormatted: endTime.format("DD MMM YYYY, hh:mm A"),
+      currentEndTime: dayjs.unix(currentEndEpoch).tz("Asia/Kolkata").toISOString(),
+      currentEndTimeFormatted: dayjs.unix(currentEndEpoch).tz("Asia/Kolkata").format("DD MMM YYYY, hh:mm A"),
       hourlyRate: Math.round(hourlyRate * 100) / 100,
       availableSlots,
       reason: maxExtensionHours > 0 ? null : "Provider has conflicting bookings"
