@@ -513,13 +513,12 @@ router.post("/:id/extend", async (req, res) => {
     
     await client.query("BEGIN");
     
-    // Get engagement with lock
+    // Get engagement with lock (lock only the engagement, not the join)
     const engRes = await client.query(
       `SELECT e.*, p.total_amount as payment_total
        FROM engagements e
        LEFT JOIN payments p ON p.engagement_id = e.engagement_id AND p.status = 'SUCCESS'
-       WHERE e.engagement_id = $1
-       FOR UPDATE`,
+       WHERE e.engagement_id = $1`,
       [id]
     );
     
@@ -527,6 +526,12 @@ router.post("/:id/extend", async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Engagement not found" });
     }
+    
+    // Now lock the engagement row
+    await client.query(
+      `SELECT * FROM engagements WHERE engagement_id = $1 FOR UPDATE`,
+      [id]
+    );
     
     const engagement = engRes.rows[0];
     const bookingType = String(engagement.booking_type || "").toUpperCase();
