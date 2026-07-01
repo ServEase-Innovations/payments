@@ -616,8 +616,7 @@ router.post("/:id/extend", async (req, res) => {
           additional_amount: additionalAmount,
           new_end_time: newEndTime,
           old_end_epoch: currentEndEpoch,
-          new_end_epoch: newEndEpoch,
-          extension_count: extensionCount
+          new_end_epoch: newEndEpoch
         })
       ]
     );
