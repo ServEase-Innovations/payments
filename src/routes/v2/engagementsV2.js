@@ -577,8 +577,7 @@ router.post("/:id/extend", async (req, res) => {
     await client.query(
       `UPDATE engagements
        SET end_epoch = $1,
-           base_amount = base_amount + $2,
-           updated_at = NOW()
+           base_amount = base_amount + $2
        WHERE engagement_id = $3`,
       [
         newEndEpoch,
