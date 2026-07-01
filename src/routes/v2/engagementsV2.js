@@ -589,12 +589,11 @@ router.post("/:id/extend", async (req, res) => {
     // Create payment record for extension
     await client.query(
       `INSERT INTO payments (
-        engagement_id, customerid, total_amount, base_amount,
-        payment_mode, status, payment_type, created_at
-      ) VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 'EXTENSION', NOW())`,
+        engagement_id, total_amount, base_amount, platform_fee, gst,
+        payment_mode, status, created_at
+      ) VALUES ($1, $2, $3, 0, 0, $4, 'SUCCESS', NOW())`,
       [
         id,
-        engagement.customerid,
         additionalAmount,
         additionalAmount,
         paymentMode || 'CASH'
