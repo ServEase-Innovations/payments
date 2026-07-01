@@ -576,16 +576,14 @@ router.post("/:id/extend", async (req, res) => {
     // Update engagement
     await client.query(
       `UPDATE engagements
-       SET end_time = $1,
-           end_epoch = $2,
-           base_amount = base_amount + $3,
-           extension_count = $4,
-           original_end_epoch = $5,
+       SET end_epoch = $1,
+           base_amount = base_amount + $2,
+           extension_count = $3,
+           original_end_epoch = $4,
            last_extended_at = NOW(),
            updated_at = NOW()
-       WHERE engagement_id = $6`,
+       WHERE engagement_id = $5`,
       [
-        dayjs(newEndTime).tz("Asia/Kolkata").format("HH:mm"),
         newEndEpoch,
         additionalAmount,
         extensionCount,
