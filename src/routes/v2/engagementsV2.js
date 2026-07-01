@@ -387,7 +387,30 @@ router.get("/:id/extension-availability", async (req, res) => {
     // Check provider conflicts after current end time
     const currentEndEpoch = Number(engagement.end_epoch);
     const maxCheckHours = 4; // Check up to 4 hours ahead
-    const maxCheckEpoch = currentEndEpoch + (maxCheckHours * 3600);
+    
+    // Platform constraint: Services must end by 8:00 PM (20:00)
+    const WORK_DAY_END_HOUR = 20;
+    const currentEndTime = dayjs.unix(currentEndEpoch).tz("Asia/Kolkata");
+    const workDayEnd = currentEndTime.clone().hour(WORK_DAY_END_HOUR).minute(0).second(0);
+    
+    // Calculate max hours until work day ends
+    const maxHoursUntilWorkDayEnd = Math.floor(workDayEnd.diff(currentEndTime, 'minute') / 60);
+    
+    // Limit to the lesser of: max check hours OR hours until work day ends
+    let maxExtensionHours = Math.min(maxCheckHours, Math.max(0, maxHoursUntilWorkDayEnd));
+    
+    // If already at or past 8 PM, cannot extend
+    if (maxHoursUntilWorkDayEnd <= 0) {
+      return res.json({
+        success: true,
+        canExtend: false,
+        reason: "Service must end by 8:00 PM. Cannot extend further.",
+        maxExtensionHours: 0,
+        availableSlots: []
+      });
+    }
+    
+    const maxCheckEpoch = currentEndEpoch + (maxExtensionHours * 3600);
     
     const conflictRes = await client.query(
       `SELECT e.engagement_id, e.start_epoch, e.end_epoch, e.task_status
@@ -405,13 +428,11 @@ router.get("/:id/extension-availability", async (req, res) => {
       [engagement.serviceproviderid, id, currentEndEpoch, maxCheckEpoch]
     );
     
-    let maxExtensionHours = maxCheckHours;
-    
-    // If there's a conflict, calculate max hours until conflict
+    // If there's a conflict, further limit max hours to avoid the conflict
     if (conflictRes.rows.length > 0) {
       const nextBooking = conflictRes.rows[0];
-      const hoursDiff = (Number(nextBooking.start_epoch) - currentEndEpoch) / 3600;
-      maxExtensionHours = Math.floor(hoursDiff);
+      const hoursUntilConflict = Math.floor((Number(nextBooking.start_epoch) - currentEndEpoch) / 3600);
+      maxExtensionHours = Math.min(maxExtensionHours, hoursUntilConflict);
     }
     
     // Calculate hourly rate
@@ -434,6 +455,18 @@ router.get("/:id/extension-availability", async (req, res) => {
       });
     }
     
+    // Determine reason if cannot extend
+    let reason = null;
+    if (maxExtensionHours <= 0) {
+      if (maxHoursUntilWorkDayEnd <= 0) {
+        reason = "Service must end by 8:00 PM. Cannot extend further.";
+      } else if (conflictRes.rows.length > 0) {
+        reason = "Provider has conflicting bookings";
+      } else {
+        reason = "No extension slots available";
+      }
+    }
+    
     res.json({
       success: true,
       canExtend: maxExtensionHours > 0,
@@ -443,7 +476,7 @@ router.get("/:id/extension-availability", async (req, res) => {
       currentEndTimeFormatted: dayjs.unix(currentEndEpoch).tz("Asia/Kolkata").format("DD MMM YYYY, hh:mm A"),
       hourlyRate: Math.round(hourlyRate * 100) / 100,
       availableSlots,
-      reason: maxExtensionHours > 0 ? null : "Provider has conflicting bookings"
+      reason
     });
     
   } catch (err) {
