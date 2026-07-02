@@ -2,6 +2,8 @@ import express from "express";
 import pool from "../../config/db.js";
 import { transitionEngagement } from "../../services/engagementLifecycle.js";
 import Razorpay from "razorpay";
+import { razorpay, getRazorpayKeyId, getRazorpayKeySecret } from "../../utils/razorpayConfig.js";
+import { createHmac } from "crypto";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -327,13 +329,17 @@ router.get("/:id/extension-availability", async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Get engagement details
+    // Get engagement details with payment total
     const engRes = await client.query(
       `SELECT e.engagement_id, e.booking_type, e.serviceproviderid, e.service_type,
               e.end_epoch, e.engagement_status, e.task_status,
-              e.start_epoch, e.base_amount, e.duration_minutes
+              e.start_epoch, e.base_amount, e.duration_minutes,
+              p.total_amount
        FROM engagements e
-       WHERE e.engagement_id = $1`,
+       LEFT JOIN payments p ON p.engagement_id = e.engagement_id AND p.status = 'SUCCESS'
+       WHERE e.engagement_id = $1
+       ORDER BY p.created_at DESC
+       LIMIT 1`,
       [id]
     );
     
@@ -391,10 +397,27 @@ router.get("/:id/extension-availability", async (req, res) => {
     // Platform constraint: Services must end by 8:00 PM (20:00)
     const WORK_DAY_END_HOUR = 20;
     const currentEndTime = dayjs.unix(currentEndEpoch).tz("Asia/Kolkata");
-    const workDayEnd = currentEndTime.clone().hour(WORK_DAY_END_HOUR).minute(0).second(0);
     
-    // Calculate max hours until work day ends
-    const maxHoursUntilWorkDayEnd = Math.floor(workDayEnd.diff(currentEndTime, 'minute') / 60);
+    // Work day end is on the same calendar day as the booking end time
+    const workDayEnd = currentEndTime.clone()
+      .hour(WORK_DAY_END_HOUR)
+      .minute(0)
+      .second(0)
+      .millisecond(0);
+    
+    // Calculate max hours from booking end to work day end (8 PM)
+    const secondsUntilWorkDayEnd = workDayEnd.unix() - currentEndEpoch;
+    const maxHoursUntilWorkDayEnd = Math.floor(secondsUntilWorkDayEnd / 3600);
+    
+    console.log('[extension-availability] Debug:', {
+      currentEndEpoch,
+      currentEndTime: currentEndTime.format('YYYY-MM-DD HH:mm:ss'),
+      workDayEnd: workDayEnd.format('YYYY-MM-DD HH:mm:ss'),
+      workDayEndEpoch: workDayEnd.unix(),
+      secondsUntilWorkDayEnd,
+      maxHoursUntilWorkDayEnd,
+      serviceproviderid: engagement.serviceproviderid
+    });
     
     // Limit to the lesser of: max check hours OR hours until work day ends
     let maxExtensionHours = Math.min(maxCheckHours, Math.max(0, maxHoursUntilWorkDayEnd));
@@ -412,12 +435,26 @@ router.get("/:id/extension-availability", async (req, res) => {
     
     const maxCheckEpoch = currentEndEpoch + (maxExtensionHours * 3600);
     
+    console.log('[extension-availability] Conflict check:', {
+      currentEndEpoch,
+      maxCheckEpoch,
+      maxExtensionHours,
+      range: `${currentEndEpoch} to ${maxCheckEpoch}`
+    });
+    
+    // For conflict detection, we need to be smart about booking types:
+    // - ON_DEMAND bookings are specific time slots (e.g., 10 AM - 4 PM on July 2)
+    // - SHORT_TERM/MONTHLY bookings span multiple days but have specific daily time slots
+    // We should only check for conflicts with other ON_DEMAND bookings in the same time window
+    // OR check if SHORT_TERM bookings have overlapping daily time slots
+    
     const conflictRes = await client.query(
-      `SELECT e.engagement_id, e.start_epoch, e.end_epoch, e.task_status
+      `SELECT e.engagement_id, e.start_epoch, e.end_epoch, e.task_status, e.booking_type
        FROM engagements e
        WHERE e.serviceproviderid = $1
          AND e.engagement_id != $2
          AND e.task_status NOT IN ('CANCELLED', 'COMPLETED')
+         AND e.booking_type = 'ON_DEMAND'
          AND (
            (e.start_epoch >= $3 AND e.start_epoch < $4) OR
            (e.end_epoch > $3 AND e.end_epoch <= $4) OR
@@ -428,6 +465,8 @@ router.get("/:id/extension-availability", async (req, res) => {
       [engagement.serviceproviderid, id, currentEndEpoch, maxCheckEpoch]
     );
     
+    console.log('[extension-availability] ON_DEMAND conflicts found:', conflictRes.rows.length, conflictRes.rows);
+    
     // If there's a conflict, further limit max hours to avoid the conflict
     if (conflictRes.rows.length > 0) {
       const nextBooking = conflictRes.rows[0];
@@ -435,23 +474,87 @@ router.get("/:id/extension-availability", async (req, res) => {
       maxExtensionHours = Math.min(maxExtensionHours, hoursUntilConflict);
     }
     
-    // Calculate hourly rate
-    const durationMinutes = Number(engagement.duration_minutes) || 60;
-    const baseAmount = Number(engagement.base_amount) || 0;
-    const hourlyRate = durationMinutes > 0 ? (baseAmount / (durationMinutes / 60)) : baseAmount;
+    // For on-demand bookings, use standard hourly rate (₹175 mid-point)
+    // This matches the onDemandPricing.js module: ₹150-₹200/hr (mid = ₹175)
+    const HOURLY_RATE = 175;
+    const INCREMENTAL_HOUR_DISCOUNT_PCT = 5; // 5% off for 2nd, 3rd, 4th hours...
     
-    // Generate available slots
+    const durationMinutes = Number(engagement.duration_minutes) || 60;
+    const durationHours = durationMinutes / 60;
+    const baseAmount = Number(engagement.base_amount) || 0;
+    
+    // Get or calculate current total amount (with fees)
+    let currentTotalAmount = Number(engagement.total_amount) || 0;
+    if (currentTotalAmount === 0 && baseAmount > 0) {
+      // Calculate total from base if not available
+      const currentPlatformFee = Math.round(baseAmount * 0.06 * 100) / 100;
+      const currentGst = Math.round(currentPlatformFee * 0.18 * 100) / 100;
+      currentTotalAmount = Math.round((baseAmount + currentPlatformFee + currentGst) * 100) / 100;
+    }
+    
+    // Generate available slots with proper pricing (base + platform fee + GST + discounts)
     const availableSlots = [];
     for (let hours = 1; hours <= maxExtensionHours; hours++) {
       const newEndEpoch = currentEndEpoch + (hours * 3600);
       const newEndTime = dayjs.unix(newEndEpoch).tz("Asia/Kolkata");
       
+      // Calculate additional base amount with incremental discount
+      // 1st extension hour: full rate
+      // 2nd+ extension hours: 5% off each
+      let additionalBaseGross = 0;
+      let additionalBaseNet = 0;
+      let hourDiscount = 0;
+      
+      for (let h = 1; h <= hours; h++) {
+        const hourRate = HOURLY_RATE;
+        additionalBaseGross += hourRate;
+        
+        if (h === 1) {
+          // First extension hour at full rate
+          additionalBaseNet += hourRate;
+        } else {
+          // Additional hours get 5% discount
+          const discountedRate = Math.round(hourRate * (1 - INCREMENTAL_HOUR_DISCOUNT_PCT / 100) * 100) / 100;
+          additionalBaseNet += discountedRate;
+          hourDiscount += Math.round((hourRate - discountedRate) * 100) / 100;
+        }
+      }
+      
+      additionalBaseGross = Math.round(additionalBaseGross * 100) / 100;
+      additionalBaseNet = Math.round(additionalBaseNet * 100) / 100;
+      hourDiscount = Math.round(hourDiscount * 100) / 100;
+      
+      // Calculate platform fee (6%) on net base amount (after hour discount)
+      const platformFee = Math.round(additionalBaseNet * 0.06 * 100) / 100;
+      const gst = Math.round(platformFee * 0.18 * 100) / 100;
+      const additionalTotal = Math.round((additionalBaseNet + platformFee + gst) * 100) / 100;
+      
+      // Calculate new total booking cost
+      const newTotal = Math.round((currentTotalAmount + additionalTotal) * 100) / 100;
+      
       availableSlots.push({
         hours,
         newEndTime: newEndTime.toISOString(),
         newEndTimeFormatted: newEndTime.format("DD MMM YYYY, hh:mm A"),
-        additionalCost: Math.round(hourlyRate * hours * 100) / 100,
-        totalCost: Math.round((baseAmount + hourlyRate * hours) * 100) / 100
+        pricing: {
+          baseGross: additionalBaseGross,
+          baseNet: additionalBaseNet,
+          hourDiscount: hourDiscount,
+          platformFee: platformFee,
+          gst: gst,
+          total: additionalTotal
+        },
+        // Legacy fields for backward compatibility
+        additionalBase: additionalBaseNet,
+        platformFee,
+        gst,
+        additionalCost: additionalTotal,
+        totalCost: newTotal,
+        // Discount details
+        discounts: hourDiscount > 0 ? [{
+          label: `${INCREMENTAL_HOUR_DISCOUNT_PCT}% off on ${hours - 1} additional hour${hours > 2 ? 's' : ''}`,
+          amount: hourDiscount
+        }] : []
       });
     }
     
@@ -474,7 +577,13 @@ router.get("/:id/extension-availability", async (req, res) => {
       providerAvailable: true,
       currentEndTime: dayjs.unix(currentEndEpoch).tz("Asia/Kolkata").toISOString(),
       currentEndTimeFormatted: dayjs.unix(currentEndEpoch).tz("Asia/Kolkata").format("DD MMM YYYY, hh:mm A"),
-      hourlyRate: Math.round(hourlyRate * 100) / 100,
+      hourlyBaseRate: HOURLY_RATE,
+      bookingDetails: {
+        baseAmount,
+        totalAmount: currentTotalAmount,
+        durationMinutes,
+        durationHours
+      },
       availableSlots,
       reason
     });
@@ -488,15 +597,18 @@ router.get("/:id/extension-availability", async (req, res) => {
 });
 
 /**
- * Extend booking with additional hours
+ * Extend booking with additional hours - Razorpay payment flow
  * POST /api/v2/engagements/:id/extend
+ * 
+ * Step 1: Validate, check conflicts, create Razorpay order, and log EXTENSION_INITIATED event
+ * Returns: { success: true, requires_payment: true, razorpay_order_id, razorpay_key_id, amount, currency, extensionDetails }
  */
 router.post("/:id/extend", async (req, res) => {
   const client = await pool.connect();
   
   try {
     const { id } = req.params;
-    const { extensionHours, newEndTime, additionalAmount, paymentMode } = req.body;
+    const { extensionHours, newEndTime, additionalAmount } = req.body;
     
     // Validation
     if (!extensionHours || extensionHours < 1) {
@@ -513,12 +625,11 @@ router.post("/:id/extend", async (req, res) => {
     
     await client.query("BEGIN");
     
-    // Get engagement with lock (lock only the engagement, not the join)
+    // Get engagement with lock
     const engRes = await client.query(
-      `SELECT e.*, p.total_amount as payment_total
-       FROM engagements e
-       LEFT JOIN payments p ON p.engagement_id = e.engagement_id AND p.status = 'SUCCESS'
-       WHERE e.engagement_id = $1`,
+      `SELECT e.* FROM engagements e
+       WHERE e.engagement_id = $1
+       FOR UPDATE`,
       [id]
     );
     
@@ -526,12 +637,6 @@ router.post("/:id/extend", async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Engagement not found" });
     }
-    
-    // Now lock the engagement row
-    await client.query(
-      `SELECT * FROM engagements WHERE engagement_id = $1 FOR UPDATE`,
-      [id]
-    );
     
     const engagement = engRes.rows[0];
     const bookingType = String(engagement.booking_type || "").toUpperCase();
@@ -548,7 +653,13 @@ router.post("/:id/extend", async (req, res) => {
       return res.status(400).json({ error: "Booking is not active" });
     }
     
-    // Check for conflicts again (prevent race conditions)
+    if (!engagement.serviceproviderid) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "No provider assigned" });
+    }
+    
+    // Check for conflicts (prevent race conditions)
+    // Only check for conflicts with other ON_DEMAND bookings
     const newEndEpoch = dayjs(newEndTime).unix();
     const currentEndEpoch = Number(engagement.end_epoch);
     
@@ -556,6 +667,7 @@ router.post("/:id/extend", async (req, res) => {
       `SELECT engagement_id FROM engagements
        WHERE serviceproviderid = $1
          AND engagement_id != $2
+         AND booking_type = 'ON_DEMAND'
          AND task_status NOT IN ('CANCELLED', 'COMPLETED')
          AND start_epoch < $3
          AND end_epoch > $4`,
@@ -569,38 +681,200 @@ router.post("/:id/extend", async (req, res) => {
       });
     }
     
-    // Store original end time if this is first extension (optional tracking)
-    // Note: extension_count, original_end_epoch, last_extended_at columns don't exist yet
-    // These can be added later as database enhancements
+    // Create Razorpay order
+    const amountPaise = Math.round(additionalAmount * 100);
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amountPaise,
+      currency: "INR",
+      receipt: `ext_${id}_${Date.now()}`,
+    });
     
-    // Update engagement - only update core fields that exist
+    // Calculate breakdown: additionalAmount = base + platform_fee + gst
+    // Where platform_fee = base * 0.06 and gst = platform_fee * 0.18
+    // So: total = base * (1 + 0.06 + 0.06*0.18) = base * 1.0708
+    const extensionBase = Math.round((additionalAmount / 1.0708) * 100) / 100;
+    const extensionPlatformFee = Math.round(extensionBase * 0.06 * 100) / 100;
+    const extensionGst = Math.round(extensionPlatformFee * 0.18 * 100) / 100;
+    
+    // Create payment record with PENDING status
+    await client.query(
+      `INSERT INTO payments (
+        engagement_id, total_amount, base_amount, platform_fee, gst,
+        payment_mode, status, razorpay_order_id, created_at
+      ) VALUES ($1, $2, $3, $4, $5, 'RAZORPAY', 'PENDING', $6, NOW())`,
+      [
+        id,
+        additionalAmount,
+        extensionBase,
+        extensionPlatformFee,
+        extensionGst,
+        razorpayOrder.id
+      ]
+    );
+    
+    // Log EXTENSION_INITIATED event with extension details in metadata
+    await client.query(
+      `INSERT INTO engagement_events (
+        engagement_id, from_status, to_status, event_type,
+        actor_type, actor_id, metadata, created_at
+      ) VALUES ($1, $2, $3, 'EXTENSION_INITIATED', 'CUSTOMER', $4, $5, NOW())`,
+      [
+        id,
+        taskStatus,
+        taskStatus,
+        engagement.customerid,
+        JSON.stringify({
+          extension_hours: extensionHours,
+          additional_amount: additionalAmount,
+          new_end_time: newEndTime,
+          old_end_epoch: currentEndEpoch,
+          new_end_epoch: newEndEpoch,
+          razorpay_order_id: razorpayOrder.id
+        })
+      ]
+    );
+    
+    await client.query("COMMIT");
+    
+    // Return Razorpay payment details (like booking creation)
+    res.json({
+      success: true,
+      requires_payment: true,
+      razorpay_order_id: razorpayOrder.id,
+      razorpay_key_id: getRazorpayKeyId(),
+      amount: amountPaise,
+      currency: "INR",
+      extensionDetails: {
+        hours: extensionHours,
+        additionalAmount,
+        newEndTime,
+        oldEndEpoch: currentEndEpoch,
+        newEndEpoch
+      }
+    });
+    
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("[extend-booking] Error:", err);
+    console.error("[extend-booking] Error details:", {
+      message: err.message,
+      stack: err.stack,
+      code: err.code
+    });
+    res.status(500).json({ 
+      error: "Failed to initiate extension payment",
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Verify Razorpay payment for booking extension
+ * POST /api/v2/engagements/:id/extend/verify
+ * 
+ * Step 2: Verify signature, retrieve extension details from EXTENSION_INITIATED event,
+ * update engagement, mark payment SUCCESS, log BOOKING_EXTENDED event, and notify provider
+ */
+router.post("/:id/extend/verify", async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { id } = req.params;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    
+    // Validation
+    if (!razorpay_order_id || !razorpay_payment_id) {
+      return res.status(400).json({ 
+        error: "razorpay_order_id and razorpay_payment_id are required" 
+      });
+    }
+    
+    // Verify Razorpay signature (same as /api/v2/createEngagements/verify)
+    if (process.env.SKIP_RAZORPAY_VERIFY !== "true") {
+      const body = `${razorpay_order_id}|${razorpay_payment_id}`;
+      const expectedSignature = createHmac("sha256", getRazorpayKeySecret())
+        .update(body)
+        .digest("hex");
+      
+      if (expectedSignature !== razorpay_signature) {
+        return res.status(400).json({ error: "Invalid Razorpay signature" });
+      }
+    }
+    
+    await client.query("BEGIN");
+    
+    // Get engagement with lock
+    const engRes = await client.query(
+      `SELECT e.* FROM engagements e
+       WHERE e.engagement_id = $1
+       FOR UPDATE`,
+      [id]
+    );
+    
+    if (!engRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+    
+    const engagement = engRes.rows[0];
+    
+    // Retrieve EXTENSION_INITIATED event to get extension details
+    const eventRes = await client.query(
+      `SELECT metadata FROM engagement_events
+       WHERE engagement_id = $1
+         AND event_type = 'EXTENSION_INITIATED'
+         AND metadata->>'razorpay_order_id' = $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [id, razorpay_order_id]
+    );
+    
+    if (!eventRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ 
+        error: "Extension initiation record not found" 
+      });
+    }
+    
+    const extensionMetadata = eventRes.rows[0].metadata;
+    const {
+      extension_hours: extensionHours,
+      additional_amount: additionalAmount,
+      new_end_time: newEndTime,
+      old_end_epoch: oldEndEpoch,
+      new_end_epoch: newEndEpoch
+    } = extensionMetadata;
+    
+    // Calculate base amount from total (reverse calculation)
+    // total = base * 1.0708, so base = total / 1.0708
+    const extensionBase = Math.round((additionalAmount / 1.0708) * 100) / 100;
+    
+    // Update engagement with new end time and base amount (not total)
     await client.query(
       `UPDATE engagements
        SET end_epoch = $1,
            base_amount = base_amount + $2
        WHERE engagement_id = $3`,
-      [
-        newEndEpoch,
-        additionalAmount,
-        id
-      ]
+      [newEndEpoch, extensionBase, id]
     );
     
-    // Create payment record for extension
+    // Update payment status to SUCCESS with razorpay_payment_id
     await client.query(
-      `INSERT INTO payments (
-        engagement_id, total_amount, base_amount, platform_fee, gst,
-        payment_mode, status, created_at
-      ) VALUES ($1, $2, $3, 0, 0, $4, 'SUCCESS', NOW())`,
-      [
-        id,
-        additionalAmount,
-        additionalAmount,
-        paymentMode || 'CASH'
-      ]
+      `UPDATE payments
+       SET status = 'SUCCESS',
+           transaction_id = $1,
+           updated_at = NOW()
+       WHERE engagement_id = $2
+         AND razorpay_order_id = $3
+         AND status = 'PENDING'`,
+      [razorpay_payment_id, id, razorpay_order_id]
     );
     
-    // Log extension event
+    const taskStatus = String(engagement.task_status || "").toUpperCase();
+    
+    // Log BOOKING_EXTENDED event
     await client.query(
       `INSERT INTO engagement_events (
         engagement_id, from_status, to_status, event_type,
@@ -615,26 +889,30 @@ router.post("/:id/extend", async (req, res) => {
           extension_hours: extensionHours,
           additional_amount: additionalAmount,
           new_end_time: newEndTime,
-          old_end_epoch: currentEndEpoch,
-          new_end_epoch: newEndEpoch
+          old_end_epoch: oldEndEpoch,
+          new_end_epoch: newEndEpoch,
+          razorpay_order_id,
+          razorpay_payment_id
         })
       ]
     );
     
-    // Create notification for provider
-    await createInAppNotification(client, {
-      recipientType: "provider",
-      recipientId: engagement.serviceproviderid,
-      type: InAppTypes.BOOKING_EXTENDED,
-      title: "Booking Extended",
-      body: `Customer extended booking #${id} by ${extensionHours} hour${extensionHours > 1 ? 's' : ''}`,
-      engagementId: id,
-      metadata: {
-        extension_hours: extensionHours,
-        new_end_time: newEndTime,
-        additional_amount: additionalAmount
-      }
-    });
+    // Send notification to provider
+    if (engagement.serviceproviderid) {
+      await createInAppNotification({
+        recipientType: "provider",
+        recipientId: engagement.serviceproviderid,
+        type: InAppTypes.BOOKING_EXTENDED,
+        title: "Booking Extended",
+        body: `Customer extended booking #${id} by ${extensionHours} hour${extensionHours > 1 ? 's' : ''}`,
+        engagementId: id,
+        metadata: {
+          extension_hours: extensionHours,
+          new_end_time: newEndTime,
+          additional_amount: additionalAmount
+        }
+      });
+    }
     
     await client.query("COMMIT");
     
@@ -651,15 +929,14 @@ router.post("/:id/extend", async (req, res) => {
       extensionDetails: {
         hours: extensionHours,
         additionalAmount,
-        newEndTime,
-        extensionCount
+        newEndTime
       }
     });
     
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("[extend-booking] Error:", err);
-    res.status(500).json({ error: "Failed to extend booking" });
+    console.error("[extend-verify] Error:", err);
+    res.status(500).json({ error: "Failed to verify extension payment" });
   } finally {
     client.release();
   }
