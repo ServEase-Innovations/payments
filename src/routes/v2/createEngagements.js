@@ -1010,10 +1010,34 @@ router.post("/:engagementId/modify-schedule", async (req, res) => {
     });
   } catch (err) {
     const code = err.statusCode || 500;
-    console.error("modify-schedule initiate error:", err);
+    
+    // Improved error logging for debugging
+    if (code >= 500) {
+      console.error("modify-schedule error:", {
+        engagementId: req.params.engagementId,
+        message: err.message,
+        code: err.code,
+        stack: err.stack,
+      });
+    } else {
+      console.log("modify-schedule client error:", {
+        engagementId: req.params.engagementId,
+        message: err.message,
+        code: err.code,
+      });
+    }
+    
+    // User-friendly error messages (hide internal database errors)
+    let userMessage = err.message;
+    if (err.code === '40P01') { // deadlock_detected
+      userMessage = "The system is busy. Please try again in a moment.";
+    } else if (err.code === '55P03') { // lock_not_available
+      userMessage = err.message; // Already user-friendly from our code
+    }
+    
     return res.status(code).json({
       success: false,
-      error: err.message || "Failed to initiate schedule modification",
+      error: userMessage || "Failed to initiate schedule modification",
       conflict: err.conflict,
     });
   }

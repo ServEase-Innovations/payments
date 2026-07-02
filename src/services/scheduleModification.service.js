@@ -123,15 +123,24 @@ async function resolveOriginalBookingPayment(client, engagementId) {
  * Clear abandoned modification checkout (e.g. user closed Razorpay) so they can retry.
  */
 async function cleanupAbandonedScheduleModificationAttempts(client, engagementId, customerId) {
+  // Use NOWAIT to fail fast instead of waiting for locks (prevents deadlock chains)
   const pendingPayRes = await client.query(
     `SELECT payment_id, wallet_amount, wallet_deducted
      FROM payments
      WHERE engagement_id = $1
        AND UPPER(COALESCE(status, '')) = 'PENDING'
        AND COALESCE(base_amount, 0) = 0
-       AND COALESCE(platform_fee, 0) > 0`,
+       AND COALESCE(platform_fee, 0) > 0
+     FOR UPDATE NOWAIT`,
     [engagementId]
-  );
+  ).catch(err => {
+    // If we can't get the lock immediately, another process is handling it
+    if (err.code === '55P03') { // lock_not_available
+      console.log(`[cleanup] Skipping - another process is cleaning up engagement ${engagementId}`);
+      return { rows: [] };
+    }
+    throw err;
+  });
 
   for (const pay of pendingPayRes.rows) {
     const walletAmt = roundInr(pay.wallet_amount ?? 0);
@@ -273,10 +282,19 @@ export async function getModificationFeeQuote(engagementId) {
  * Apply schedule date/time update (same rules as PUT /api/engagements/:id non-vacation branch).
  */
 export async function applyEngagementScheduleUpdate(client, engagementId, body) {
+  // Use NOWAIT to fail fast if another transaction is modifying this engagement
   const engRow = await client.query(
-    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE NOWAIT`,
     [engagementId]
-  );
+  ).catch(err => {
+    if (err.code === '55P03') { // lock_not_available
+      const error = new Error("This booking is currently being modified by another process. Please try again in a moment.");
+      error.statusCode = 409;
+      throw error;
+    }
+    throw err;
+  });
+  
   if (!engRow.rows.length) {
     const err = new Error("Engagement not found");
     err.statusCode = 404;
@@ -576,6 +594,7 @@ export async function applyEngagementScheduleUpdate(client, engagementId, body) 
 }
 
 async function findScheduleModificationByOrder(client, razorpayOrderId) {
+  // Use NOWAIT to prevent deadlock chains
   const res = await client.query(
     `SELECT modification_id, engagement_id, modified_fields, modification_type
      FROM engagement_modifications
@@ -586,9 +605,16 @@ async function findScheduleModificationByOrder(client, razorpayOrderId) {
        )
      ORDER BY modified_at DESC
      LIMIT 1
-     FOR UPDATE`,
+     FOR UPDATE NOWAIT`,
     [razorpayOrderId]
-  );
+  ).catch(err => {
+    if (err.code === '55P03') { // lock_not_available
+      const error = new Error("Payment verification already in progress. Please wait a moment.");
+      error.statusCode = 409;
+      throw error;
+    }
+    throw err;
+  });
   return res.rows[0] || null;
 }
 
@@ -614,10 +640,19 @@ export async function completePaidScheduleModification(
 
   const fields = parseModifiedFields(mod.modified_fields);
   if (!payment) {
+    // Use NOWAIT to prevent deadlock when multiple processes try to verify payment
     const paymentRes = await client.query(
-      `SELECT * FROM payments WHERE payment_id = $1 FOR UPDATE`,
+      `SELECT * FROM payments WHERE payment_id = $1 FOR UPDATE NOWAIT`,
       [fields.modification_payment_id]
-    );
+    ).catch(err => {
+      if (err.code === '55P03') { // lock_not_available
+        const error = new Error("Payment is being processed. Please wait a moment.");
+        error.statusCode = 409;
+        throw error;
+      }
+      throw err;
+    });
+    
     if (!paymentRes.rows.length) {
       const err = new Error("Modification payment not found");
       err.statusCode = 404;
@@ -627,9 +662,17 @@ export async function completePaidScheduleModification(
   }
 
   const engRes = await client.query(
-    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE NOWAIT`,
     [engagementId]
-  );
+  ).catch(err => {
+    if (err.code === '55P03') { // lock_not_available
+      const error = new Error("Booking is being modified. Please wait a moment.");
+      error.statusCode = 409;
+      throw error;
+    }
+    throw err;
+  });
+  
   const eng = engRes.rows[0];
   const schedulePayload = fields.schedule || {};
 
@@ -666,14 +709,51 @@ export async function completePaidScheduleModification(
 }
 
 export async function initiateScheduleModification(engagementId, body) {
+  // Step 1: Cleanup abandoned attempts in a SEPARATE transaction to avoid deadlocks
+  const cleanupClient = await pool.connect();
+  try {
+    await cleanupClient.query("BEGIN");
+    
+    // Quick read to get customerId for cleanup (no lock needed)
+    const custRes = await cleanupClient.query(
+      `SELECT customerid FROM engagements WHERE engagement_id=$1`,
+      [engagementId]
+    );
+    if (custRes.rows.length > 0) {
+      await cleanupAbandonedScheduleModificationAttempts(
+        cleanupClient,
+        engagementId,
+        custRes.rows[0].customerid
+      );
+    }
+    
+    await cleanupClient.query("COMMIT");
+  } catch (cleanupErr) {
+    await cleanupClient.query("ROLLBACK");
+    console.error("Cleanup failed (non-fatal):", cleanupErr.message);
+    // Don't throw - cleanup failure shouldn't block the main operation
+  } finally {
+    cleanupClient.release();
+  }
+
+  // Step 2: Main modification transaction
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
+    // Lock engagement FIRST (consistent lock ordering prevents deadlocks)
     const engRes = await client.query(
-      `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
+      `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE NOWAIT`,
       [engagementId]
-    );
+    ).catch(err => {
+      if (err.code === '55P03') { // lock_not_available
+        const error = new Error("This booking is currently being modified. Please try again in a moment.");
+        error.statusCode = 409;
+        throw error;
+      }
+      throw err;
+    });
+    
     if (!engRes.rows.length) {
       const err = new Error("Engagement not found");
       err.statusCode = 404;
@@ -694,12 +774,6 @@ export async function initiateScheduleModification(engagementId, body) {
       err.statusCode = 400;
       throw err;
     }
-
-    await cleanupAbandonedScheduleModificationAttempts(
-      client,
-      engagementId,
-      engagement.customerid
-    );
 
     const paymentRow = await resolveOriginalBookingPayment(client, engagementId);
     if (!paymentRow) {
