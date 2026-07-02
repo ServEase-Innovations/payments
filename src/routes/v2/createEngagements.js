@@ -939,13 +939,21 @@ router.post("/modify-schedule/verify", async (req, res) => {
       razorpay_signature,
     } = req.body || {};
 
+    console.log('[modify-schedule/verify] Request body:', JSON.stringify(req.body));
+
     if (!engagementId || !razorpay_order_id || !razorpay_payment_id) {
+      console.error('[modify-schedule/verify] Missing required fields:', {
+        engagementId: !!engagementId,
+        razorpay_order_id: !!razorpay_order_id,
+        razorpay_payment_id: !!razorpay_payment_id,
+      });
       return res.status(400).json({
         success: false,
         error: "engagementId, razorpay_order_id, and razorpay_payment_id are required",
       });
     }
 
+    console.log('[modify-schedule/verify] Calling verifyScheduleModificationPayment...');
     const result = await verifyScheduleModificationPayment({
       engagementId,
       razorpay_order_id,
@@ -953,6 +961,7 @@ router.post("/modify-schedule/verify", async (req, res) => {
       razorpay_signature,
     });
 
+    console.log('[modify-schedule/verify] Verification successful');
     return res.json({
       success: true,
       message: "Modification payment verified and schedule updated",
@@ -960,7 +969,12 @@ router.post("/modify-schedule/verify", async (req, res) => {
     });
   } catch (err) {
     const code = err.statusCode || 500;
-    console.error("modify-schedule verify error:", err);
+    console.error("modify-schedule verify error:", {
+      message: err.message,
+      statusCode: err.statusCode,
+      code: err.code,
+      stack: err.stack,
+    });
     return res.status(code).json({
       success: false,
       error: err.message || "Failed to verify modification payment",
