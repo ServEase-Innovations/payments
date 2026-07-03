@@ -214,7 +214,7 @@ function scheduleAlreadyMatches(eng, schedulePayload) {
 
 export async function getModificationFeeQuote(engagementId) {
   const engRes = await pool.query(
-    `SELECT e.engagement_id, e.base_amount, e.booking_type, e.service_type, e.engagement_status
+    `SELECT e.engagement_id, e.base_amount, e.booking_type, e.service_type, e.engagement_status, e.customerid
      FROM engagements e
      WHERE e.engagement_id = $1`,
     [engagementId]
@@ -233,18 +233,35 @@ export async function getModificationFeeQuote(engagementId) {
     throw err;
   }
 
+  // Try cleanup with advisory lock (non-blocking, best-effort)
   const cleanupClient = await pool.connect();
   try {
     await cleanupClient.query("BEGIN");
-    await cleanupAbandonedScheduleModificationAttempts(
-      cleanupClient,
-      engagementId,
-      engagement.customerid
+    
+    // Try to get advisory lock (non-blocking)
+    const lockId = 1000000 + Number(engagementId);
+    const lockResult = await cleanupClient.query(
+      `SELECT pg_try_advisory_xact_lock($1) as acquired`,
+      [lockId]
     );
+    
+    if (lockResult.rows[0].acquired) {
+      // We got the lock - do cleanup
+      await cleanupAbandonedScheduleModificationAttempts(
+        cleanupClient,
+        engagementId,
+        engagement.customerid
+      );
+    } else {
+      // Another process is cleaning up - skip it (non-fatal)
+      console.log(`[getQuote] Skipping cleanup - another process is handling engagement ${engagementId}`);
+    }
+    
     await cleanupClient.query("COMMIT");
   } catch (cleanupErr) {
     await cleanupClient.query("ROLLBACK");
-    throw cleanupErr;
+    console.error("Cleanup failed (non-fatal) in getQuote:", cleanupErr.message);
+    // Don't throw - cleanup failure shouldn't block getting the quote
   } finally {
     cleanupClient.release();
   }
@@ -709,22 +726,40 @@ export async function completePaidScheduleModification(
 }
 
 export async function initiateScheduleModification(engagementId, body) {
-  // Step 1: Cleanup abandoned attempts in a SEPARATE transaction to avoid deadlocks
+  // Step 1: Try cleanup in background (non-blocking, best-effort)
+  // Use advisory lock to coordinate - if another process is cleaning up, skip it
   const cleanupClient = await pool.connect();
+  let cleanupSkipped = false;
+  
   try {
     await cleanupClient.query("BEGIN");
     
-    // Quick read to get customerId for cleanup (no lock needed)
-    const custRes = await cleanupClient.query(
-      `SELECT customerid FROM engagements WHERE engagement_id=$1`,
-      [engagementId]
+    // Try to get advisory lock (non-blocking)
+    // Lock ID: 1000000 + engagementId (unique per engagement)
+    const lockId = 1000000 + Number(engagementId);
+    const lockResult = await cleanupClient.query(
+      `SELECT pg_try_advisory_xact_lock($1) as acquired`,
+      [lockId]
     );
-    if (custRes.rows.length > 0) {
-      await cleanupAbandonedScheduleModificationAttempts(
-        cleanupClient,
-        engagementId,
-        custRes.rows[0].customerid
+    
+    if (lockResult.rows[0].acquired) {
+      // We got the lock - do cleanup
+      const custRes = await cleanupClient.query(
+        `SELECT customerid FROM engagements WHERE engagement_id=$1`,
+        [engagementId]
       );
+      
+      if (custRes.rows.length > 0) {
+        await cleanupAbandonedScheduleModificationAttempts(
+          cleanupClient,
+          engagementId,
+          custRes.rows[0].customerid
+        );
+      }
+    } else {
+      // Another process is cleaning up - skip it
+      cleanupSkipped = true;
+      console.log(`[initiate] Skipping cleanup - another process is handling engagement ${engagementId}`);
     }
     
     await cleanupClient.query("COMMIT");
