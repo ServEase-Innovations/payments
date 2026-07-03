@@ -611,7 +611,7 @@ export async function applyEngagementScheduleUpdate(client, engagementId, body) 
 }
 
 async function findScheduleModificationByOrder(client, razorpayOrderId) {
-  // Use NOWAIT to prevent deadlock chains
+  // First, get the modification without locking
   const res = await client.query(
     `SELECT modification_id, engagement_id, modified_fields, modification_type
      FROM engagement_modifications
@@ -621,17 +621,9 @@ async function findScheduleModificationByOrder(client, razorpayOrderId) {
          'SCHEDULE_MODIFICATION_CANCELLED'
        )
      ORDER BY modified_at DESC
-     LIMIT 1
-     FOR UPDATE NOWAIT`,
+     LIMIT 1`,
     [razorpayOrderId]
-  ).catch(err => {
-    if (err.code === '55P03') { // lock_not_available
-      const error = new Error("Payment verification already in progress. Please wait a moment.");
-      error.statusCode = 409;
-      throw error;
-    }
-    throw err;
-  });
+  );
   return res.rows[0] || null;
 }
 
@@ -643,6 +635,21 @@ export async function completePaidScheduleModification(
   client,
   { engagementId, razorpay_order_id, razorpay_payment_id, payment = null }
 ) {
+  // Use advisory lock to coordinate payment verification (prevents duplicate processing)
+  // Lock ID: 2000000 + engagementId (different range from modification locks)
+  const verifyLockId = 2000000 + Number(engagementId);
+  const lockResult = await client.query(
+    `SELECT pg_try_advisory_xact_lock($1) as acquired`,
+    [verifyLockId]
+  );
+  
+  if (!lockResult.rows[0].acquired) {
+    // Another verification is in progress - this is likely a duplicate request
+    const error = new Error("Payment verification already in progress. Please wait a moment.");
+    error.statusCode = 409;
+    throw error;
+  }
+  
   const mod = await findScheduleModificationByOrder(client, razorpay_order_id);
   if (!mod) {
     const err = new Error("No pending schedule modification for this payment");
@@ -657,18 +664,11 @@ export async function completePaidScheduleModification(
 
   const fields = parseModifiedFields(mod.modified_fields);
   if (!payment) {
-    // Use NOWAIT to prevent deadlock when multiple processes try to verify payment
+    // Get payment without NOWAIT since we have advisory lock
     const paymentRes = await client.query(
-      `SELECT * FROM payments WHERE payment_id = $1 FOR UPDATE NOWAIT`,
+      `SELECT * FROM payments WHERE payment_id = $1`,
       [fields.modification_payment_id]
-    ).catch(err => {
-      if (err.code === '55P03') { // lock_not_available
-        const error = new Error("Payment is being processed. Please wait a moment.");
-        error.statusCode = 409;
-        throw error;
-      }
-      throw err;
-    });
+    );
     
     if (!paymentRes.rows.length) {
       const err = new Error("Modification payment not found");
@@ -678,12 +678,32 @@ export async function completePaidScheduleModification(
     payment = paymentRes.rows[0];
   }
 
+  // Check if already processed (idempotency)
+  if (payment.status === "SUCCESS" && payment.transaction_id) {
+    const engRes = await client.query(
+      `SELECT * FROM engagements WHERE engagement_id=$1`,
+      [engagementId]
+    );
+    const eng = engRes.rows[0];
+    const schedulePayload = fields.schedule || {};
+    
+    if (scheduleAlreadyMatches(eng, schedulePayload)) {
+      console.log(`[verify] Payment ${payment.payment_id} already processed - idempotent return`);
+      return { alreadyApplied: true, engagement: eng, payment_id: payment.payment_id };
+    }
+  }
+
+  // Get engagement lock for modification
+  // Use blocking lock with timeout (verification can wait for initiate to complete)
+  // Set lock timeout to 5 seconds - enough for initiate to commit, not too long for user
+  await client.query(`SET LOCAL lock_timeout = '5s'`);
+  
   const engRes = await client.query(
-    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE NOWAIT`,
+    `SELECT * FROM engagements WHERE engagement_id=$1 FOR UPDATE`,
     [engagementId]
   ).catch(err => {
-    if (err.code === '55P03') { // lock_not_available
-      const error = new Error("Booking is being modified. Please wait a moment.");
+    if (err.code === '55P03' || err.code === '57014') { // lock_not_available or query_canceled (timeout)
+      const error = new Error("Booking is being modified. Please wait a moment and try again.");
       error.statusCode = 409;
       throw error;
     }
