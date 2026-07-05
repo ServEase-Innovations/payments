@@ -4,6 +4,8 @@ import timezone from "dayjs/plugin/timezone.js";
 import customParseFormat from "dayjs/plugin/customParseFormat.js";
 import { createServiceDays } from "../routes/serviceDays.service.js";
 import { visitWindowFromEngagement } from "./providerAvailabilityOverlap.js";
+import { captureAndRecalculateTimeline } from "./timelineCalculator.js";
+import { isFeatureEnabled } from "../config/featureFlags.js";
 
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
@@ -64,6 +66,8 @@ export async function transitionEngagement(client, {
   }
 
   // 1️⃣ Update status (+ sync task_status when the visit clearly starts / ends)
+  let timelineData = null;
+  
   if (newStatus === "IN_PROGRESS") {
     await client.query(
       `UPDATE engagements
@@ -71,6 +75,38 @@ export async function transitionEngagement(client, {
        WHERE engagement_id=$2`,
       [newStatus, engagementId]
     );
+    
+    // 🔄 Capture actual start time and recalculate timeline (if feature enabled)
+    const timelineFeatureEnabled = isFeatureEnabled('ENABLE_TIMELINE_RECALCULATION', {
+      engagement_id: engagementId
+    });
+    
+    if (timelineFeatureEnabled) {
+      try {
+        const now_epoch = Math.floor(Date.now() / 1000);
+        timelineData = await captureAndRecalculateTimeline({
+          engagement_id: engagementId,
+          actual_start_epoch: now_epoch,
+          client
+        });
+        
+        // Include timeline data in event metadata
+        metadata = {
+          ...metadata,
+          timeline: timelineData
+        };
+      } catch (timelineError) {
+        // Log error but don't fail the status transition
+        console.error('Timeline recalculation failed', {
+          engagement_id: engagementId,
+          error: timelineError.message
+        });
+      }
+    } else {
+      console.log('Timeline recalculation feature disabled', {
+        engagement_id: engagementId
+      });
+    }
   } else if (newStatus === "COMPLETED") {
     await client.query(
       `UPDATE engagements

@@ -329,11 +329,12 @@ router.get("/:id/extension-availability", async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Get engagement details with payment total
+    // Get engagement details with payment total and timeline data
     const engRes = await client.query(
       `SELECT e.engagement_id, e.booking_type, e.serviceproviderid, e.service_type,
               e.end_epoch, e.engagement_status, e.task_status,
               e.start_epoch, e.base_amount, e.duration_minutes,
+              e.actual_start_epoch, e.actual_end_epoch, e.is_timeline_recalculated,
               p.total_amount
        FROM engagements e
        LEFT JOIN payments p ON p.engagement_id = e.engagement_id AND p.status = 'SUCCESS'
@@ -391,7 +392,18 @@ router.get("/:id/extension-availability", async (req, res) => {
     // This allows extending bookings that are scheduled for the future
     
     // Check provider conflicts after current end time
-    const currentEndEpoch = Number(engagement.end_epoch);
+    // Use recalculated end time if available, otherwise use scheduled end time
+    const currentEndEpoch = Number(engagement.actual_end_epoch || engagement.end_epoch);
+    const calculationBase = engagement.actual_end_epoch ? 'recalculated_timeline' : 'scheduled_timeline';
+    
+    console.log('[extension-availability] Timeline info:', {
+      scheduled_end: engagement.end_epoch,
+      actual_end: engagement.actual_end_epoch,
+      using_end: currentEndEpoch,
+      calculation_base: calculationBase,
+      is_recalculated: engagement.is_timeline_recalculated
+    });
+    
     const maxCheckHours = 4; // Check up to 4 hours ahead
     
     // Platform constraint: Services must end by 8:00 PM (20:00)

@@ -579,6 +579,10 @@ router.get("/:customerId/today-bookings", ...customerOwnerRead, async (req, res)
           e.address,
           e.base_amount,
           e.duration_minutes,
+          e.actual_start_epoch,
+          e.actual_end_epoch,
+          e.is_timeline_recalculated,
+          e.early_start_minutes,
           sp.serviceproviderid,
           sp.firstname AS provider_firstname,
           sp.lastname AS provider_lastname,
@@ -621,6 +625,10 @@ router.get("/:customerId/today-bookings", ...customerOwnerRead, async (req, res)
           e.address,
           e.base_amount,
           e.duration_minutes,
+          e.actual_start_epoch,
+          e.actual_end_epoch,
+          e.is_timeline_recalculated,
+          e.early_start_minutes,
           NULL::bigint AS serviceproviderid,
           NULL::text AS provider_firstname,
           NULL::text AS provider_lastname,
@@ -771,7 +779,9 @@ router.get("/:customerId/engagements", ...customerOwnerRead, async (req, res) =>
         engagement_id,
         status,
         started_at,
-        completed_at
+        completed_at,
+        actual_start_epoch,
+        actual_end_epoch
       FROM service_days
       WHERE engagement_id = ANY($1)
         AND service_date = ${PG_IST_TODAY_DATE}
@@ -1048,7 +1058,10 @@ WHERE sp.serviceproviderid = ANY($1)`,
           can_start: todayService.status === "SCHEDULED",
           can_generate_otp: todayService.status === "IN_PROGRESS",
           can_complete: todayService.status === "IN_PROGRESS",
-          otp_active: !!otpByServiceDay[todayService.service_day_id]
+          otp_active: !!otpByServiceDay[todayService.service_day_id],
+          // Include actual start/end times from service_days table
+          actual_start_epoch: todayService.actual_start_epoch,
+          actual_end_epoch: todayService.actual_end_epoch,
         };
       }
 
@@ -1807,6 +1820,111 @@ function getDateRange(startDate, endDate) {
 
   return dates;
 }
+
+// GET all service days for an engagement (date-wise timeline)
+router.get("/:id/service-days", ...engagementParticipantRead, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!id || !/^\d+$/.test(String(id).trim())) {
+      return res.status(400).json({ error: "Invalid engagement id" });
+    }
+
+    const engagementId = Number(id);
+
+    // Fetch engagement details
+    const engRes = await pool.query(
+      `SELECT 
+        engagement_id,
+        booking_type,
+        start_date,
+        end_date,
+        start_epoch,
+        end_epoch
+       FROM engagements
+       WHERE engagement_id = $1`,
+      [engagementId]
+    );
+
+    if (engRes.rows.length === 0) {
+      return res.status(404).json({ error: "Engagement not found" });
+    }
+
+    const engagement = engRes.rows[0];
+    const bookingType = String(engagement.booking_type || "").toUpperCase();
+    
+    // Derive start_time and end_time from epochs
+    const startTime = epochToTimeHM(engagement.start_epoch);
+    const endTime = epochToTimeHM(engagement.end_epoch);
+
+    // For ON_DEMAND, there's typically only one service day
+    // For MONTHLY/SHORT_TERM, fetch all service days
+    const serviceDaysRes = await pool.query(
+      `SELECT
+        service_day_id,
+        engagement_id,
+        service_date,
+        status,
+        started_at,
+        completed_at,
+        actual_start_epoch,
+        actual_end_epoch,
+        created_at
+       FROM service_days
+       WHERE engagement_id = $1
+       ORDER BY service_date ASC`,
+      [engagementId]
+    );
+
+    const serviceDays = serviceDaysRes.rows.map((sd) => {
+      const scheduledStart = toEpochSeconds(sd.service_date, startTime) || engagement.start_epoch;
+      const scheduledEnd = scheduledStart ? scheduledStart + ((engagement.end_epoch - engagement.start_epoch) || 3600) : null;
+      
+      return {
+        service_day_id: sd.service_day_id,
+        service_date: sd.service_date,
+        status: sd.status,
+        scheduled: {
+          start_time: startTime,
+          end_time: endTime,
+          start_epoch: scheduledStart,
+          end_epoch: scheduledEnd,
+        },
+        actual: sd.actual_start_epoch ? {
+          start_epoch: Number(sd.actual_start_epoch),
+          end_epoch: sd.actual_end_epoch ? Number(sd.actual_end_epoch) : null,
+          start_time: epochToTimeHM(sd.actual_start_epoch),
+          end_time: sd.actual_end_epoch ? epochToTimeHM(sd.actual_end_epoch) : null,
+        } : null,
+        early_start_minutes: sd.actual_start_epoch && scheduledStart 
+          ? Math.round((scheduledStart - sd.actual_start_epoch) / 60)
+          : 0,
+        started_at: sd.started_at ? pgTimestampToIsoUtc(sd.started_at) : null,
+        completed_at: sd.completed_at ? pgTimestampToIsoUtc(sd.completed_at) : null,
+      };
+    });
+
+    return res.json({
+      success: true,
+      engagement_id: engagementId,
+      booking_type: bookingType,
+      booking_period: {
+        start_date: engagement.start_date,
+        end_date: engagement.end_date,
+      },
+      daily_schedule: {
+        start_time: startTime,
+        end_time: endTime,
+      },
+      service_days: serviceDays,
+      total_days: serviceDays.length,
+    });
+
+  } catch (err) {
+    console.error("Error fetching service days:", err);
+    return res.status(500).json({ error: "Failed to fetch service days" });
+  }
+});
 
 
 

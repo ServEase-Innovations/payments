@@ -73,14 +73,21 @@ router.post("/service-days/:id/start", async (req, res) => {
     if (sd.rows[0].status !== "SCHEDULED")
       return res.status(400).json({ error: "Service cannot be started" });
 
+    const now_epoch = Math.floor(Date.now() / 1000);
+
     await client.query(
       `UPDATE service_days
-       SET status='IN_PROGRESS', started_at=NOW()
+       SET status='IN_PROGRESS', 
+           started_at=NOW(),
+           actual_started_at=NOW(),
+           actual_start_epoch=$2
        WHERE service_day_id=$1`,
-      [id]
+      [id, now_epoch]
     );
 
     const row0 = sd.rows[0];
+    let timelineData = null;
+    
     try {
       await transitionEngagement(client, {
         engagementId: row0.engagement_id,
@@ -90,6 +97,25 @@ router.post("/service-days/:id/start", async (req, res) => {
         actorId: row0.serviceproviderid ?? null,
         metadata: { service_day_id: id },
       });
+      
+      // Timeline data is captured inside transitionEngagement
+      // Fetch it to return in response
+      const timelineResult = await client.query(`
+        SELECT 
+          start_epoch AS scheduled_start_epoch,
+          end_epoch AS scheduled_end_epoch,
+          actual_start_epoch,
+          actual_end_epoch,
+          duration_minutes,
+          is_timeline_recalculated,
+          early_start_minutes
+        FROM engagements
+        WHERE engagement_id = $1
+      `, [row0.engagement_id]);
+      
+      if (timelineResult.rows.length > 0) {
+        timelineData = timelineResult.rows[0];
+      }
     } catch (transErr) {
       await client.query(
         `UPDATE engagements
@@ -125,7 +151,12 @@ router.post("/service-days/:id/start", async (req, res) => {
       console.error("in-app (service day start) failed", eNotif);
     }
 
-    return res.json({ message: "Service started" });
+    return res.json({ 
+      message: "Service started",
+      success: true,
+      engagement_id: row0.engagement_id,
+      timeline: timelineData
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     res.status(500).json({ error: err.message });
@@ -323,7 +354,8 @@ router.post("/service-days/:id/complete", async (req, res) => {
       UPDATE service_days
       SET status = 'COMPLETED',
           completed_at = NOW(),
-          otp_verified = true
+          otp_verified = true,
+          actual_end_epoch = EXTRACT(EPOCH FROM NOW())::BIGINT
       WHERE service_day_id = $1
       `,
       [serviceDayId]
