@@ -8,6 +8,7 @@ import {
   countCustomerLifetimeBookings,
 } from "./pricingRepository.js";
 import { calculateOnDemandQuote } from "./onDemandPricing.js";
+import { calculateNannyOnDemandQuote } from "./onDemandPricing.js";
 import {
   shortTermConstraints,
   calculateShortTermMultiDay,
@@ -164,18 +165,30 @@ export async function calculateQuote(input, client) {
   // --- ON_DEMAND (hourly + 6–8h full-day band) ---
   if (plan.unit === "HOUR") {
     const hours = durationHours != null && durationHours > 0 ? durationHours : 1;
-    const od = calculateOnDemandQuote({
-      plan,
-      hours,
-      lifetimeBookings,
-      ratePreference,
-    });
-    total = od.total;
-    pricingMode = od.pricingMode;
-    unitRate = od.unitRate;
-    lineItems.push(...od.lineItems);
-    appliedRules.push(...od.appliedRules);
-    onDemandDisplay = od.display;
+
+    // Nanny has its own fixed package structure
+    if (serviceType === "NANNY") {
+      const nd = calculateNannyOnDemandQuote({ plan, hours });
+      total = nd.total;
+      pricingMode = nd.pricingMode;
+      unitRate = nd.unitRate;
+      lineItems.push(...nd.lineItems);
+      appliedRules.push(...nd.appliedRules);
+      onDemandDisplay = nd.display;
+    } else {
+      const od = calculateOnDemandQuote({
+        plan,
+        hours,
+        lifetimeBookings,
+        ratePreference,
+      });
+      total = od.total;
+      pricingMode = od.pricingMode;
+      unitRate = od.unitRate;
+      lineItems.push(...od.lineItems);
+      appliedRules.push(...od.appliedRules);
+      onDemandDisplay = od.display;
+    }
   }
 
   // --- SHORT_TERM ---

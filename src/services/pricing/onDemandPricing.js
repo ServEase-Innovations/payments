@@ -14,6 +14,113 @@ export const OD_FULL_DAY_HOURS_MIN = 6;
 export const OD_FULL_DAY_HOURS_MAX = 8;
 export const OD_PROMO_EVERY_N = 6;
 
+// ---------- Nanny on-demand pricing ----------
+// Minimum package: 4 hours = ₹399
+// Full day: 8 hours = ₹799
+// Extra hours between 4–7h: ₹150/hr above the 4h minimum
+export const NANNY_OD_MIN_HOURS = 4;
+export const NANNY_OD_MIN_PACKAGE_RATE = 399;
+export const NANNY_OD_FULL_DAY_HOURS = 8;
+export const NANNY_OD_FULL_DAY_RATE = 799;
+export const NANNY_OD_EXTRA_HOURLY = 150;
+
+export function nannyOnDemandConstraints(plan) {
+  const c = plan?.constraints_json || {};
+  return {
+    minHours: Number(c.minHours ?? NANNY_OD_MIN_HOURS),
+    minPackageRate: Number(c.minPackageRate ?? NANNY_OD_MIN_PACKAGE_RATE),
+    fullDayHours: Number(c.fullDayHours ?? NANNY_OD_FULL_DAY_HOURS),
+    fullDayRate: Number(c.fullDayRate ?? NANNY_OD_FULL_DAY_RATE),
+    extraHourlyRate: Number(c.extraHourlyRate ?? NANNY_OD_EXTRA_HOURLY),
+  };
+}
+
+/**
+ * Nanny on-demand quote.
+ *   h < 4  → 4h min-package at ₹399 (clamp up)
+ *   h 4–7  → ₹399 + (h - 4) × ₹150
+ *   h = 8  → ₹799 full-day flat
+ */
+export function calculateNannyOnDemandQuote({ plan, hours }) {
+  const nd = nannyOnDemandConstraints(plan);
+  // Clamp to minimum package hours
+  const h = Math.max(nd.minHours, Math.round(Number(hours) || nd.minHours));
+
+  // Full-day package
+  if (h >= nd.fullDayHours) {
+    return {
+      total: nd.fullDayRate,
+      pricingMode: "DAY",
+      unitRate: nd.fullDayRate,
+      hours: nd.fullDayHours,
+      lineItems: [
+        {
+          description: `Nanny full day (${nd.fullDayHours} hr) — ₹${nd.fullDayRate}`,
+          quantity: 1,
+          unit: "DAY",
+          unit_rate: nd.fullDayRate,
+          amount: nd.fullDayRate,
+        },
+      ],
+      appliedRules: [
+        { rule_type: "NANNY_FULL_DAY", label: `Full day (${nd.fullDayHours} hr) — ₹${nd.fullDayRate}` },
+      ],
+      discounts: [],
+      display: {
+        base_range: { min: nd.minPackageRate, max: nd.fullDayRate, unit: "PACKAGE" },
+        unit_rate: nd.fullDayRate,
+      },
+    };
+  }
+
+  // Min 4h package + extra hours
+  const extraHours = h - nd.minHours;
+  const extraAmount = extraHours * nd.extraHourlyRate;
+  const total = nd.minPackageRate + extraAmount;
+
+  const lineItems = [
+    {
+      description: `Nanny min package (${nd.minHours} hr) — ₹${nd.minPackageRate}`,
+      quantity: 1,
+      unit: "PACKAGE",
+      unit_rate: nd.minPackageRate,
+      amount: nd.minPackageRate,
+    },
+  ];
+  const appliedRules = [
+    { rule_type: "NANNY_MIN_PACKAGE", label: `Min ${nd.minHours}h package — ₹${nd.minPackageRate}` },
+  ];
+
+  if (extraHours > 0) {
+    lineItems.push({
+      description: `Extra ${extraHours} hr @ ₹${nd.extraHourlyRate}/hr`,
+      quantity: extraHours,
+      unit: "HOUR",
+      unit_rate: nd.extraHourlyRate,
+      amount: extraAmount,
+    });
+    appliedRules.push({
+      rule_type: "NANNY_EXTRA_HOUR",
+      label: `Extra hours — ₹${nd.extraHourlyRate}/hr`,
+    });
+  }
+
+  return {
+    total,
+    pricingMode: "PACKAGE",
+    unitRate: nd.minPackageRate,
+    hours: h,
+    lineItems,
+    appliedRules,
+    discounts: [],
+    display: {
+      base_range: { min: nd.minPackageRate, max: nd.fullDayRate, unit: "PACKAGE" },
+      unit_rate: nd.minPackageRate,
+      extra_hourly_rate: nd.extraHourlyRate,
+    },
+  };
+}
+
 function num(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
