@@ -502,59 +502,68 @@ async function logTimelineModification({
   client
 }) {
   try {
-    // Try to insert with details column (new schema)
-    await client.query(`
-      INSERT INTO engagement_modifications (
-        engagement_id,
-        modification_type,
-        modified_by,
-        modified_at,
-        details
-      ) VALUES ($1, $2, $3, NOW(), $4)
-    `, [
-      engagement_id,
-      modification_type,
-      'SYSTEM',
-      JSON.stringify(details)
-    ]);
-  } catch (error) {
-    // If details column doesn't exist, try with modified_fields (old schema)
-    if (error.message && error.message.includes('column "details" of relation "engagement_modifications" does not exist')) {
-      try {
-        await client.query(`
-          INSERT INTO engagement_modifications (
-            engagement_id,
-            modification_type,
-            modified_by,
-            modified_at,
-            modified_fields
-          ) VALUES ($1, $2, $3, NOW(), $4)
-        `, [
+    // Use a savepoint to prevent transaction abortion if the column doesn't exist
+    await client.query('SAVEPOINT before_log_timeline');
+    try {
+      // Try to insert with details column (new schema)
+      await client.query(`
+        INSERT INTO engagement_modifications (
           engagement_id,
           modification_type,
-          'SYSTEM',
-          JSON.stringify(details)
-        ]);
-        logger.info('Timeline modification logged using modified_fields column', {
-          engagement_id,
-          modification_type
-        });
-      } catch (fallbackError) {
-        // If both fail, just log but don't fail the main operation
+          modified_by,
+          modified_at,
+          details
+        ) VALUES ($1, $2, $3, NOW(), $4)
+      `, [
+        engagement_id,
+        modification_type,
+        'SYSTEM',
+        JSON.stringify(details)
+      ]);
+      await client.query('RELEASE SAVEPOINT before_log_timeline');
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT before_log_timeline');
+      // If details column doesn't exist, try with modified_fields (old schema)
+      if (error.message && error.message.includes('column "details" of relation "engagement_modifications" does not exist')) {
+        try {
+          await client.query(`
+            INSERT INTO engagement_modifications (
+              engagement_id,
+              modification_type,
+              modified_by,
+              modified_at,
+              modified_fields
+            ) VALUES ($1, $2, $3, NOW(), $4)
+          `, [
+            engagement_id,
+            modification_type,
+            'SYSTEM',
+            JSON.stringify(details)
+          ]);
+          logger.info('Timeline modification logged using modified_fields column', {
+            engagement_id,
+            modification_type
+          });
+        } catch (fallbackError) {
+          logger.error('Failed to log timeline modification using modified_fields', {
+            engagement_id,
+            modification_type,
+            error: fallbackError.message
+          });
+        }
+      } else {
         logger.error('Failed to log timeline modification', {
           engagement_id,
           modification_type,
-          error: fallbackError.message
+          error: error.message
         });
       }
-    } else {
-      // Log but don't fail the main operation if audit logging fails
-      logger.error('Failed to log timeline modification', {
-        engagement_id,
-        modification_type,
-        error: error.message
-      });
     }
+  } catch (outerError) {
+    logger.error('Critical failure in logTimelineModification', {
+      engagement_id,
+      error: outerError.message
+    });
   }
 }
 
