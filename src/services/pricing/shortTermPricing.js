@@ -313,6 +313,32 @@ export function calculateShortTermPerVisit(
 export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
   const mc = monthlyConstraints(plan);
   const baseMonthly = pickRate(plan.base_rate_min, plan.base_rate_max, ratePreference);
+
+  if (plan.service_type === "NANNY") {
+    return {
+      total: baseMonthly,
+      baseMonthly,
+      extraNet: 0,
+      extraHourRate: 0,
+      discounts: [],
+      hoursPerDay: hoursPerDay || 8,
+      extraHours: 0,
+      appliedRules: [
+        { rule_type: "MONTHLY_BASE", label: "Nanny monthly flat rate (30 days)" },
+      ],
+      lineItems: [
+        {
+          description: "Nanny monthly contract (30 days)",
+          quantity: 1,
+          unit: "MONTH",
+          unit_rate: baseMonthly,
+          amount: baseMonthly,
+        },
+      ],
+      description: "Nanny monthly contract",
+    };
+  }
+
   const h =
     hoursPerDay != null && hoursPerDay > 0
       ? Number(hoursPerDay)
