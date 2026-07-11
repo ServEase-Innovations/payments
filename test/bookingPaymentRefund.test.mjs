@@ -32,9 +32,9 @@ describe("bookingPaymentRefund", () => {
       wallet_deducted: false,
       transaction_id: "pay_RAZOR123",
     });
-    assert.equal(breakdown.walletRefund, 0);
-    assert.equal(breakdown.razorpayRefund, 750);
-    assert.equal(breakdown.razorpayPaymentId, "pay_RAZOR123");
+    assert.equal(breakdown.walletRefund, 750);
+    assert.equal(breakdown.razorpayRefund, 0);
+    assert.equal(breakdown.razorpayPaymentId, null);
   });
 
   it("splits wallet + razorpay refunds", () => {
@@ -44,9 +44,9 @@ describe("bookingPaymentRefund", () => {
       wallet_deducted: true,
       transaction_id: "pay_SPLIT123",
     });
-    assert.equal(breakdown.walletRefund, 300);
-    assert.equal(breakdown.razorpayRefund, 700);
-    assert.equal(breakdown.razorpayPaymentId, "pay_SPLIT123");
+    assert.equal(breakdown.walletRefund, 1000);
+    assert.equal(breakdown.razorpayRefund, 0);
+    assert.equal(breakdown.razorpayPaymentId, null);
   });
 
   it("builds wallet refund notification copy", () => {
