@@ -407,20 +407,25 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Service Provider required" });
     }
 
+    const fromClock = visitDurationMinutesFromClock(
+      resolvedStartDate,
+      resolvedStartTime,
+      end_time
+    );
+
     const rawDur =
       duration_minutes != null && Number.isFinite(Number(duration_minutes))
         ? Number(duration_minutes)
-        : 60;
+        : fromClock != null
+          ? fromClock
+          : 60;
+
     let durationMinutes = Math.min(
       Math.max(rawDur, 15),
       MAX_SERVICE_DURATION_MINUTES
     );
-    if (rawDur > MAX_SERVICE_DURATION_MINUTES) {
-      const fromClock = visitDurationMinutesFromClock(
-        resolvedStartDate,
-        resolvedStartTime,
-        end_time
-      );
+    
+    if (duration_minutes != null && rawDur > MAX_SERVICE_DURATION_MINUTES) {
       if (fromClock != null) {
         durationMinutes = fromClock;
       }
