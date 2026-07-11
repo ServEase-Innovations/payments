@@ -383,3 +383,50 @@ export function calculateMonthlyQuote(plan, ratePreference, hoursPerDay) {
         : "Maid monthly contract",
   };
 }
+
+/**
+ * Nanny caregiver short-term pricing.
+ *   - ₹4,999 baseline for 7 days @ 8 hours/day.
+ *   - Prorated per-day.
+ *   - For 4 hours/day: half of 8 hours package rate.
+ */
+export function calculateNannyShortTermQuote({ plan, durationDays, hoursPerDay }) {
+  const c = plan?.constraints_json || {};
+  const base7dRate = Number(c.sevenDayPkgRate ?? 4999);
+  
+  // Clamp durationHours/hoursPerDay to either 4 or 8
+  const h = Number(hoursPerDay) === 8 ? 8 : 4;
+  
+  // Base 7-day package rate
+  const pkg7d = h === 8 ? base7dRate : base7dRate / 2;
+  const perDayRate = pkg7d / 7;
+  
+  const total = Math.round(perDayRate * durationDays);
+  
+  return {
+    total,
+    pricingMode: "PACKAGE",
+    unitRate: Math.round(perDayRate * 100) / 100,
+    hours: h,
+    lineItems: [
+      {
+        description: `Nanny caregiver short-term (${durationDays} days @ ${h}h/day)`,
+        quantity: durationDays,
+        unit: "DAY",
+        unit_rate: Math.round(perDayRate * 100) / 100,
+        amount: total,
+      }
+    ],
+    appliedRules: [
+      {
+        rule_type: "NANNY_SHORT_TERM",
+        label: `Short-term caregiver (${h}h/day) — ₹${total}`,
+      }
+    ],
+    discounts: [],
+    display: {
+      base_range: { min: Math.round(base7dRate / 2), max: base7dRate, unit: "PACKAGE" },
+      unit_rate: Math.round(perDayRate * 100) / 100,
+    }
+  };
+}
