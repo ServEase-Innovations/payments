@@ -10,24 +10,19 @@ export function isRazorpayCapturedPaymentId(transactionId) {
 
 /**
  * Split a successful booking payment into wallet vs Razorpay refund amounts.
+ * Under Option 1: 100% of the refund goes back to the customer's wallet.
+ * If deductPlatformFee is true (user-initiated cancellation), we subtract the platform_fee.
  */
-export function computeBookingRefundBreakdown(payment) {
+export function computeBookingRefundBreakdown(payment, deductPlatformFee = false) {
   const total = roundInr(payment?.total_amount ?? 0);
-  const walletAmount = roundInr(payment?.wallet_amount ?? 0);
-  const walletDeducted = Boolean(payment?.wallet_deducted) && walletAmount > 0;
-  const walletRefund = walletDeducted ? Math.min(walletAmount, total) : 0;
-
-  const razorpayPaymentId = isRazorpayCapturedPaymentId(payment?.transaction_id)
-    ? String(payment.transaction_id).trim()
-    : null;
-  const razorpayRefund =
-    razorpayPaymentId && walletRefund < total ? roundInr(total - walletRefund) : 0;
+  const platformFee = deductPlatformFee ? roundInr(payment?.platform_fee ?? 0) : 0;
+  const refundAmount = Math.max(0, roundInr(total - platformFee));
 
   return {
-    total,
-    walletRefund,
-    razorpayRefund,
-    razorpayPaymentId,
+    total: refundAmount,
+    walletRefund: refundAmount,
+    razorpayRefund: 0,
+    razorpayPaymentId: null,
   };
 }
 
@@ -70,10 +65,11 @@ export async function refundPaidBookingToCustomer(
     customerId,
     engagementId,
     refundDescription,
+    deductPlatformFee = false,
     razorpayNotes = {},
   }
 ) {
-  const breakdown = computeBookingRefundBreakdown(payment);
+  const breakdown = computeBookingRefundBreakdown(payment, deductPlatformFee);
 
   if (breakdown.walletRefund <= 0 && breakdown.razorpayRefund <= 0) {
     const err = new Error("No refundable amount for this payment");
@@ -93,14 +89,20 @@ export async function refundPaidBookingToCustomer(
 
   let razorpayRefundResult = null;
   if (breakdown.razorpayRefund > 0 && breakdown.razorpayPaymentId) {
-    razorpayRefundResult = await refundRazorpayPaymentFull({
-      razorpayPaymentId: breakdown.razorpayPaymentId,
-      amountInr: breakdown.razorpayRefund,
-      notes: {
-        engagement_id: String(engagementId),
-        ...razorpayNotes,
-      },
-    });
+    // Under Option 1, razorpayRefund is 0, so this block is bypassed.
+    // If needed in the future, it is preserved here.
+    async function performRazorpayRefund() {
+      const { refundRazorpayPaymentFull } = await import("./razorpayRefund.service.js");
+      return refundRazorpayPaymentFull({
+        razorpayPaymentId: breakdown.razorpayPaymentId,
+        amountInr: breakdown.razorpayRefund,
+        notes: {
+          engagement_id: String(engagementId),
+          ...razorpayNotes,
+        },
+      });
+    }
+    razorpayRefundResult = await performRazorpayRefund();
   }
 
   return {

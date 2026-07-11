@@ -239,6 +239,7 @@ router.post("/:id/cancel", async (req, res) => {
             customerId: Number(engagement.customerid),
             engagementId: id,
             refundDescription,
+            deductPlatformFee: true, // Deduct platform fee for user cancellation
             razorpayNotes: {
               reason: reason || "User cancelled booking",
               cancelled_by: "CUSTOMER",
