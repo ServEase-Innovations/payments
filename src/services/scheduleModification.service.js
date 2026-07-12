@@ -72,11 +72,11 @@ function normalizeDateToIST(dateValue) {
 
 function enumerateDates(start, end) {
   const res = [];
-  const cur = new Date(start);
+  let cur = new Date(start);
   const endDate = new Date(end);
-  while (cur <= endDate) {
+  while (cur.getTime() <= endDate.getTime()) {
     res.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
+    cur = new Date(cur.setUTCDate(cur.getUTCDate() + 1));
   }
   return res;
 }

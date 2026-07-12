@@ -124,10 +124,11 @@ function normalizeDateToIST(dateValue) {
 
 function enumerateDates(start, end) {
   const res = [];
-  const cur = new Date(start);
-  while (cur <= end) {
+  let cur = new Date(start);
+  const endObj = new Date(end);
+  while (cur.getTime() <= endObj.getTime()) {
     res.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
+    cur = new Date(cur.setUTCDate(cur.getUTCDate() + 1));
   }
   return res;
 }
@@ -348,7 +349,7 @@ router.post("/", async (req, res) => {
       if (!dailyStartTime) throw new Error("Unable to derive slot start time");
 
 
-      for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(startD); d.getTime() <= endD.getTime(); d = new Date(d.setDate(d.getDate() + 1))) {
         const day = d.toISOString().slice(0, 10);
         const dayStartEpoch = toEpochSeconds(day, dailyStartTime);
         const dayEndEpoch = dayStartEpoch + hoursToAdd * 3600;
@@ -1813,9 +1814,9 @@ function getDateRange(startDate, endDate) {
   let current = new Date(startDate + "T00:00:00");
   const end = new Date(endDate + "T00:00:00");
 
-  while (current <= end) {
+  while (current.getTime() <= end.getTime()) {
     dates.push(new Date(current));
-    current.setDate(current.getDate() + 1);
+    current = new Date(current.setDate(current.getDate() + 1));
   }
 
   return dates;

@@ -528,7 +528,7 @@ router.post("/", async (req, res) => {
 
       const startD = new Date(resolvedStartDate);
       const endD = new Date(effectiveEndDate);
-      for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(startD); d.getTime() <= endD.getTime(); d = new Date(d.setDate(d.getDate() + 1))) {
         const day = d.toISOString().slice(0, 10);
         const dayWindowStart = toEpochSeconds(day, "00:00");
         if (dayWindowStart == null) continue;
