@@ -9,7 +9,7 @@
     "prod": "NODE_ENV=production node index.js",
     "monitoring:up": "docker compose -f docker-compose.monitoring.yml up -d",
     "monitoring:down": "docker compose -f docker-compose.monitoring.yml down",
-    "test": "c8 --reporter=lcov --reporter=text node --test test/"
+    "test": "c8 --reporter=lcov --reporter=text node --test"
   },
   "keywords": [],
   "author": "",
