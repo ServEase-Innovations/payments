@@ -413,12 +413,11 @@ router.post("/", async (req, res) => {
       end_time
     );
 
+    const defaultDur = fromClock != null ? fromClock : 60;
     const rawDur =
       duration_minutes != null && Number.isFinite(Number(duration_minutes))
         ? Number(duration_minutes)
-        : fromClock != null
-          ? fromClock
-          : 60;
+        : defaultDur;
 
     let durationMinutes = Math.min(
       Math.max(rawDur, 15),
